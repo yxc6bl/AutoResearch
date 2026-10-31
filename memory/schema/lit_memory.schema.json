@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "lit_memory（文献记忆）",
+  "description": "所有抓取的文献记录在记忆库中的持久化结构。以 id 为主键去重；同一 id 再次出现时合并 cited_in。由 LiteratureAgent 写入，由 MemoryAgent（组员）读取以做偏好建模。",
+  "type": "object",
+  "required": ["papers"],
+  "properties": {
+    "papers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "url"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "去重主键：arXiv 用 'arxiv:<id>'，DOI 用 'doi:<doi>'，其他用规范化 URL"
+          },
+          "title": { "type": "string" },
+          "authors": { "type": "string", "description": "逗号分隔的作者列表" },
+          "venue": { "type": "string", "description": "来源，如 'arXiv:cs.LG' 或 '中文核心'" },
+          "year": { "type": "string", "description": "4 位年份" },
+          "url": { "type": "string", "format": "uri" },
+          "abstract": { "type": "string", "description": "摘要，建议截断至 ~700 字" },
+          "fetched_at": {
+            "type": "string",
+            "description": "抓取时间，ISO8601，如 2026-10-31T17:20:00"
+          },
+          "source_query": {
+            "type": "string",
+            "description": "本次抓取所用的检索词（英文关键词或主题）"
+          },
+          "cited_in": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "被哪些产出目录引用过，如 ['out_single_v3/round_1']；用于偏好与重要性加权"
+          }
+        }
+      }
+    }
+  },
+  "example": {
+    "papers": [
+      {
+        "id": "arxiv:2312.12345",
+        "title": "A Computer-Aided Diagnosis System for Breast Cancer",
+        "authors": "Chakraborty, A., et al.",
+        "venue": "arXiv:cs.LG",
+        "year": "2023",
+        "url": "https://arxiv.org/abs/2312.12345",
+        "abstract": "A recent study ... (截断至 ~700 字)",
+        "fetched_at": "2026-10-31T17:20:00",
+        "source_query": "random forest diabetes prediction",
+        "cited_in": ["out_single_v3/round_1"]
+      }
+    ]
+  }
+}

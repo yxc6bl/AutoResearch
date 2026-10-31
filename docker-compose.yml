@@ -1,0 +1,17 @@
+services:
+  autoresearch:
+    build:
+      context: .
+      args:
+        EXTRAS: "0"   # 改为 "1" 可一并安装 xgboost / lightgbm / torch
+    image: autoresearch:latest
+
+    # 密钥经 -v 挂载注入容器，不烤进镜像；产物与自有 spec 一并挂载
+    volumes:
+      - ./.env:/app/.env:ro              # 你的 API Key（先 cp .env.example .env）
+      - ./out_docker:/app/out_docker     # 产物落盘到宿主 ./out_docker
+      - ./my_specs:/app/my_specs:ro      # 自有 spec 只读挂载
+
+    # 默认跑内置示例 spec；想跑自己的 spec 取消下面注释并改路径：
+    # command: ["run", "--spec", "my_specs/你的spec.json", "--out", "/app/out_docker"]
+    command: ["run", "--spec", "engine/tasks/proof/wine_sklearn_spec.json", "--out", "/app/out_docker"]

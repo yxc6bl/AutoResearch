@@ -1,0 +1,35 @@
+# ── 密钥与本地配置（绝不入库） ──
+.env
+*.env
+.env.*
+!.env.example
+
+# ── 运行产物（每台机器各自生成） ──
+out_*/
+out_proof/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# ── 临时/调试文件 ──
+_debug*.py
+tmp/
+.tmp/
+*.log
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+
+# ── Python / 前端依赖（网页界面、虚拟环境） ──
+venv/
+.venv/
+env/
+node_modules/
+*.egg-info/
+.dist/
+build/
+
+# ── 记忆库本地数据（由各代理运行时生成） ──
+memory/data/
+*.docx
