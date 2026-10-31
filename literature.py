@@ -66,6 +66,7 @@ def _parse_entries(data: str) -> list[dict]:
             "venue": venue,
             "year": year,
             "url": abs_url,
+            "id": abs_url,
             "abstract": summary[:700],
         })
     return papers

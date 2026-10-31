@@ -190,7 +190,7 @@ def run(query: str, max_results: int = 10, sources: tuple = ("arxiv", "openalex"
     merged = list(existing_same_q)
     seen_this_run = {p.get("id") for p in existing_same_q}
     for c in candidates:
-        pid = c["id"]
+        pid = c.get("id") or c.get("url") or c.get("title", "")
         if pid in all_ids:
             rec = store.get("literature", pid) or {}
             cited = set(rec.get("cited_in", []))

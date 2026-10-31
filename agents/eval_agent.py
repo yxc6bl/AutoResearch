@@ -108,7 +108,19 @@ def check_anti_ai(md: str):
     cliche_hits = {c: md.count(c) for c in AI_CLICHE if md.count(c) > 0}
     for c, n in cliche_hits.items():
         markers.append(f"套话「{c}」出现 {n} 次")
-    paras = [p for p in re.split(r'\n{2,}', md) if p.strip()]
+    # 只统计「正文段落」，排除标题 / 表格 / 列表 / 引用 / 图片 / 加粗行等非段落结构，
+    # 否则一篇结构正常的论文会因大量「第 N 章」标题被误判为单句成段。
+    def _is_prose(p: str) -> bool:
+        s = p.strip()
+        if not s:
+            return False
+        first = s.splitlines()[0].strip()
+        if first.startswith(("#", "|", ">", "!", "*", "-")):
+            return False
+        if re.match(r"^\d+\.\s", first):
+            return False
+        return True
+    paras = [p for p in re.split(r'\n{2,}', md) if _is_prose(p)]
     parallel = 0
     for p in paras:
         lines = [l.strip() for l in p.splitlines() if l.strip()]
@@ -134,7 +146,9 @@ def check_literature(candidates):
         return 0, ["无文献候选数据，无法评判（请先运行 LiteratureAgent）"], "n/a", {}
     n = len(candidates)
     qs = [c.get("quality_score", 0) or 0 for c in candidates]
-    high = sum(1 for q in qs if q >= 1.0)
+    # quality_score 为被引数+时效性算出的 0~1 归一值，故高质量阈值取 0.5，
+    # 而非 1.0（旧写法使 high_quality 恒为 0，统计失真）。
+    high = sum(1 for q in qs if q >= 0.5)
     avg = sum(qs) / len(qs) if qs else 0
     years = [int(c.get("year", 0)) for c in candidates if str(c.get("year", "")).isdigit()]
     span = (max(years) - min(years)) if years else 0
