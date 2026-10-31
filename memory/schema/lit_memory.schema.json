@@ -18,6 +18,14 @@
           "title": { "type": "string" },
           "authors": { "type": "string", "description": "逗号分隔的作者列表" },
           "venue": { "type": "string", "description": "来源，如 'arXiv:cs.LG' 或 '中文核心'" },
+          "source": {
+            "type": "string",
+            "description": "抓取来源通道：'arxiv' 或 'openalex'（v2 多源引入，可选）"
+          },
+          "quality_score": {
+            "type": "number",
+            "description": "质量评分（被引数+时效性启发式，0~1），用于候选排序与后续评判（v2 引入，可选）"
+          },
           "year": { "type": "string", "description": "4 位年份" },
           "url": { "type": "string", "format": "uri" },
           "abstract": { "type": "string", "description": "摘要，建议截断至 ~700 字" },
