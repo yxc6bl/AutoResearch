@@ -26,6 +26,15 @@ import os
 import re
 from pathlib import Path
 
+import sys
+# 让本模块无论从哪个工作目录被调用都能 import 论文模板（单一事实来源）
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from paper.thesis_template import (  # noqa: E402
+    STYLE_RULES, chapter_heading, CHAPTERS,
+)
+
 
 # ── 基础工具 ──────────────────────────────────────────────────────
 def _load(path: Path) -> dict:
@@ -445,6 +454,8 @@ WRITER_SYSTEM = """你是一位严谨的中文学术论文写作者，只做一�
 4. 用中文书面语，段落连贯，避免罗列式短句堆砌。
 5. 严格按要求的 JSON 键输出，不要输出 JSON 以外的任何内容。"""
 
+WRITER_SYSTEM += STYLE_RULES
+
 
 def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
     """把真实素材压成一份给 LLM 的事实包。"""
@@ -593,14 +604,16 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 
     out = {}
 
-    # 第一批：摘要 + 引言 + 相关工作
+    # 第一批：摘要(中英文) + 绪论 + 国内外研究现状
     p1 = f"""{facts}
 
-请基于以上真实素材撰写论文前三部分，输出 JSON：
-{{"abstract": "250-350 字摘要：背景与缺口、本文做什么、关键数字、结论",
+请基于以上真实素材撰写论文前置与绪论部分，输出 JSON：
+{{"abstract": "250-350 字中文摘要（第三人称）：背景与缺口、本文做什么、关键数字、结论",
   "keywords": "5-7 个中文关键词，用；分隔",
-  "intro": "引言 3 段：第1段该方向的实际重要性与现有研究的缺口（引用文献 [编号]）；第2段本文具体要回答的机理问题；第3段本文贡献（编号列出3-4条，都要有具体数字或具体动作）",
-  "related": "相关工作 2-3 段：按主题（不是逐篇罗列）综述上述文献，说明它们各自的立场与局限，并指出本文与它们的关系与差异。必须出现 [编号] 引用。"}}"""
+  "abstract_en": "与中文摘要内容严格一致的英文摘要（English abstract，第三人称，信息点一一对应，不得新增中文摘要没有的数字）",
+  "keywords_en": "对应的英文关键词，逗号分隔",
+  "intro": "绪论正文 3 段（不要写章/节标题，直接写三段正文）：第1段该方向的实际重要性与现有研究的缺口（引用文献 [编号]）；第2段本文具体要回答的机理问题；第3段本文贡献（编号列出3-4条，都要有具体数字或具体动作）",
+  "related": "国内外研究现状正文 2-3 段（不要写标题，直接写正文）：按主题（不是逐篇罗列）综述上述文献，说明它们各自的立场与局限，并指出本文与它们的关系与差异。必须出现 [编号] 引用。"}}"""
     r1 = _llm_json(client, model, extra, p1)
     out.update({k: v for k, v in r1.items() if isinstance(v, str) and v.strip()})
 
@@ -672,6 +685,13 @@ def _fallback_sections(spec, exp, refs, best_method, best_value, main_metric):
         "sub_verdicts": [],
         "discussion": f"结果显示 {best_method} 在本任务设定下占优，但该结论受 {ds} 的样本规模与特征结构约束。",
         "conclusion": f"本文在 {ds} 上得到主指标 {main_metric} 最优结果 {best_method}（{_fmt(best_value)}）；该结果本身不等同于主假设已获验证。",
+        "abstract_en": (
+            f"This paper conducts an empirical study on the "
+            f"{spec.get('direction') or 'machine learning'} task using the {ds} dataset, "
+            f"systematically comparing {_join_methods(spec.get('candidate_methods', []))}. "
+            f"The best-performing method is {best_method} with {main_metric} = {_fmt(best_value)}."
+        ),
+        "keywords_en": "",
         "limitations_extra": "",
     }
 
@@ -699,6 +719,39 @@ def _deterministic_conclusion(spec: dict, analysis: dict, sub_evidence: dict, is
     return (f"本文基于确定性实验证据给出如下结论。{lead}。"
             f"各子假设裁决如下：{body}。"
             f"凡未被证据支持的假设，文中均已如实标注为证据不足，未做粉饰。")
+
+
+# ── 本科毕设必备前置/后置（模板驱动，集中管理便于迭代） ──────────────
+def _build_toc(is_multi: bool) -> str:
+    """生成目录（本科毕设规范：前置→各章→后置）。Markdown 无页码，仅列条目。"""
+    lines = ["摘要（中文）", "Abstract（英文）"]
+    for c in CHAPTERS:
+        lines.append(f"第{c['no']}章 {c['cn']}")
+    lines += ["参考文献", "致谢", "附录：完整指标表"]
+    return "\n".join(lines)
+
+
+def _org_note() -> str:
+    """第一章末尾的「论文组织结构」段落（确定性生成，列真实章节，增强毕设真实感）。"""
+    return ("本文后续章节组织结构如下：第二章综述国内外研究现状并定位本文贡献；"
+            "第三章阐述研究方法与实验协议；第四章说明实验设置与数据预处理；"
+            "第五章报告并分析实验结果；第六章进行深入的机理分析与假设检验；"
+            "第七章讨论发现的适用边界；第八章总结全文并展望未来工作。")
+
+
+def _future_work_note(spec: dict, analysis: dict, is_multi: bool) -> str:
+    """第八章 8.2 未来展望（基于系统真实约束，不编造新事实）。"""
+    return ("本文仅在有限的数据集与随机种子（5 个）下验证结论，后续可在更大规模、"
+            "更多分布的数据集上复现，以检验结论的外推性；亦可引入更多候选方法与更宽的"
+            "超参数搜索空间，并借助 GPU 加速扩展实验规模，进一步压缩多种子方差估计的不确定性。")
+
+
+def _acknowledgements() -> str:
+    """致谢（本科生毕设必备后置部分；用户可据实自行润色）。"""
+    return ("本论文的完成得益于多方面的支持。衷心感谢指导教师在研究选题、方法设计与论文"
+            "撰写各环节给予的悉心指导；感谢同窗在实验复现与讨论中提供的帮助；同时感谢学校"
+            "提供的计算资源与文献数据库访问权限，使本研究得以顺利开展。最后，向在求学路上"
+            "始终给予理解与支持的家人与朋友致以诚挚的谢意。")
 
 
 # ── Markdown → docx ───────────────────────────────────────────────
@@ -926,12 +979,22 @@ def main() -> int:
     parts.append("## 摘要\n")
     parts.append(written.get("abstract", "").strip() + "\n")
     parts.append(f"**关键词：** {written.get('keywords','')}\n")
-    parts.append("## 1 引言\n")
+    _abs_en = written.get("abstract_en", "").strip()
+    if _abs_en:
+        parts.append("\n## Abstract\n")
+        parts.append(_abs_en + "\n")
+        _kw_en = written.get("keywords_en", "").strip()
+        if _kw_en:
+            parts.append(f"**Keywords:** {_kw_en}\n")
+    parts.append("\n## 目录\n")
+    parts.append(_build_toc(is_multi) + "\n")
+    parts.append(chapter_heading("intro") + "\n")
     parts.append(written.get("intro", "").strip() + "\n")
-    parts.append("## 2 相关工作\n")
+    parts.append(_org_note() + "\n")
+    parts.append(chapter_heading("related") + "\n")
     parts.append(written.get("related", "").strip() + "\n")
 
-    parts.append("## 3 方法\n")
+    parts.append(chapter_heading("method") + "\n")
     parts.append(f"### 3.1 问题设定\n")
     if is_multi:
         parts.append(f"本文在多个数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
@@ -971,7 +1034,7 @@ def main() -> int:
     if spec.get("sub_hypotheses"):
         parts.append("待检验的机制化子假设见第 6 节表 2 的裁决。\n")
 
-    parts.append("## 4 实验设置\n")
+    parts.append(chapter_heading("exp_setup") + "\n")
     if is_multi:
         round_txt = "各数据集均取主指标最优的一轮作为报告结果。"
     else:
@@ -1022,7 +1085,7 @@ def main() -> int:
                          f"数据经标准化等必要预处理后按固定比例划分训练集与测试集。"
                          f"实验由确定性分析引擎依据任务规格直接执行候选方法，{round_txt}\n")
 
-    parts.append("## 5 实验结果\n")
+    parts.append(chapter_heading("results") + "\n")
     if is_multi:
         parts.append("### 5.1 跨数据集泛化性对比\n")
         parts.append(_cross_dataset_block(analysis, base) + "\n")
@@ -1058,7 +1121,7 @@ def main() -> int:
                              f"集成模型平均 gap = {h1.get('ensemble_mean_gap','?'):.4f}。"
                              f"结论：{h1.get('conclusion','')}。\n")
 
-    parts.append("## 6 深入分析\n")
+    parts.append(chapter_heading("deep") + "\n")
     parts.append(written.get("deep_analysis", "").strip() + "\n")
     if sub_rows:
         parts.append("**表 2 子假设裁决**\n")
@@ -1067,7 +1130,7 @@ def main() -> int:
         parts.append("待检验的子假设：\n")
         parts.append(sub_table + "\n")
 
-    parts.append("## 7 讨论\n")
+    parts.append(chapter_heading("discussion") + "\n")
     parts.append(written.get("discussion", "").strip() + "\n")
 
     # 结论：始终由证据表 + 真实数字确定性生成，禁止与第 6 节裁决表矛盾
@@ -1076,11 +1139,20 @@ def main() -> int:
     else:
         conclusion_text = (written.get("conclusion", "") or "").strip()
 
-    parts.append("## 8 结论\n")
+    parts.append(chapter_heading("conclusion") + "\n")
     parts.append(conclusion_text + "\n")
 
-    parts.append("## 局限性\n")
+    parts.append("### 8.1 研究局限\n")
     parts.append(limitations_block + "\n")
+
+    parts.append("### 8.2 未来展望\n")
+    parts.append(_future_work_note(spec, analysis, is_multi) + "\n")
+
+    parts.append("## 参考文献\n")
+    parts.append(references_block + "\n")
+
+    parts.append("## 致谢\n")
+    parts.append(_acknowledgements() + "\n")
 
     parts.append("## 附录：完整指标表\n")
     if metrics:
@@ -1099,9 +1171,6 @@ def main() -> int:
             parts.append("（无数据）\n")
     else:
         parts.append("（无数据）\n")
-
-    parts.append("## 参考文献\n")
-    parts.append(references_block + "\n")
 
     paper = "\n".join(parts)
 
