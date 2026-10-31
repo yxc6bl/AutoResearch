@@ -150,4 +150,6 @@ MemoryStore.list(namespace)                -> list[key]
 
 1. 仓库已从压缩包落地为正式工程并初始化 git（见根目录）。
 2. 本文件 + `memory/schema/lit_memory.schema.json` 即"框架契约"，组员可据此接 MemoryAgent。
-3. 我们这边下一步：把 `literature.py` 改为"先查 lit_memory、再抓取、抓完写回（去重）"，使文献记忆真正落地，为组员偏好建模提供数据底座。
+3. **已实现**：`memory/store.py` 提供 MemoryStore 参考实现（get/put/query/list + 四命名空间，本地 JSON）；`agents/literature_agent.py` 封装 `run()`，流程为"先查 literature/ 命名空间去重 → 抓 arXiv → 按 id 去重写回 MemoryStore（合并 cited_in、记 fetched_at/source_query）→ 写 `01_literature.json` 兼容论文生成器"。`auto_research.py` 三处文献调用已切换为 LiteratureAgent。文献记忆真正落地，为组员偏好建模提供数据底座。
+
+> 演进说明：MemoryStore 是"接口契约的参考实现"。组员后续可替换为数据库 / 向量库后端，只要四个方法签名与语义不变，各子代理无需改动（只加不改）。

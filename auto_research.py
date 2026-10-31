@@ -74,12 +74,13 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
             _need_fetch = True
     if _need_fetch:
         try:
-            literature = _load_module(ROOT / "literature.py", "literature")
+            la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
             _q = (spec.get("literature_query") or spec.get("topic")
                   or spec.get("direction") or spec.get("research_question") or "")
             if _q:
-                _papers = literature.build_literature(_q, lit_path, max_results=10)
-                print(f"[literature] 检索到 {len(_papers)} 篇真实文献")
+                _papers = la.run(_q, max_results=10, out_path=lit_path,
+                                 source_tag=str(out_dir))
+                print(f"[literature] 检索/记忆到 {len(_papers)} 篇文献")
             else:
                 lit_path.write_text(json.dumps({"papers": []}, ensure_ascii=False), encoding="utf-8")
         except Exception as e:  # noqa: BLE001
@@ -193,11 +194,13 @@ def cmd_plan(args) -> int:
     # 3) 文献（arXiv，无需 Key）
     if not args.no_literature:
         try:
-            papers = literature.build_literature(
+            la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
+            papers = la.run(
                 spec.get("literature_query") or args.topic,
-                out_dir / "01_literature.json", max_results=10,
+                max_results=10, out_path=out_dir / "01_literature.json",
+                source_tag=str(out_dir),
             )
-            print(f"[literature] 检索到 {len(papers)} 篇真实文献")
+            print(f"[literature] 检索/记忆到 {len(papers)} 篇文献")
         except Exception as e:  # noqa: BLE001
             print(f"[literature] 检索失败（不影响主流程）：{e}")
 
@@ -254,9 +257,11 @@ def cmd_iterate(args) -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         if not args.no_literature and not (out_dir / "01_literature.json").exists():
             try:
-                literature.build_literature(
+                la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
+                la.run(
                     prev_spec.get("literature_query") or args.topic,
-                    out_dir / "01_literature.json", max_results=10,
+                    max_results=10, out_path=out_dir / "01_literature.json",
+                    source_tag=str(out_dir),
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[literature] 检索失败（不影响主流程）：{e}")
