@@ -96,42 +96,27 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
         json.dumps(hyps, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    # 3) 确定性分析（数据集与方法全部从 spec 解析）
+    # 3) 确定性分析（ExperimentAgent 封装，写 project memory）
     exp_path = out_dir / "03_experiment.json"
-    mod_spec = importlib.util.spec_from_file_location("analysis_engine", ANALYSIS_ENGINE)
-    ae = importlib.util.module_from_spec(mod_spec)
-    mod_spec.loader.exec_module(ae)
-    # 只有 ≥2 个有效数据集才进入多数据集模式。
-    # 若规划器只给出 1 个数据集（或列表在校验后被过滤到只剩 1 个），仍按单数据集处理，
-    # 否则 run_multi_analysis 会产出只有一行的「跨数据集对比表」，反而制造新的虚假表述。
-    _ds_list = spec.get("datasets") or spec.get("data_list") or []
-    if _ds_list and len(_ds_list) >= 2:
-        # 多数据集对比：run_multi_analysis 内部写 per-dataset 结果 + combined
-        analysis = ae.run_multi_analysis(spec, exp_path)
-    else:
-        analysis = ae.run_analysis(spec, exp_path)
-        # run_analysis 返回的就是扁平 ANALYSIS_JSON，直接落盘
-        exp_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")
+        analysis = ea.run(spec, exp_path)
+    except Exception as e:  # noqa: BLE001
+        result["errors"].append("实验分析失败: " + str(e))
+        return result
 
     result: dict = {"analysis": analysis, "out_dir": str(out_dir), "paper": None, "errors": []}
     if analysis.get("error"):
         result["errors"].append("分析失败: " + str(analysis["error"]))
         return result
 
-    # 4) 生成论文（失败不影响分析产物）
+    # 4) 生成论文（WritingAgent 封装，失败不影响分析产物）
     if make_paper:
         try:
-            proc = subprocess.run(
-                [
-                    sys.executable, str(GEN_PAPER),
-                    "--output-dir", str(out_dir),
-                    "--task-spec", str(out_dir / "task_spec.json"),
-                ],
-                capture_output=True, text=True, cwd=str(ROOT), timeout=600,
-                env=_env_with_dotenv(),
-            )
-            if proc.returncode != 0:
-                result["errors"].append("generate_paper 失败: " + (proc.stderr or "")[-2500:])
+            wa = _load_module(ROOT / "agents" / "writing_agent.py", "writing_agent")
+            _wres = wa.run(out_dir, out_dir / "task_spec.json")
+            if _wres["returncode"] != 0:
+                result["errors"].append("generate_paper 失败: " + (_wres["stderr"] or ""))
             else:
                 paper = out_dir / "06_paper" / "paper_full.docx"
                 result["paper"] = str(paper) if paper.exists() else None
@@ -208,7 +193,8 @@ def cmd_plan(args) -> int:
     client, model, extra = planner.llm_client()
     if client is None:
         print("[warn] 未检测到 API Key（.env 中 OPENAI_API_KEY），使用模板 spec 降级运行。")
-    spec = planner.plan_spec(args.topic, client, model, extra, data_override)
+    pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
+    spec = pa.run(args.topic, client, model, extra, data_override)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task_spec.json").write_text(
@@ -265,7 +251,8 @@ def cmd_iterate(args) -> int:
     if client is None:
         # 无 Key：退回单次 plan + 跑（不迭代）
         print("[warn] 未检测到 API Key，迭代回路不可用，执行单次 plan + 分析。")
-        spec = planner.plan_spec(args.topic, None, None, None, data_override)
+        pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
+        spec = pa.run(args.topic, None, None, None, data_override)
         out_dir = Path(args.out) / "round_1"
         out_dir.mkdir(parents=True, exist_ok=True)
         res = run_task(spec, out_dir, make_paper=not args.no_paper)
@@ -274,7 +261,8 @@ def cmd_iterate(args) -> int:
                         ensure_ascii=False, indent=2))
         return 0
 
-    prev_spec = planner.plan_spec(args.topic, client, model, extra, data_override)
+    pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
+    prev_spec = pa.run(args.topic, client, model, extra, data_override)
     rounds = max(1, args.rounds)
     prev_result = None
     history = []

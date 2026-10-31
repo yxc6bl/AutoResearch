@@ -36,8 +36,8 @@
                         │                    │
                  ┌──────▼──────┐      ┌──────▼──────┐
                  │ WritingAgent│      │  EvalAgent  │
-                 │(generate_   │      │(audit_consistency│
-                 │  paper.py)  │      │  扩展为评分门) │
+                 │(agents/     │      │(agents/     │
+                 │ writing_)   │      │ eval_agent) │
                  └──────┬──────┘      └─────────────┘
                         │
                  ┌──────▼──────┐
@@ -123,11 +123,11 @@ MemoryStore.list(namespace)                -> list[key]
 
 | 代理 | 输入 | 输出 | 负责方 |
 |------|------|------|--------|
-| LiteratureAgent | `query, max_results` | 增量写入 `lit_memory` | 我们（先改 literature.py 接 MemoryStore） |
-| PlanningAgent | `topic / query` | `spec` JSON | 我们（planner.py 封装） |
-| ExperimentAgent | `spec` | `03_experiment.json`（真实数字） | 我们（analysis_engine.py 封装） |
-| WritingAgent | `spec + analysis + style_profile` | `paper`（md/docx） | 我们（generate_paper.py 接 style_profile） |
-| EvalAgent | `paper + analysis` | `verdict`（评分门） | 我们（audit_consistency.py 升级） |
+| LiteratureAgent | `query, max_results` | 增量写入 `lit_memory` | 已实现（agents/literature_agent.py） |
+| PlanningAgent | `topic / query` | `spec` 写 `project/spec` | 已实现（agents/planning_agent.py） |
+| ExperimentAgent | `spec` | `03_experiment.json` 写 `project/analysis` | 已实现（agents/experiment_agent.py） |
+| WritingAgent | `spec + analysis` | `paper`(md/docx) 写 `project/paper` | 已实现（agents/writing_agent.py，style_profile 待组员接入） |
+| EvalAgent | `paper + 文献候选` | `verdict` 评分门（07_eval_verdict.json） | 已实现（agents/eval_agent.py） |
 | MemoryAgent | `lit_memory + 使用者行为` | `user_profile / style_profile` | **组员** |
 
 所有代理通过 MemoryStore 传递状态；Orchestrator 只做调度，不内联业务逻辑。
@@ -152,5 +152,6 @@ MemoryStore.list(namespace)                -> list[key]
 2. 本文件 + `memory/schema/lit_memory.schema.json` 即"框架契约"，组员可据此接 MemoryAgent。
 3. **已实现**：`memory/store.py` 提供 MemoryStore 参考实现（get/put/query/list + 四命名空间，本地 JSON）；`agents/literature_agent.py` 封装 `run()`，v2 已升级为多源抓取（arxiv + OpenAlex，免费无 Key）+ `quality_score` 质量评分 + 选择窗口（`select()` 默认取 top_n，并输出 `02_literature_candidates.json` 供网页界面渲染为勾选框实现「使用者自选」）。`auto_research.py` 三处文献调用已切换为 LiteratureAgent。文献记忆真正落地，为组员偏好建模提供数据底座。
 4. **已实现（EvalAgent 评分门）**：`agents/eval_agent.py` 升级自 `audit_consistency.py`，落地导师「让 AI 评判文献与论文质量」的要求。五个维度——① consistency 真实性硬门（复用裁决表/结论一致性 + 素材谎言检测，不过即 fail）；② structure 毕业论文章节完整度 rubric；③ authenticity 参考文献与 [N] 引用对应 + 真实数字承载；④ anti_ai 反 AI 腔启发式（套话/排比/单句成段）；⑤ literature 文献质量（quality_score/数量/跨度）。`auto_research.py` 在每轮论文生成后自动调用，verdict 落 `07_eval_verdict.json`，print 评分摘要；通过阈值：硬门满分且综合 ≥70。
+5. **已实现（子代理拆分完成）**：`agents/` 下 PlanningAgent / ExperimentAgent / WritingAgent 薄壳已落地，分别封装 `planner.py`、`engine/analysis_engine.py`、`paper/generate_paper.py`，并把 `spec` / `analysis` / `paper` 状态写入 MemoryStore 的 `project` 命名空间（供组员 project memory 与偏好建模读取）。`auto_research.py` 已全面切换为调用这些 agent（保留降级与错误逻辑）。至此五个子代理（Literature / Planning / Experiment / Writing / Eval）全部模块化，仅 MemoryAgent（个性化）由组员负责。
 
 > 演进说明：MemoryStore 是"接口契约的参考实现"。组员后续可替换为数据库 / 向量库后端，只要四个方法签名与语义不变，各子代理无需改动（只加不改）。
