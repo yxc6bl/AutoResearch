@@ -4,7 +4,7 @@
 
 落地导师要求：「让 AI 评判抓的文献质量好不好、写出的论文质量好不好」。
 
-五个评分维度：
+六个评分维度：
   1. consistency（真实性硬门）：复用 audit_consistency 的裁决表 vs 结论一致性 +
      素材谎言检测。不过即 fail，是「零编造」底线的守门员。
   2. structure（结构完整度）：对照毕业论文章节 rubric 检查必备章节是否齐全。
@@ -12,6 +12,9 @@
      论文是否承载真实实验数字。
   4. anti_ai（反 AI 腔）：启发式检测套话、≥3 句同开头排比、单句成段等 AI 写作痕迹。
   5. literature（文献质量）：基于抓取候选的 quality_score / 数量 / 时间跨度评判。
+  6. content_quality（内容严谨度）：对照 985 优秀论文标准（清北 / 上交），启发式检查
+     文献综述逻辑组织、各章小结、创新点 / 独立见解标注、实验严谨度、
+     图表公式规范、参考文献质量与时效——这是 985 与普通毕设的核心差距。
 
 门控规则：硬门（consistency）必须满分，且综合分 ≥ 70，verdict.passed 才为 True。
 Orchestrator 据此决定是否打回重做。
@@ -154,6 +157,81 @@ def check_literature(candidates):
     return max(0, min(100, score)), issues, grade, {"count": n, "high_quality": high, "avg_q": round(avg, 2), "span": span}
 
 
+def _slice_chapter(md: str, start_hint: str, end_hints):
+    """截取从含 start_hint 的标题到下一个含 end_hints 任一标题之间的正文。"""
+    lines = md.splitlines()
+    start = None
+    for i, l in enumerate(lines):
+        if re.match(r'^#{1,4}\s+.*' + re.escape(start_hint), l):
+            start = i
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        for h in end_hints:
+            if re.match(r'^#{1,4}\s+.*' + re.escape(h), lines[j]):
+                end = j
+                break
+        if end != len(lines):
+            break
+    return "\n".join(lines[start:end])
+
+
+def check_content_quality(md: str):
+    """对照 985 优秀论文标准（清北 / 上交）的启发式内容严谨度检查。
+
+    这是 985 级与普通毕设的真正差距所在：不在于格式，而在于论证深度与严谨度。
+    涵盖六项：文献综述逻辑组织、各章小结、创新点标注、实验严谨度、图表公式规范、
+    参考文献质量与时效。
+    """
+    issues = []
+
+    # 第2章 国内外研究现状
+    related = _slice_chapter(md, "国内外研究现状", ["研究方法"])
+    rel_cites = len(re.findall(r'\[\d+\]', related)) if related else 0
+    rel_oriented = bool(re.search(r'本文|本文提出|本文与|差异|不同|局限', related or ""))
+    if rel_cites < 3 or not rel_oriented:
+        issues.append("文献综述疑似流水账（引用<3 或 未定位本文差异）")
+
+    # 各章小结
+    xj = md.count("小结")
+    if xj < 2:
+        issues.append(f"仅 {xj} 处「小结」，缺少各章小结")
+
+    # 创新点 / 独立见解（侧重结论章）
+    concl = _slice_chapter(md, "结论与展望", ["参考文献"])
+    innov = bool(re.search(r'创新|独立见解|本文提出|本文贡献|本文设计', concl or md))
+    if not innov:
+        issues.append("结论未明确创新点 / 独立见解，或未区分本人与他人工作")
+
+    # 实验严谨度
+    exp = _slice_chapter(md, "实验设置与数据", ["实验结果与分析"]) or ""
+    exp += _slice_chapter(md, "实验结果与分析", ["深入分析与"]) or ""
+    rigor = bool(re.search(r'基线|baseline|方差|种子|交叉验证|消融|对比', exp or "", re.I))
+    if not rigor:
+        issues.append("实验叙述缺对比基线 / 稳健性 / 消融分析")
+
+    # 图表公式规范
+    fig_ok = bool(re.search(r'如图\s*\d|表\s*\d|如下表|图\s*\d', md))
+    eq_ok = bool(re.search(r'式\s*[（(]\d|公式', md))
+    if not (fig_ok and eq_ok):
+        issues.append("图表 / 公式编号引用不规范或缺失")
+
+    # 参考文献质量与时效
+    cites_total = len(set(int(x) for x in re.findall(r'\[(\d+)\]', md)))
+    if cites_total < 20:
+        issues.append(f"参考文献引用总数 {cites_total}（985 通常 ≥20）")
+    years = [int(y) for y in re.findall(r'\b(?:19|20)\d{2}\b', md)]
+    recent5 = sum(1 for y in years if 2021 <= y <= 2026)
+    recent2 = sum(1 for y in years if 2025 <= y <= 2026)
+    if cites_total >= 20 and years and (recent5 < 5 or recent2 < 1):
+        issues.append("参考文献缺乏近五年 / 近两年文献")
+
+    score = 100 - len(issues) * 12
+    return max(0, min(100, score)), issues
+
+
 def run(paper_path, lit_candidates=None, store=None, out_path=None):
     """主入口：对一篇论文给出评分门 verdict。"""
     md = Path(paper_path).read_text(encoding="utf-8")
@@ -215,8 +293,18 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None):
         if "数量" in i:
             verdict["suggestions"].append("增加文献抓取量与质量（已支持 arxiv+OpenAlex 多源与 quality_score）")
 
+    # 6) 内容严谨度（985 级门槛）
+    cq, cqis = check_content_quality(md)
+    verdict["scores"]["content_quality"] = cq
+    for i in cqis:
+        verdict["issues"].append("内容严谨度：" + i)
+    if any('流水账' in i or '小结' in i for i in cqis):
+        verdict["suggestions"].append("文献综述按主题组织并定位本文差异；各章补「本章小结」")
+    if any('创新点' in i or '实验叙述' in i for i in cqis):
+        verdict["suggestions"].append("结论明确创新点 / 独立见解；实验补充对比基线与稳健性证据")
+
     # 综合与门控
-    overall = round(0.4 * consistency + 0.2 * st + 0.15 * au + 0.1 * ai + 0.15 * lits, 1)
+    overall = round(0.35 * consistency + 0.15 * st + 0.1 * au + 0.1 * ai + 0.1 * lits + 0.2 * cq, 1)
     verdict["overall"] = overall
     verdict["scores"]["overall"] = overall
     hard_ok = consistency == 100 and not hard
