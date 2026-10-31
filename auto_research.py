@@ -135,6 +135,32 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
             else:
                 paper = out_dir / "06_paper" / "paper_full.docx"
                 result["paper"] = str(paper) if paper.exists() else None
+                # 5) 质量评分门（EvalAgent）：评判文献质量 + 论文质量，给出 verdict
+                try:
+                    ea = _load_module(ROOT / "agents" / "eval_agent.py", "eval_agent")
+                    _md = out_dir / "06_paper" / "paper_full.md"
+                    _litc = out_dir / "02_literature_candidates.json"
+                    _cands = None
+                    if _litc.exists():
+                        try:
+                            _d = json.loads(_litc.read_text(encoding="utf-8"))
+                            _cands = _d if isinstance(_d, list) else (_d.get("papers") or [])
+                        except Exception:
+                            _cands = None
+                    if _md.exists():
+                        _verdict = ea.run(
+                            str(_md), lit_candidates=_cands,
+                            out_path=out_dir / "06_paper" / "07_eval_verdict.json")
+                        result["eval"] = _verdict
+                        _ok = "[通过]" if _verdict["passed"] else "[未通过(建议重做)]"
+                        print(f"[EvalAgent] 质量评分门：{_ok} | 综合 {_verdict['overall']} | "
+                              f"硬门 {_verdict['gate']} | 文献 {_verdict.get('literature_grade')}")
+                        if not _verdict["passed"]:
+                            print(f"[EvalAgent] 主要问题：{'; '.join(_verdict['issues'][:5])}")
+                    else:
+                        print("[EvalAgent] 未找到 paper_full.md，跳过评分")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[EvalAgent] 评分失败（不影响主流程）：{e}")
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"generate_paper 异常: {e}")
 
