@@ -458,7 +458,7 @@ WRITER_SYSTEM = """你是一位严谨的中文学术论文写作者，只做一�
 铁律（违反即不合格）：
 1. 只能使用素材中出现的数值、方法名、数据集名、文献、结论。**不得引入任何素材以外的数字、文献、方法或事实**。
 2. 不得夸大。若某个命题素材不支持，就明说"证据不足/未获支持"，不得粉饰。
-3. 不得写空话套话（如"具有重要意义""被广泛采用""值得进一步研究"），每句话都要承载具体信息（具体数字、具体方法、具体机制）。
+3. 不得写空话套话（如"具有重要意义""被广泛采用""值得进一步研究""综上所述""总而言之""值得注意的是""需要指出的是""不难看出""近年来受到广泛关注""随着…的发展"），每句话都要承载具体信息（具体数字、具体方法、具体机制）；严禁用段首连接词起句。
 4. 用中文书面语，段落必须由 3-5 句组成，句子之间靠因果、递进、对比自然衔接，长短句搭配；严禁单句成段，严禁罗列式短句堆砌。语言一致性铁律：除（a）约定字段 abstract_en 按要求写英文摘要、（b）参考文献原文（作者、标题、刊名须保留英文，不得翻译）之外，所有正文、本章小结、章节叙述一律使用中文书面语；绪论、背景、国内外研究现状等叙述性章节尤其不得出现整段英文。
 5. 严格按要求的 JSON 键输出，不要输出 JSON 以外的任何内容。
 6. 正文只写本章的论证内容，绝对不要在正文中写「本章小结」（分章小结由系统统一注入到章末）；若某章确有局限需要点明，请融入正文论述，不要单独成段小结。
@@ -684,6 +684,54 @@ def _merge_short_paragraphs(md: str) -> str:
             flush()
             out_blocks.append(blk)
     flush()
+    return "\n\n".join(out_blocks)
+
+
+# 段首套话前缀（删除后仍通顺的连接副词），用于反 AI 腔确定性后处理
+_CLICHE_PREFIXES = [
+    "综上所述，", "综上所述。",
+    "总而言之，", "总而言之。",
+    "值得注意的是，",
+    "需要指出的是，",
+    "不难看出，",
+    "毋庸置疑，",
+    "本文的贡献在于",
+    "本文的创新点在于",
+]
+
+
+def _strip_cliche(md: str) -> str:
+    """反 AI 腔后处理：删除段落首行开头的套话连接词（如「综上所述，」）。
+
+    这些连接副词删去后句子首词直接承接、语法仍通顺，但能显著降低
+    AIGC 检测的套话特征值。只作用于「块的首行开头」，不误伤正文内的正常用法；
+    标题、表格、列表、编号行一律跳过。
+    """
+    blocks = re.split(r"\n{2,}", md)
+    out_blocks = []
+    for blk in blocks:
+        lines = blk.splitlines()
+        if not lines:
+            out_blocks.append(blk)
+            continue
+        new_lines = []
+        for ln in lines:
+            s = ln.strip()
+            # 排除结构行（标题 / 表格 / 引用 / 列表 / 编号行 / 加粗行），不处理
+            if (s.startswith(("#", "|", ">", "!", "*", "-"))
+                    or re.match(r"^\d+\.\s", s)
+                    or (s.startswith("**") and s.endswith("**"))):
+                new_lines.append(ln)
+                continue
+            new_s = s
+            for p in _CLICHE_PREFIXES:
+                if new_s.startswith(p):
+                    new_s = new_s[len(p):].strip()
+                    if new_s and new_s[0] in "，,。；;":
+                        new_s = new_s[1:].strip()
+                    break
+            new_lines.append(new_s)
+        out_blocks.append("\n".join(new_lines))
     return "\n\n".join(out_blocks)
 
 
@@ -1439,6 +1487,8 @@ def main() -> int:
 
     # ── 反 AI 腔后处理：合并 / 折行单行短段，压低单句成段比例 ──
     paper = _merge_short_paragraphs(paper)
+    # 删除段首套话连接词（综上所述 / 总而言之 / 值得注意的是 …）
+    paper = _strip_cliche(paper)
 
     out_md = base / "06_paper" / "paper_full.md"
     out_md.parent.mkdir(parents=True, exist_ok=True)
