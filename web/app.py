@@ -27,7 +27,8 @@ from web.render import collect_result, verdict_to_html  # noqa: E402
 
 # 发布到云端时由启动环境注入；默认 0.0.0.0 允许外部访问，本地调试可设 WEB_HOST=127.0.0.1
 HOST = os.environ.get("WEB_HOST", "0.0.0.0")
-PORT = int(os.environ.get("WEB_PORT", "5000"))
+# 发布沙箱注入标准 PORT 环境变量；本地调试可用 WEB_PORT，再回退 5000
+PORT = int(os.environ.get("PORT") or os.environ.get("WEB_PORT") or "5000")
 
 # 内存任务表：task_id -> {proc, log(list), status, out_dir, error}
 TASKS: dict[str, dict] = {}

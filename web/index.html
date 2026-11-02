@@ -116,7 +116,8 @@
     <h3 style="margin-bottom:8px">打开已有结果</h3>
     <input id="openDir" placeholder="产物目录，如 out_eval3/round_1 或 out_web/task_0001">
     <button class="btn-open" id="openBtn">📂 加载并查看</button>
-    <div class="hint">直接读取本地已生成产物，无需重新运行（可避开 API 限流）。</div>
+    <button class="btn-demo" id="demoBtn" style="margin-left:8px">✨ 载入演示成果</button>
+    <div class="hint">直接读取本地已生成产物，无需重新运行（可避开 API 限流）。点「载入演示成果」可一键查看已生成的示例论文（综合 97.8 分）。</div>
 
     <div class="status" id="status"></div>
     <div class="term" id="term"></div>
@@ -184,6 +185,11 @@ el('openBtn').onclick=()=>{
   fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'open',dir})})
     .then(r=>r.json()).then(d=>{ if(d.task_id) loadResult(d.task_id); else setStatus('加载失败','failed'); })
     .catch(e=>setStatus('请求失败：'+e,'failed'));
+};
+
+el('demoBtn').onclick=()=>{
+  el('openDir').value='demo_results/out_eval3/round_1';
+  el('openBtn').click();
 };
 
 function pollTask(id){
