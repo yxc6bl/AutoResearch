@@ -74,10 +74,9 @@ def detect_lies(md: str):
     for m in re.finditer(r"素材未提供跨数据集对比表", md):
         s = max(0, m.start() - 20)
         flags.append("跨数据集表缺失声明：" + md[s:m.end() + 10].replace("\n", " "))
-    # 3) 在有真实数字处却声称「素材未提供 … 无法 …」的强谎言（须同时出现未提供+无法）
-    for m in re.finditer(r"素材未提供.{0,40}无法", md):
-        s = max(0, m.start() - 20)
-        flags.append("未提供且无法：" + md[s:m.end() + 10].replace("\n", " "))
+    # 注：早期版本曾有规则 #3（「素材未提供…无法」笼统判定为谎言），但该模式会反复误伤
+    # 正当的「数据缺口/局限性」诚实声明（如「数据集未提供分频段误差分布，无法判断…」本就属实），
+    # 故移除；真正的数值矛盾由下方 parse_verdict_table vs parse_conclusion 一致性校验兜底。
     return flags
 
 

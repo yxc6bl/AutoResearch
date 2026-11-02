@@ -778,7 +778,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 
 请基于以上真实素材撰写论文前置与绪论部分，输出 JSON：
 {{"abstract": "250-350 字中文摘要（第三人称）：背景与缺口、本文做什么、关键数字、结论",
-  "keywords": "5-7 个中文关键词，用；分隔",
+  "keywords": "3-4 个中文关键词，每词不超过6个汉字，用；分隔（如：翼型噪声；随机森林；回归预测）",
   "abstract_en": "与中文摘要内容严格一致的英文摘要（English abstract，第三人称，信息点一一对应，不得新增中文摘要没有的数字）",
   "keywords_en": "对应的英文关键词，逗号分隔",
   "intro": "绪论正文 3 段（不要写章/节标题，直接写三段正文）：第1段该方向的实际重要性与现有研究的缺口（引用文献 [编号]）；第2段本文具体要回答的机理问题；第3段本文贡献（编号列出3-4条，都要有具体数字或具体动作）",
@@ -849,9 +849,10 @@ def _fallback_sections(spec, exp, refs, best_method, best_value, main_metric):
             f"确定性分析引擎依据任务规格执行实验，主指标 {main_metric} 的最优结果为 "
             f"{best_method} 的 {_fmt(best_value)}。{claim}"
         ),
-        "keywords": "；".join(filter(None, [spec.get("topic", ""), ds,
-                                            _join_methods(spec.get("candidate_methods", [])[:2]),
-                                            main_metric])),
+        "keywords": (lambda cs: "；".join(cs[:4]) if cs else (spec.get("topic", "") or "机器学习"))(
+            [k.strip() for k in [spec.get("topic", ""), ds, main_metric]
+             + _join_methods(spec.get("candidate_methods", [])).split("、")[:2] if k and len(k) <= 6]
+        ),
         "intro": (
             f"{spec.get('direction','')} 的方法选型长期依赖经验而非受控对比。"
             f"本文聚焦的具体机理问题是：{spec.get('research_question','')}。"
@@ -1172,6 +1173,28 @@ def main() -> int:
 
     parts = []
     parts.append(f"# {title}\n")
+    # ── 深圳技术大学前置结构（按公文通装订顺序：封面→诚信声明→目录→摘要） ──
+    parts.append(
+        "## 封面\n"
+        "> 以下为深圳技术大学本科毕业论文（设计）封面要素；正式提交前请套用学校统一封面模板并打印手签。\n\n"
+        f"- 论文题目：{title}\n"
+        "- 学院：（待填，如 健康与环境工程学院）\n"
+        "- 专业：（待填）\n"
+        "- 学生姓名：（待填）\n"
+        "- 学号：（待填）\n"
+        "- 指导教师：（待填）\n"
+        "- 提交日期：（待填，格式 YYYY 年 MM 月）\n\n"
+    )
+    parts.append(
+        "## 诚信声明\n\n"
+        "本人郑重声明：所提交的毕业论文（设计）是本人在指导教师指导下独立进行研究工作所取得的成果。"
+        "论文中凡引用他人已经发表或未发表的成果、数据、观点等，均已明确注明出处。除文中已经注明引用的内容外，"
+        "本论文不包含任何其他个人或集体已经发表或撰写过的作品成果。对本文的研究做出重要贡献的个人和集体，"
+        "均已在文中以明确方式标明。本人完全意识到本声明的法律结果由本人承担。\n\n"
+        "（此处须本人亲笔签名并注明日期）\n\n"
+    )
+    parts.append("## 目录\n")
+    parts.append(_build_toc(is_multi) + "\n")
     parts.append("## 摘要\n")
     parts.append(written.get("abstract", "").strip() + "\n")
     parts.append(f"**关键词：** {written.get('keywords','')}\n")
@@ -1182,8 +1205,6 @@ def main() -> int:
         _kw_en = written.get("keywords_en", "").strip()
         if _kw_en:
             parts.append(f"**Keywords:** {_kw_en}\n")
-    parts.append("\n## 目录\n")
-    parts.append(_build_toc(is_multi) + "\n")
     parts.append(chapter_heading("intro") + "\n")
     parts.append(written.get("intro", "").strip() + "\n")
     parts.append(_org_note() + "\n")

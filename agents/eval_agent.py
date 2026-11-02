@@ -308,9 +308,152 @@ def check_writing_norms(md: str):
     else:
         recency_score = 100 if (recent5 >= 5 and recent2 >= 1) else 70
         rec_issue = [] if recency_score == 100 else ["参考文献缺乏近五年 / 近两年文献"]
-    score = round(0.5 * ai + 0.3 * format_score + 0.2 * recency_score)
-    issues = list(ai_markers) + fmt_issue + rec_issue
+    # 深技大格式合规（关键词/摘要/字数/前置/外文文献）并入撰写规范维度
+    fmt_norm, fmt_norm_issues = check_format_compliance(md)
+    score = round(0.45 * ai + 0.25 * format_score + 0.15 * recency_score + 0.15 * fmt_norm)
+    issues = list(ai_markers) + fmt_issue + rec_issue + fmt_norm_issues
     return max(0, min(100, score)), issues
+
+
+def _cn_sentences(md: str):
+    """提取中文叙述性句子（≥12字），排除标题/表格/列表/代码/引用/参考文献条目。"""
+    out = []
+    for p in re.split(r'\n{2,}', md):
+        s = p.strip()
+        if not s:
+            continue
+        if s.startswith(('#', '|', '>', '!', '*', '-', '```')):
+            continue
+        if re.match(r'^\d+\.\s', s):
+            continue
+        if re.match(r'^\[\d+\]', s):  # 参考文献条目
+            continue
+        for seg in re.split(r'(?<=[。！？；])', s):
+            seg = seg.strip()
+            if len(seg) >= 12:
+                out.append(seg)
+    return out
+
+
+def _cjk4grams(text: str):
+    chars = [c for c in text if '一' <= c <= '鿿']
+    if len(chars) < 4:
+        return set()
+    return set(''.join(chars[i:i + 4]) for i in range(len(chars) - 3))
+
+
+def check_duplication(md: str, lit_candidates=None):
+    """本地查重预估（仅本地自检，不含知网全网库）。
+
+    深技大规定：知网文字重合率 <30% 合格，校级优秀 <20%。本函数无法直接调
+    知网，故用三路可控信号估算「论文自身重复 + 与参考文献标题逐字复刻」的重合率，
+    作为提交前自检。信号：
+      (1) 自重复：论文内两句话 4-gram Jaccard≥0.7 且长度接近 → 判定近重复；
+      (2) 标题复刻：论文章节句与参考文献标题 4-gram Jaccard≥0.8 且重叠≥8字。
+    返回 estimated_rate(0~1)、self_rate、title_rate、样本与告警级别。
+    """
+    sents = _cn_sentences(md)
+    if len(sents) < 5:
+        return {"estimated_rate": 0.0, "self_rate": 0.0, "title_rate": 0.0,
+                "samples": [], "flag": None}
+    grams = [_cjk4grams(s) for s in sents]
+    dup, flagged, samples = 0, set(), []
+    for i in range(len(sents)):
+        if i in flagged or not grams[i]:
+            continue
+        for j in range(i + 1, len(sents)):
+            if j in flagged or not grams[j]:
+                continue
+            inter = len(grams[i] & grams[j])
+            union = len(grams[i] | grams[j])
+            if not union:
+                continue
+            if inter / union >= 0.7:
+                li, lj = len(sents[i]), len(sents[j])
+                if abs(li - lj) <= max(5, 0.3 * max(li, lj)):
+                    flagged.add(j)
+                    dup += 1
+                    if len(samples) < 5:
+                        samples.append(sents[j][:38])
+                    break
+    self_rate = dup / len(sents)
+
+    titles = [c.get('title', '') for c in (lit_candidates or [])
+              if isinstance(c, dict) and c.get('title')]
+    title_rate = 0.0
+    if titles:
+        tgrams = [_cjk4grams(t) for t in titles]
+        overlap = 0
+        for g in grams:
+            if not g:
+                continue
+            for tg in tgrams:
+                if not tg:
+                    continue
+                inter = len(g & tg)
+                union = len(g | tg)
+                if union and inter / union >= 0.8 and inter >= 8:
+                    overlap += 1
+                    break
+        title_rate = overlap / len(sents)
+
+    est = min(1.0, self_rate + 0.5 * title_rate)
+    flag = None
+    if est >= 0.30:
+        flag = "fail(≥30% 合格线)"
+    elif est >= 0.20:
+        flag = "warn(≥20% 校级优秀线)"
+    return {"estimated_rate": round(est, 4), "self_rate": round(self_rate, 4),
+            "title_rate": round(title_rate, 4), "samples": samples, "flag": flag}
+
+
+def check_format_compliance(md: str):
+    """深技大格式合规（计入撰写规范维度）：关键词 3-4个且每词≤6字、中文摘要≥200字、
+    全文中文≥12000字、必备前置「封面」「诚信声明」、外文文献≥2篇。"""
+    issues = []
+    score = 100
+    # 关键词
+    m = re.search(r'关键词[：:]\s*(.+)', md)
+    if m:
+        kws = [k.strip().strip('*').strip('`').strip() for k in re.split(r'[；;]', m.group(1)) if k.strip()]
+        if len(kws) > 4:
+            issues.append(f"关键词 {len(kws)} 个（深技大要求 3-4 个）")
+            score -= 15
+        over = [k for k in kws if len(k) > 6]
+        if over:
+            issues.append(f"关键词超长：{over}（每词应≤6字）")
+            score -= 10
+    else:
+        issues.append("未找到关键词")
+        score -= 20
+    # 中文摘要字数
+    am = re.search(r'#+\s*摘要\s*\n(.*?)\n#+\s*Abstract', md, re.S)
+    if am:
+        cn = sum(1 for c in am.group(1) if '一' <= c <= '鿿')
+        if cn < 200:
+            issues.append(f"中文摘要 {cn} 字（深技大要求≥200字）")
+            score -= 15
+    # 全文字数
+    cn_all = sum(1 for c in md if '一' <= c <= '鿿')
+    if cn_all < 12000:
+        issues.append(f"全文中文 {cn_all} 字（深技大要求≥12000字）")
+        score -= 15
+    # 必备前置
+    if '诚信声明' not in md:
+        issues.append("缺少「诚信声明」章节（深技大必备前置）")
+        score -= 10
+    if '封面' not in md:
+        issues.append("缺少「封面」要素（深技大必备前置）")
+        score -= 10
+    # 外文文献≥2
+    mr = re.search(r'#{1,4}\s*参考文献', md)
+    ref = md[mr.start():] if mr else ""
+    ref_items = re.findall(r'^\[\d+\].*$', ref, re.M)
+    foreign = sum(1 for it in ref_items if re.search(r'[A-Za-z]{4,}', it))
+    if foreign < 2:
+        issues.append(f"外文文献 {foreign} 篇（深技大要求≥2篇）")
+        score -= 10
+    return max(0, score), issues
 
 
 def _review_organization(md: str):
@@ -407,6 +550,21 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None):
             verdict["suggestions"].append("补充图表 / 公式编号引用，符合学术规范")
         if "参考文献" in i:
             verdict["suggestions"].append("补充近五年 / 近两年文献，引用总数达到 ≥20")
+
+    # 7) 查重预估自检（深技大：知网重合率 <30% 合格、校级优秀 <20%）
+    dup = check_duplication(md, cands)
+    verdict["estimated_plagiarism_rate"] = dup["estimated_rate"]
+    verdict["plagiarism_flag"] = dup["flag"]
+    verdict["plagiarism_samples"] = dup["samples"]
+    if dup["flag"]:
+        _pct = f"{dup['estimated_rate'] * 100:.1f}%"
+        _msg = ("估计重合率 " + _pct + "，已达或超过校级优秀线 20%（合格线 30%），"
+                if dup["estimated_rate"] >= 0.20 else
+                "估计重合率 " + _pct + "，接近校级优秀线 20%，")
+        verdict["issues"].append("查重预估：" + _msg +
+                                "请降低论文内部重复句与对参考文献标题的逐字复刻；"
+                                "正式提交前仍须用知网做全网查重（本预估不含知网库）")
+        verdict["suggestions"].append("改写重复/复刻段落，降低查重预估重合率；提交前用知网全网查重复核")
 
     # 综合与门控
     overall = round(sum(WEIGHTS[k] * verdict["scores"][k] for k in WEIGHTS), 1)
