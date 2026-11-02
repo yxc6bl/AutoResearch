@@ -440,7 +440,7 @@ def _llm_json(client, model, extra, prompt, temperature=0.3):
         model=model,
         messages=[{"role": "system", "content": WRITER_SYSTEM},
                   {"role": "user", "content": prompt}],
-        extra_body=extra, temperature=temperature)
+        extra_body=extra, temperature=temperature, max_tokens=4096)
     text = r.choices[0].message.content or ""
     m = re.search(r"```json\s*(.*?)```", text, re.S)
     blob = m.group(1) if m else text
@@ -461,7 +461,8 @@ WRITER_SYSTEM = """你是一位严谨的中文学术论文写作者，只做一�
 3. 不得写空话套话（如"具有重要意义""被广泛采用""值得进一步研究"），每句话都要承载具体信息（具体数字、具体方法、具体机制）。
 4. 用中文书面语，段落必须由 3-5 句组成，句子之间靠因果、递进、对比自然衔接，长短句搭配；严禁单句成段，严禁罗列式短句堆砌。语言一致性铁律：除（a）约定字段 abstract_en 按要求写英文摘要、（b）参考文献原文（作者、标题、刊名须保留英文，不得翻译）之外，所有正文、本章小结、章节叙述一律使用中文书面语；绪论、背景、国内外研究现状等叙述性章节尤其不得出现整段英文。
 5. 严格按要求的 JSON 键输出，不要输出 JSON 以外的任何内容。
-6. 正文只写本章的论证内容，绝对不要在正文中写「本章小结」（分章小结由系统统一注入到章末）；若某章确有局限需要点明，请融入正文论述，不要单独成段小结。"""
+6. 正文只写本章的论证内容，绝对不要在正文中写「本章小结」（分章小结由系统统一注入到章末）；若某章确有局限需要点明，请融入正文论述，不要单独成段小结。
+7. 篇幅铁律（本科毕业设计正文须达 1.2 万字量级，篇幅不足是严重缺陷）：各章必须充分展开论述，禁止写成要点式或浓缩版。各章最低字数——绪论≥900、国内外研究现状≥1400、研究方法≥1000、实验设置与数据≥700、实验结果与分析≥1400、深入分析与假设检验≥1400、讨论≥1100、结论与展望≥900。每一论点都要配具体数字、机理解释或与前人工作的对比来撑开篇幅；严禁为凑字数写空话套话（如“具有重要意义”“值得进一步研究”“近年来受到广泛关注”等无信息量表述）。"""
 
 WRITER_SYSTEM += STYLE_RULES
 
@@ -785,11 +786,23 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     r1 = _llm_json(client, model, extra, p1)
     out.update({k: v for k, v in r1.items() if isinstance(v, str) and v.strip()})
 
+    # 独立批次：研究方法 / 实验设置的展开叙述（长文本单独生成，避免与 p1 合并后输出过长被截断）
+    p1b = f"""{facts}
+
+请基于以上真实素材撰写研究方法与实验设置的展开叙述，输出 JSON：
+{{"method_narrative": "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释每一类候选方法的数学模型与核心归纳偏置——线性回归/岭回归/Lasso 的线性假设与正则化、随机森林回归的集成与递归分区、支持向量回归的核诱导映射、KNN 的局部类比；说明各方法超参数的设定依据（树的数量、核函数与 C/gamma、正则化系数 alpha）与本次数据特性（样本量、特征尺度、非线性程度）的关系；解释为何选择相应评价指标。须基于真实素材中的方法名与数据事实，严禁编造算法或数字。",
+  "exp_narrative": "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）：说明数据集的来源与每个特征列的物理语义、为何对数值特征做标准化/对类别特征做编码、缺失值插补为何在训练折上拟合以避免信息泄漏、训练/测试划分比例与 5 种随机种子复现的动机、主指标与次要指标的选取理由。须基于真实素材，不得编造数据规模以外的数字。"}}"""
+    r1b = _llm_json(client, model, extra, p1b)
+    out.update({k: v for k, v in r1b.items() if isinstance(v, str) and v.strip()})
+
     # 第二批：结果叙述 + 深入分析 + 子假设裁决
     p2 = f"""{facts}
 
 请基于以上真实素材撰写结果分析部分，输出 JSON：
-{{"results_narrative": "2 段：客观叙述表 1 与图的结果，指认最优方法与次优方法的具体数值差，不夸大",
+{{"results_narrative": "5.1 主指标对比解读（不少于400字）：客观解读表1各方法主指标的具体数值差，指认最优与次优方法及其差距，不夸大。",
+  "results_viz": "5.2 结果可视化解读（不少于200字）：描述三张图（指标柱状图、系数/重要性图、残差散点图）各自揭示了什么趋势或异常。",
+  "results_fine": "5.3 细粒度分析解读（不少于250字）：解读特征重要性排序（权重最高特征及其物理意义）；若素材提供了逐类/分组的指标则一并解读，否则说明本实验未采集逐类明细。",
+  "results_stability": "5.4 稳定性与显著性解读（不少于250字）：解读多种子标准差反映的模型稳定性差异，以及配对t检验的 p 值含义与本文结论。",
   "deep_analysis": "深入分析 3 段（本文最重要的一节）：(1) 为什么最优方法会赢——从机理上解释（模型的归纳偏置、正则化、距离度量、特征降维等如何与该数据特性相互作用），必须落到具体数字，并引用第 5.1 节对比表中最优与次优方法的具体差值（如某数据集上 A=0.97、B=0.95，差 0.02）；
   若素材给出了「特征重要性（按绝对值从高到低排序）」，必须严格以该排序为准叙述真正权重最高的特征，
   严禁把排名靠后的中等权重特征说成「具有极高权重」「主导决策边界」，也严禁编造素材中不存在的特征名或数值，
@@ -816,7 +829,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 研究范围提醒：{multi_note}
 
 请基于以上真实素材撰写收尾部分，输出 JSON：
-{{"discussion": "讨论 2-3 段：(1) 本文发现与前述文献如何呼应或冲突（带 [编号] 引用，至少再引用 3 篇不同文献），以及本文发现在实践上的具体含义（给方法选型的具体建议，而不是泛泛而谈）；(2) 本文结论成立的条件与边界——在什么数据规模/特征结构/噪声条件下结论可能不成立。讨论中提到的假设结论必须与上面“子假设已裁定结果”一致。",
+{{"discussion": "讨论章（不少于1100字，至少 4-5 段，充分展开，严禁写浓缩版）：(1) 本文发现与前述文献如何呼应或冲突（带 [编号] 引用，至少再引用 3 篇不同文献），以及本文发现在实践上的具体含义（给方法选型的具体建议，而不是泛泛而谈）；(2) 本文结论成立的条件与边界——在什么数据规模/特征结构/噪声条件下结论可能不成立；(3) 从方法论角度反思：为何统一评估框架（固定划分、多种子复现、配对显著性检验）比单次跑分更可靠；(4) 本文证据对工程降噪设计或后续气动建模研究的启示。讨论中提到的假设结论必须与上面“子假设已裁定结果”一致。",
   "conclusion": "（本段由系统确定性生成，无需你写；直接输出空字符串即可）",
   "limitations_extra": "1-3 条本文特有的局限性（基于素材中的真实不足，不要写放之四海皆准的套话）"}}"""
     r3 = _llm_json(client, model, extra, p3)
@@ -1178,6 +1191,7 @@ def main() -> int:
     parts.append(written.get("related", "").strip() + "\n")
 
     parts.append(chapter_heading("method") + "\n")
+    parts.append(written.get("method_narrative", "").strip() + "\n")
     parts.append(f"### 3.1 问题设定\n")
     if is_multi:
         parts.append(f"本文在多个数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
@@ -1224,6 +1238,7 @@ def main() -> int:
         parts.append("待检验的机制化子假设见第 6 节表 2 的裁决。\n")
 
     parts.append(chapter_heading("exp_setup") + "\n")
+    parts.append(written.get("exp_narrative", "").strip() + "\n")
     if is_multi:
         round_txt = "各数据集均取主指标最优的一轮作为报告结果。"
     else:
@@ -1288,15 +1303,18 @@ def main() -> int:
         if plots_md.strip():
             parts.append("### 5.2 结果可视化\n")
             parts.append(plots_md + "\n")
+            parts.append(written.get("results_viz", "").strip() + "\n")
         if per_class_tbl or conf_tbl or fi_tbl:
             parts.append("### 5.3 细粒度分析\n")
             for blk in (per_class_tbl, conf_tbl, fi_tbl):
                 if blk:
                     parts.append(blk + "\n")
+        parts.append(written.get("results_fine", "").strip() + "\n")
         parts.append("### 5.4 稳定性与显著性\n")
         parts.append(_variance_table(analysis) + "\n")
         if (analysis or {}).get("significance"):
             parts.append(f"显著性检验结论：{analysis['significance']}\n")
+            parts.append(written.get("results_stability", "").strip() + "\n")
 
         # 训练-测试过拟合 Gap（H1 直接证据）
         h1 = sub_evidence.get("H1_overfitting_gap") if sub_evidence else None
