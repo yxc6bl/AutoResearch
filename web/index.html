@@ -93,6 +93,9 @@
       <option value="iterate">iterate · 多轮迭代（扩宽数据集/方法）</option>
     </select>
 
+    <label>API Key <span style="color:var(--muted);font-weight:400">（必填·仅本次运行使用，不保存）</span></label>
+    <input id="apikey" type="password" placeholder="粘贴你的 DeepSeek / 兼容网关 Key，如 sk-..." autocomplete="off">
+
     <label>研究主题</label>
     <textarea id="topic" placeholder="例：基于集成学习算法的乳腺癌良恶性诊断研究"></textarea>
 
@@ -107,7 +110,7 @@
     </div>
 
     <button class="btn-run" id="runBtn">▶ 运行流水线</button>
-    <div class="hint">首次运行需联网抓文献 + 调用 LLM 网关（依赖 .env 里的 Key）。运行期间请保持本页面打开。</div>
+    <div class="hint">无需安装任何环境：填 Key → 填主题 → 点运行。运行期间请保持本页面打开。</div>
 
     <hr style="border:none;border-top:1px dashed var(--line);margin:18px 0">
     <h3 style="margin-bottom:8px">打开已有结果</h3>
@@ -161,8 +164,10 @@ el('mode').dispatchEvent(new Event('change'));
 
 el('runBtn').onclick=()=>{
   const topic=el('topic').value.trim();
+  const apikey=el('apikey').value.trim();
   if(!topic){alert('请填写研究主题');return;}
-  const body={mode:el('mode').value, topic, dataset:el('dataset').value, rounds:parseInt(el('rounds').value||'3',10)};
+  if(!apikey){alert('请填入你的 API Key（仅本次运行使用，不会保存）');return;}
+  const body={mode:el('mode').value, topic, dataset:el('dataset').value, rounds:parseInt(el('rounds').value||'3',10), api_key:apikey};
   el('runBtn').disabled=true; el('term').textContent='';
   setStatus('运行中…','running');
   fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})

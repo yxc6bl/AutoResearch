@@ -43,7 +43,8 @@ def _env_with_dotenv() -> dict:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            env[k.strip()] = v.strip().strip('"').strip("'")
+            # 不覆盖已存在的环境变量：网页注入的用户 Key 优先于服务端 .env
+            env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
     return env
 
 

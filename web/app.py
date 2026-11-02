@@ -25,7 +25,9 @@ sys.path.insert(0, str(ROOT))
 
 from web.render import collect_result, verdict_to_html  # noqa: E402
 
-HOST, PORT = "127.0.0.1", 5000
+# 发布到云端时由启动环境注入；默认 0.0.0.0 允许外部访问，本地调试可设 WEB_HOST=127.0.0.1
+HOST = os.environ.get("WEB_HOST", "0.0.0.0")
+PORT = int(os.environ.get("WEB_PORT", "5000"))
 
 # 内存任务表：task_id -> {proc, log(list), status, out_dir, error}
 TASKS: dict[str, dict] = {}
@@ -43,8 +45,13 @@ def _next_id() -> str:
         return f"task_{_task_seq:04d}"
 
 
-def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int, out_dir: Path):
-    """在子线程里跑流水线，把 stdout/stderr 累积到 TASKS[task_id]['log']。"""
+def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
+                 out_dir: Path, api_key: str | None = None):
+    """在子线程里跑流水线，把 stdout/stderr 累积到 TASKS[task_id]['log']。
+
+    api_key：用户在网页填入的 Key，仅注入本次子进程环境变量，不落盘、不写日志。
+    优先级高于服务端 .env；留空则回退到服务端 .env 配置。
+    """
     cmd = [sys.executable, "auto_research.py"]
     if mode == "iterate":
         cmd += ["iterate", "--topic", topic, "--rounds", str(rounds), "--out", str(out_dir)]
@@ -55,10 +62,17 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
         if dataset:
             cmd += ["--dataset", dataset]
 
+    # 仅注入本次运行所需环境变量；auto_research 的 load_dotenv 不会覆盖已存在的 Key
+    env = os.environ.copy()
+    if api_key:
+        env["OPENAI_API_KEY"] = api_key
+        env["OPENAI_BASE_URL"] = env.get("OPENAI_BASE_URL", "https://apiai.sztu.edu.cn/v1")
+        env["OPENAI_MODEL"] = env.get("OPENAI_MODEL", "deepseek-v4-pro")
+
     try:
         proc = subprocess.Popen(
             cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", bufsize=1,
+            text=True, encoding="utf-8", bufsize=1, env=env,
         )
         with _lock:
             TASKS[task_id]["proc"] = proc
@@ -182,6 +196,7 @@ class Handler(BaseHTTPRequestHandler):
         topic = (data.get("topic") or "").strip()
         dataset = (data.get("dataset") or "").strip()
         rounds = int(data.get("rounds", 3))
+        api_key = (data.get("api_key") or "").strip() or None
 
         if mode == "open":  # 打开已有目录，不跑流水线
             d = (data.get("dir") or "").strip()
@@ -206,7 +221,7 @@ class Handler(BaseHTTPRequestHandler):
             TASKS[tid] = {"status": "running", "log": [f"[server] 启动流水线：mode={mode} topic={topic}"],
                           "out_dir": str(out_dir), "proc": None}
         threading.Thread(
-            target=run_pipeline, args=(tid, mode, topic, dataset, rounds, out_dir),
+            target=run_pipeline, args=(tid, mode, topic, dataset, rounds, out_dir, api_key),
             daemon=True,
         ).start()
         self._json({"task_id": tid})
