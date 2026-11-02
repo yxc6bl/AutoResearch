@@ -459,9 +459,9 @@ WRITER_SYSTEM = """你是一位严谨的中文学术论文写作者，只做一�
 1. 只能使用素材中出现的数值、方法名、数据集名、文献、结论。**不得引入任何素材以外的数字、文献、方法或事实**。
 2. 不得夸大。若某个命题素材不支持，就明说"证据不足/未获支持"，不得粉饰。
 3. 不得写空话套话（如"具有重要意义""被广泛采用""值得进一步研究"），每句话都要承载具体信息（具体数字、具体方法、具体机制）。
-4. 用中文书面语，段落必须由 3-5 句组成，句子之间靠因果、递进、对比自然衔接，长短句搭配；严禁单句成段，严禁罗列式短句堆砌。
+4. 用中文书面语，段落必须由 3-5 句组成，句子之间靠因果、递进、对比自然衔接，长短句搭配；严禁单句成段，严禁罗列式短句堆砌。语言一致性铁律：除（a）约定字段 abstract_en 按要求写英文摘要、（b）参考文献原文（作者、标题、刊名须保留英文，不得翻译）之外，所有正文、本章小结、章节叙述一律使用中文书面语；绪论、背景、国内外研究现状等叙述性章节尤其不得出现整段英文。
 5. 严格按要求的 JSON 键输出，不要输出 JSON 以外的任何内容。
-6. 每一章正文结束后，另起一段以「本章小结：」开头，归纳本章核心工作、指出相关局限，并铺垫后续章节；小结须是连贯段落，禁止单句成段。"""
+6. 正文只写本章的论证内容，绝对不要在正文中写「本章小结」（分章小结由系统统一注入到章末）；若某章确有局限需要点明，请融入正文论述，不要单独成段小结。"""
 
 WRITER_SYSTEM += STYLE_RULES
 
@@ -578,6 +578,18 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
         for r in refs:
             lines.append(f"[{r['num']}] {r['authors']}. {r['title']}. {r['venue']}, {r['year']}.")
     return "\n".join(lines)
+
+
+def _strip_inline_summaries(md: str) -> str:
+    """防御性：删除正文中 LLM 可能自行写入的「本章小结：」段落，
+    避免与下方 _insert_summaries 统一注入的小结重复（历史 bug：每章小结出现两次）。"""
+    blocks = re.split(r"\n{2,}", md)
+    out = []
+    for blk in blocks:
+        if re.match(r"^\s*本章小结[:：]", blk.strip()):
+            continue
+        out.append(blk)
+    return "\n\n".join(out)
 
 
 def _insert_summaries(md: str, summaries: dict) -> str:
@@ -1370,6 +1382,9 @@ def main() -> int:
         parts.append("（无数据）\n")
 
     paper = "\n".join(parts)
+    # 防御：清掉 LLM 可能在正文里自行写入的「本章小结：」段落，
+    # 避免与下方 _insert_summaries 统一注入的小结重复（曾导致每章小结出现两次）。
+    paper = _strip_inline_summaries(paper)
 
     # ── 分章小结：LLM 生成 + 确定性兜底，插入到各章末尾（结论章除外） ──
     facts_for_summary = _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value)
