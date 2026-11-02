@@ -130,6 +130,14 @@ JSON 形式的「任务规格（task spec）」，供一个确定性实验引擎
 - 分类：breast_cancer（乳腺癌良恶性）、digits（手写数字）、wine（葡萄酒品种）、iris（鸢尾花）
 - 回归：diabetes（糖尿病进展）
 
+★★★ 自定义数据集（CSV/URL）铁律 ★★★
+当用户通过自定义数据集给出数据时，上面的白名单【仅用于分辨任务类型】，你生成的
+research_question、literature_query、子假设、analysis_plan 必须严格围绕用户【研究主题】的
+真实领域撰写，严禁套用白名单里任意示例数据集的措辞、数据特性或文献方向。
+举例：若用户主题是「心血管疾病预测」且提供了自定义临床表格数据，则全文必须围绕心血管疾病，
+绝不可出现「乳腺癌 / 良恶性 / breast cancer / WBCD」等字样，文献检索词也不得写成 breast cancer。
+自定义数据集的领域由用户主题唯一决定。
+
 候选方法必须从下列 sklearn 估计器里选 4~5 个，且至少覆盖 3 种不同归纳偏置族
 （如：线性模型 / 树集成 / 核方法 / 近邻），避免全部来自同一族；用 dict 写法，
 需随机种子的方法把 random_state 写成字符串 "<seed>"（引擎会替换）：
@@ -203,12 +211,30 @@ JSON 形式的「任务规格（task spec）」，供一个确定性实验引擎
 }"""
 
 
-def plan_spec(topic: str, client=None, model=None, extra=None, data_override: dict | None = None):
-    """把研究主题转成合法 spec。client 为 None 时返回模板 spec。"""
+def plan_spec(topic: str, client=None, model=None, extra=None, data_override: dict | None = None,
+              dataset_meta: str | None = None):
+    """把研究主题转成合法 spec。client 为 None 时返回模板 spec。
+
+    dataset_meta：自定义数据集的「真实概况」字符串（行数/列数/特征列/目标列分布等），
+    仅用于让 LLM 写出与数据集领域一致的研究问题与文献检索词，避免套用内置白名单范例。
+    """
     if client is None:
         return template_spec(topic, data_override)
+    is_custom = bool(data_override and data_override.get("source")
+                     in ("csv", "url", "parquet", "excel", "feather", "openml"))
+    custom_ctx = ""
+    if is_custom:
+        meta = dataset_meta or "（用户未提供明细，请仅依据研究主题推断领域）"
+        custom_ctx = (
+            f"\n\n⚠️ 本次用户提供了【自定义数据集】（非内置白名单）。数据集真实概况：{meta}\n"
+            f"用户真实研究主题：「{topic}」。你生成的所有字段——尤其 research_question、"
+            f"literature_query、子假设——必须严格围绕「{topic}」所述的真实领域，"
+            f"严禁套用内置示例数据集（尤其乳腺癌 breast_cancer）的措辞或文献方向。"
+            f"literature_query 也必须与「{topic}」领域一致，绝不可写成 breast cancer。"
+        )
     prompt = (
         _SYSTEM
+        + custom_ctx
         + f"\n\n研究主题：{topic}\n\n请给出上述 JSON。"
     )
     try:
@@ -217,7 +243,7 @@ def plan_spec(topic: str, client=None, model=None, extra=None, data_override: di
         spec = None
     if not isinstance(spec, dict):
         return template_spec(topic, data_override)
-    return validate_and_fix(spec, topic, data_override)
+    return validate_and_fix(spec, topic, data_override, dataset_meta)
 
 
 _ITERATE_SYSTEM = """你是机器学习研究的「迭代规划器」。给定上一轮的实验规格与真实结果，
@@ -308,11 +334,27 @@ def iterate_spec(prev_spec: dict, prev_result: dict, client=None, model=None, ex
     return validate_and_fix(spec, prev_spec.get("title", ""), None)
 
 
-def validate_and_fix(spec: dict, topic: str, data_override: dict | None = None) -> dict:
+def validate_and_fix(spec: dict, topic: str, data_override: dict | None = None,
+                     dataset_meta: str | None = None) -> dict:
     """补齐缺省、修正不合法字段，确保引擎能跑。"""
     spec = dict(spec)
     spec.setdefault("title", topic)
     spec.setdefault("research_question", topic)
+    # 记录数据集概况，供下游（写作/评测）校验领域一致性
+    if dataset_meta:
+        spec["dataset_meta"] = dataset_meta
+
+    # ── 自定义数据集护栏：禁止套用内置白名单范例（尤其乳腺癌）导致领域错位 ──
+    is_custom = bool(data_override and data_override.get("source")
+                     in ("csv", "url", "parquet", "excel", "feather", "openml"))
+    if is_custom:
+        _leak = re.compile(r"乳腺癌|良恶性|breast\s*cancer|WBCD|病理切片", re.I)
+        rq = spec.get("research_question", "") or ""
+        if _leak.search(rq):
+            spec["research_question"] = _safe_rq(topic, spec.get("task_type"), spec.get("metric"))
+        lq = spec.get("literature_query", "") or ""
+        if _leak.search(lq):
+            spec["literature_query"] = topic or lq
 
     # 1) 数据集（兼容单数据集 data 与多数据集 datasets 列表）
     if data_override:
@@ -503,6 +545,20 @@ def template_spec(topic: str, data_override: dict | None = None) -> dict:
         "analysis_plan": "统一评估各方法，以主指标比较，并做多种子稳定性与假设检验。",
         "literature_query": topic or "machine learning benchmark comparison",
     }
+
+
+def _safe_rq(topic: str, task_type: str | None, metric: str | None) -> str:
+    """自定义数据集上，当 LLM 仍套用乳腺癌范例时的确定性兜底研究问题。
+
+    直接基于用户主题与任务类型生成，绝不出现任何内置数据集领域词汇，
+    从源头消除「心血管标题 + 乳腺癌研究问题」这类自相矛盾。
+    """
+    domain = topic or "该数据集"
+    if task_type == "regression":
+        return (f"在用户提供的回归数据集（{domain}）上，不同归纳偏置族的方法对「{metric}」的"
+                f"预测表现是否存在系统性差异，其成因是什么？")
+    return (f"在用户提供的分类数据集（{domain}）上，不同归纳偏置族（线性模型、树集成、核方法、近邻）"
+            f"对「{metric}」的预测表现是否存在系统性差异，其成因是什么？")
 
 
 def main() -> int:

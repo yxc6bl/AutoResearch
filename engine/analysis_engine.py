@@ -158,7 +158,13 @@ def _load_file(d: dict, src: str):
         repo_path = Path(__file__).resolve().parents[1] / path
         path = path if path.exists() else repo_path
     if src == "csv":
-        df = pd.read_csv(path)
+        read_kw = {}
+        # 透传分隔符与缺失标记：真实公开数据集常用分号(;)或含 "?" 缺失值
+        if d.get("sep") is not None:
+            read_kw["sep"] = d["sep"]
+        if d.get("na_values") is not None:
+            read_kw["na_values"] = d["na_values"]
+        df = pd.read_csv(path, **read_kw)
     elif src == "parquet":
         df = pd.read_parquet(path)
     elif src == "excel":
@@ -219,6 +225,30 @@ def _load_openml(dataset_id, version=None, task_type=None):
     if task not in ("classification", "regression"):
         raise ValueError(f"OpenML 不支持 task_type：{task}")
     return X, y, feat, task
+
+
+def _load_url(d: dict):
+    """从公开网址下载数据集（CSV/XLSX）后按文件源加载。
+
+    支持 d 透传：target / sep / na_values / task_type，全部交给 _load_file 处理。
+    """
+    import tempfile
+    import urllib.request
+
+    url = d.get("url")
+    if not url:
+        raise ValueError("url 数据源必须在 data 中提供 url")
+    low = url.lower()
+    suffix = ".xlsx" if low.endswith((".xlsx", ".xls")) else ".csv"
+    cache_name = f"autoresearch_url_{abs(hash(url))}{suffix}"
+    tmp = Path(tempfile.gettempdir()) / cache_name
+    if not tmp.exists():
+        print(f"[data] 下载数据集：{url}")
+        urllib.request.urlretrieve(url, tmp)
+    sub = dict(d)
+    sub["path"] = str(tmp)
+    sub_src = "excel" if suffix == ".xlsx" else "csv"
+    return _load_file(sub, sub_src)
 
 
 MAX_ONEHOT_CARDINALITY = 20
@@ -334,6 +364,10 @@ def _load_dataset_inner(spec: dict):
     if src == "openml":
         return _load_openml(d.get("dataset_id"), d.get("version"),
                             spec.get("task_type") or d.get("task_type"))
+    if src == "url":
+        file_data = dict(d)
+        file_data["task_type"] = spec.get("task_type") or d.get("task_type")
+        return _load_url(file_data)
     if src in DATASETS:  # 兜底：source 直接写内置名
         return DATASETS[src]()
     raise ValueError(f"不支持的数据源：{src}")

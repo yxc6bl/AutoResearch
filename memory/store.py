@@ -106,6 +106,24 @@ class MemoryStore:
                 return [p.get("id") for p in data.get("papers", [])]
             return list(data.keys())
 
+    def delete(self, ns: str, key: str) -> bool:
+        """删除一条记录：literature 按 paper id 删，其余按顶层 key 删。
+        返回是否确实删掉了内容。"""
+        with self._lock:
+            data = self._read(ns)
+            if ns == "literature":
+                before = data.get("papers", [])
+                after = [p for p in before if p.get("id") != key]
+                if len(after) == len(before):
+                    return False
+                data["papers"] = after
+            else:
+                if key not in data:
+                    return False
+                del data[key]
+            self._write(ns, data)
+            return True
+
 
 # 便捷单例：各子代理直接 `from memory.store import store`
 store = MemoryStore()

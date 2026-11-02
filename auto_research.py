@@ -48,6 +48,40 @@ def _env_with_dotenv() -> dict:
     return env
 
 
+def _dataset_meta(data_override: dict | None) -> str | None:
+    """为自定义数据集算一段「真实概况」，喂给 Planner 写出与领域一致的研究问题。
+
+    不读全量数据，仅预览前若干行抽取列名与目标列分布，足够让 LLM 定位领域。
+    """
+    if not data_override:
+        return None
+    src = data_override.get("source")
+    if src == "csv":
+        p = data_override.get("path")
+        if not p or not Path(p).exists():
+            return None
+        try:
+            import pandas as pd
+            df = pd.read_csv(p, nrows=200)
+        except Exception:
+            return None
+    elif src == "url":
+        return "（用户提供 URL 数据集，运行时下载；领域以研究主题为准）"
+    else:
+        return None
+    target = data_override.get("target")
+    tinfo = ""
+    if target and target in df.columns:
+        try:
+            vc = df[target].value_counts()
+            tinfo = f"；目标列「{target}」取值分布：{dict(vc)}"
+        except Exception:
+            tinfo = ""
+    feats = [c for c in df.columns if c != target][:15]
+    return (f"自定义表格数据集：预览 {len(df)} 行、共 {df.shape[1]} 列；"
+            f"特征列含 {feats}{tinfo}。")
+
+
 def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
     """程序化 API：给定 spec，端到端产出分析 + 论文。
 
@@ -79,7 +113,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
             _q = (spec.get("literature_query") or spec.get("topic")
                   or spec.get("direction") or spec.get("research_question") or "")
             if _q:
-                _papers = la.run(_q, max_results=10, out_path=lit_path,
+                _papers = la.run(_q, max_results=20, top_n=20, out_path=lit_path,
                                  source_tag=str(out_dir))
                 print(f"[literature] 检索/记忆到 {len(_papers)} 篇文献")
             else:
@@ -125,7 +159,9 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
                 try:
                     ea = _load_module(ROOT / "agents" / "eval_agent.py", "eval_agent")
                     _md = out_dir / "06_paper" / "paper_full.md"
-                    _litc = out_dir / "02_literature_candidates.json"
+                    # 评分门应评判「实际进论文的文献」（01_literature.json 精选集），
+                    # 而非全量候选噪声池（02_literature_candidates.json）。
+                    _litc = out_dir / "01_literature.json"
                     _cands = None
                     if _litc.exists():
                         try:
@@ -182,11 +218,22 @@ def cmd_plan(args) -> int:
     planner = _load_module(ROOT / "planner.py", "planner")
     literature = _load_module(ROOT / "literature.py", "literature")
 
-    # 1) 数据集覆盖（用户自带数据 / 指定内置集）
+    # 1) 数据集覆盖（用户自带数据 / 公开网址 / 指定内置集）
     data_override = None
     if args.data:
         data_override = {"source": "csv", "path": str(Path(args.data).resolve()),
                          "target": args.target or "target"}
+        if args.sep:
+            data_override["sep"] = args.sep
+        if args.na_values:
+            data_override["na_values"] = args.na_values
+    elif args.url:
+        data_override = {"source": "url", "url": args.url,
+                         "target": args.target or "target"}
+        if args.sep:
+            data_override["sep"] = args.sep
+        if args.na_values:
+            data_override["na_values"] = args.na_values
     elif args.dataset:
         data_override = {"source": "sklearn", "name": args.dataset}
 
@@ -194,8 +241,9 @@ def cmd_plan(args) -> int:
     client, model, extra = planner.llm_client()
     if client is None:
         print("[warn] 未检测到 API Key（.env 中 OPENAI_API_KEY），使用模板 spec 降级运行。")
+    dataset_meta = _dataset_meta(data_override)
     pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
-    spec = pa.run(args.topic, client, model, extra, data_override)
+    spec = pa.run(args.topic, client, model, extra, data_override, dataset_meta=dataset_meta)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task_spec.json").write_text(
@@ -210,7 +258,7 @@ def cmd_plan(args) -> int:
             la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
             papers = la.run(
                 spec.get("literature_query") or args.topic,
-                max_results=10, out_path=out_dir / "01_literature.json",
+                max_results=20, top_n=20, out_path=out_dir / "01_literature.json",
                 source_tag=str(out_dir),
             )
             print(f"[literature] 检索/记忆到 {len(papers)} 篇文献")
@@ -246,6 +294,17 @@ def cmd_iterate(args) -> int:
     if args.data:
         data_override = {"source": "csv", "path": str(Path(args.data).resolve()),
                          "target": args.target or "target"}
+        if args.sep:
+            data_override["sep"] = args.sep
+        if args.na_values:
+            data_override["na_values"] = args.na_values
+    elif args.url:
+        data_override = {"source": "url", "url": args.url,
+                         "target": args.target or "target"}
+        if args.sep:
+            data_override["sep"] = args.sep
+        if args.na_values:
+            data_override["na_values"] = args.na_values
     elif args.dataset:
         data_override = {"source": "sklearn", "name": args.dataset}
 
@@ -321,7 +380,10 @@ def main() -> int:
     pp.add_argument("--out", default="out_plan", help="产物输出目录")
     pp.add_argument("--dataset", default="", help="指定内置 sklearn 数据集名（覆盖 Planner 选择）")
     pp.add_argument("--data", default="", help="自带 CSV 路径（与 --target 配合）")
+    pp.add_argument("--url", default="", help="公开数据集网址（CSV/XLSX，与 --target 配合）")
     pp.add_argument("--target", default="", help="CSV 中目标列名或列索引")
+    pp.add_argument("--sep", default="", help="CSV 分隔符（如分号 ';'，默认逗号）")
+    pp.add_argument("--na_values", default="", help="缺失值标记（如 '?'，多个用逗号分隔）")
     pp.add_argument("--no-literature", action="store_true", help="跳过 arXiv 文献检索")
     pp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     pp.set_defaults(func=cmd_plan)
@@ -332,7 +394,10 @@ def main() -> int:
     ip.add_argument("--rounds", type=int, default=3, help="迭代轮数（默认 3）")
     ip.add_argument("--dataset", default="", help="指定内置 sklearn 数据集名（覆盖 Planner 首轮选择）")
     ip.add_argument("--data", default="", help="自带 CSV 路径（与 --target 配合）")
+    ip.add_argument("--url", default="", help="公开数据集网址（CSV/XLSX，与 --target 配合）")
     ip.add_argument("--target", default="", help="CSV 中目标列名或列索引")
+    ip.add_argument("--sep", default="", help="CSV 分隔符（如分号 ';'，默认逗号）")
+    ip.add_argument("--na_values", default="", help="缺失值标记（如 '?'，多个用逗号分隔）")
     ip.add_argument("--no-literature", action="store_true", help="跳过 arXiv 文献检索")
     ip.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     ip.set_defaults(func=cmd_iterate)

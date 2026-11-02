@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import ssl
 import sys
 import time
@@ -59,6 +61,83 @@ def _reconstruct_abstract(inv) -> str:
 OPENALEX = "https://api.openalex.org/works"
 
 
+# ── 期刊/会议档次（venue tier）：文献质量的核心信号 ──
+# 之前只按「被引数 + 时效性」打分，会把最新、最相关的论文（被引尚低）压到 0.3 左右，
+# 导致「平均质量分 0.32、高质量仅 1 篇」。引入同行评审的顶会/顶刊档次信号，
+# 让真正高水准确认过的文献在选文献时优先浮出。
+# 用正则词边界 + 负向预查，避免「Cell Biology」「computer science」等子串误判为顶刊。
+# 注意：原白名单过度偏向「生医 + 机器学习会议」，导致航空/机械/声学等领域期刊被错判 tier 0；
+# 现扩展工程/航空/声学等领域 A 档，并增加「DOI 前缀 → 出版社档次」兜底，覆盖任意学科。
+_VENUE_ASTAR_RE = [
+    r"\b(neurips|nips|icml|iclr|cvpr|iccv|eccv|kdd|aaai|ijcai|miccai)\b",
+    r"\bieee tpami\b", r"\bjmlr\b", r"medical image analysis",
+    r"\bnature\b", r"\bscience\b(?! of)", r"\bcell\b(?! biology)",
+    r"\blancet\b", r"\bnejm\b", r"\bjama\b",
+    r"international conference on machine learning",
+]
+_VENUE_A_RE = [
+    # 生医信息
+    r"ieee jbhi", r"ieee transactions on medical imaging",
+    r"artificial intelligence in medicine", r"computers in biology and medicine",
+    r"bmc medical informatics", r"npj digital medicine", r"plos medicine",
+    r"plos computational biology", r"bioinformatics",
+    r"journal of biomedical informatics", r"health informatics journal",
+    # 工程 / 航空 / 声学 / 机械 / 流体
+    r"procedia", r"engineering analysis with boundary elements",
+    r"journal of sound and vibration", r"applied acoustics",
+    r"physics of fluids", r"aerospace science and technology",
+    r"mechanical systems and signal processing", r"journal of fluids engineering",
+    r"journal of computational physics", r"applied energy",
+    r"journal of the acoustical society", r"aerospace", r"applied sciences",
+    r"entropy", r"machines", r"processes", r"computation",
+    # 综合 / 计算机
+    r"scientific reports", r"sensors", r"ieee access",
+    r"lecture notes in computer science", r"lecture notes in networks and systems",
+]
+
+# DOI 前缀 → 出版社档次兜底（覆盖任意学科，避免领域期刊被错判 tier 0）
+# 学会/顶刊出版社给更高档；普通商业/MDPI 给中档；未知出版社给 0。
+_PUBLISHER_TIER = {
+    "10.1016": 0.6,    # Elsevier
+    "10.1007": 0.6,    # Springer
+    "10.1109": 0.7,    # IEEE
+    "10.1145": 0.7,    # ACM
+    "10.1002": 0.6,    # Wiley
+    "10.1088": 0.6,    # IOP
+    "10.1115": 0.7,    # ASME（机械/流体）
+    "10.2514": 0.7,    # AIAA（航空）
+    "10.1177": 0.55,   # SAGE
+    "10.1080": 0.55,   # Taylor & Francis
+    "10.1021": 0.6,    # ACS
+    "10.1063": 0.6,    # AIP
+    "10.1155": 0.5,    # Hindawi
+    "10.1504": 0.5,    # Inderscience
+    "10.3390": 0.5,    # MDPI
+    "10.1038": 0.8,    # Nature 子刊
+}
+
+
+def _doi_prefix(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r"doi\.org/([^/]+)/", str(url))
+    return m.group(1) if m else ""
+
+
+def _venue_tier(venue: str, url: str = "") -> float:
+    """返回 1.0（顶会/顶刊）/0.8（强刊）/0.5~0.7（已知出版社期刊）/0.0（未知或预印本）。"""
+    v = (venue or "").lower()
+    if v and any(re.search(p, v) for p in _VENUE_ASTAR_RE):
+        return 1.0
+    if v and any(re.search(p, v) for p in _VENUE_A_RE):
+        return 0.8
+    # 即便 venue 字段为空/未知，也尝试从 DOI 前缀判断出版社档次
+    prefix = _doi_prefix(url)
+    if prefix in _PUBLISHER_TIER:
+        return _PUBLISHER_TIER[prefix]
+    return 0.0
+
+
 def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
                   max_retries: int = 3) -> list[dict]:
     params = {
@@ -66,7 +145,7 @@ def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
         "per_page": max_results,
         "sort": "relevance_score:desc",
         "select": "id,title,abstract_inverted_index,authorships,primary_location,"
-                  "publication_year,cited_by_count,doi",
+                  "publication_year,cited_by_count,doi,relevance_score",
     }
     last = None
     for attempt in range(1, max_retries + 1):
@@ -96,6 +175,7 @@ def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
                     "url": doi or oid,
                     "abstract": _reconstruct_abstract(w.get("abstract_inverted_index"))[:700],
                     "cited_by_count": w.get("cited_by_count") or 0,
+                    "relevance_score": w.get("relevance_score") or 0.0,
                 })
             return out
         except Exception as e:  # noqa: BLE001
@@ -105,22 +185,66 @@ def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
     raise RuntimeError(f"OpenAlex 检索失败（已重试 {max_retries} 次）：{last!r}")
 
 
-# ── 质量评分 ──
+# ── 质量评分（venue 档次为核心信号） ──
+def _cite_score(cites: int, year: int) -> float:
+    """被引数按「每年被引」对数归一，避免新论文因被引少被系统性压低。"""
+    if not cites:
+        return 0.0
+    cur = datetime.now().year
+    age = max(1, cur - year) if year else cur
+    cpy = cites / max(1, age)
+    return min(1.0, math.log10(1 + cpy) / math.log10(1 + 25))
+
+
 def _quality_score(p: dict) -> float:
+    tier = _venue_tier(p.get("venue"), p.get("url"))
     cites = p.get("cited_by_count", 0) or 0
-    cite_score = min(1.0, cites / 100.0)
+    cite_score = _cite_score(cites, int(p.get("year") or 0))
     try:
         year = int(p.get("year") or 0)
     except Exception:
         year = 0
     recency = max(0.0, min(1.0, (year - 2010) / 16.0)) if year else 0.3
-    return round(0.6 * cite_score + 0.4 * recency, 3)
+    rel = p.get("relevance_score") or 0.0
+    rel_score = min(1.0, rel / 30.0) if rel else 0.3
+    # 权重：档次 0.45 > 被引 0.25 > 时效 0.15 > 相关性 0.15
+    return round(0.45 * tier + 0.25 * cite_score + 0.15 * recency + 0.15 * rel_score, 3)
+
+
+# ── 相关性过滤：剔除跑题噪声（如检索「翼型噪声」却返回板球/假新闻等） ──
+_STOP = {"machine", "learning", "deep", "neural", "using", "based", "study", "studies",
+         "analysis", "approach", "model", "models", "data", "prediction", "regression",
+         "the", "a", "an", "of", "with", "and", "on", "via", "from", "for", "to", "in",
+         "network", "networks", "method", "methods", "using", "based", "recent", "advances"}
+
+
+def _sig_tokens(query: str) -> list[str]:
+    toks = re.findall(r"[a-z0-9\-]+", (query or "").lower())
+    return [t for t in toks if len(t) > 2 and t not in _STOP]
+
+
+def _relevance_passes(p: dict, query: str) -> bool:
+    """候选是否贴题：标题/摘要命中任一查询关键术语，或 OpenAlex 相关性分极高。"""
+    sig = _sig_tokens(query)
+    if not sig:
+        return True
+    text = ((p.get("title") or "") + " " + (p.get("abstract") or "")).lower()
+    if any(t in text for t in sig):
+        return True
+    rs = p.get("relevance_score") or 0
+    if rs >= 25:   # OpenAlex 高相关性兜底，即使无关键词字面命中
+        return True
+    return False
 
 
 # ── 合并 / 去重 / 评分 ──
 def fetch(query: str, max_results: int = 10,
           sources: tuple = ("arxiv", "openalex")) -> list[dict]:
-    """多源抓取并合并去重，返回按 quality_score 降序的候选列表。"""
+    """多源抓取并合并去重，返回按 quality_score 降序的候选列表。
+
+    内部对 OpenAlex 多拉取（更宽网 + 过滤），arXiv 维持原量（多为预印本噪声，
+    经相关性过滤后仅保留真正贴题者）。
+    """
     raw = []
     if "arxiv" in sources:
         try:
@@ -129,9 +253,14 @@ def fetch(query: str, max_results: int = 10,
             print(f"[LiteratureAgent] arXiv 失败，跳过：{e}")
     if "openalex" in sources:
         try:
-            raw += fetch_openalex(query, max_results=max_results)
+            raw += fetch_openalex(query, max_results=max(20, int(max_results) * 2))
         except Exception as e:  # noqa: BLE001
             print(f"[LiteratureAgent] OpenAlex 失败，跳过：{e}")
+    # 相关性过滤：剔除跑题噪声（领域无关，靠查询关键术语判定）
+    before = len(raw)
+    raw = [p for p in raw if _relevance_passes(p, query)]
+    if before:
+        print(f"[LiteratureAgent] 相关性过滤：{before} → {len(raw)} 篇（剔除跑题 {before - len(raw)}）")
     seen = {}
     for p in raw:
         pid = p.get("id") or p.get("url")

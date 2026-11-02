@@ -22,10 +22,10 @@ import planner as planner_mod  # noqa: E402
 
 def run(topic: str, client=None, model=None, extra=None,
         data_override: dict | None = None, store: MemoryStore | None = None,
-        out_path=None):
+        out_path=None, dataset_meta: str | None = None):
     """首轮规划：自然语言主题 -> spec，并写入 MemoryStore。"""
     store = store or default_store
-    spec = planner_mod.plan_spec(topic, client, model, extra, data_override)
+    spec = planner_mod.plan_spec(topic, client, model, extra, data_override, dataset_meta)
     store.put("project", "spec", {"topic": topic, "spec": spec})
     if out_path:
         p = Path(out_path)

@@ -141,10 +141,11 @@ def _dataset_label(spec: dict) -> str:
     name = d.get("name") or spec.get("dataset") or "指定数据集"
     if name in _DATASET_CN:
         return _DATASET_CN[name]
-    if d.get("source") in ("csv", "parquet", "excel", "feather"):
+    if d.get("source") in ("csv", "parquet", "excel", "feather", "url"):
         from pathlib import Path as _P
-        stem = _P(str(d.get("path", ""))).stem
-        return f"用户数据集（{stem or 'data'}）"
+        stem = _P(str(d.get("path") or d.get("url") or "")).stem
+        # 去掉 .csv/.xlsx 等后缀，仅保留数据集文件名作为可读标签
+        return stem or "data"
     return name
 
 
@@ -1030,16 +1031,20 @@ def main() -> int:
     else:
         best_value_str = _fmt(best_value) if best_value is not None else "见指标表"
 
-    # 优先采用更丰富的候选文献文件（新 LiteratureAgent 产出，通常 20 篇），
-    # 不足时回退到旧 01_literature.json，确保参考文献 ≥20 条以满足 985 严谨度标尺。
-    cand_path = base / "02_literature_candidates.json"
-    if cand_path.exists():
-        try:
-            cands = json.loads(cand_path.read_text(encoding="utf-8"))
-            if isinstance(cands, list) and len(cands) > len(lit.get("papers", []) or []):
-                lit = {"papers": cands}
-        except Exception:
-            pass
+    # 参考文献真相源 = 01_literature.json（LiteratureAgent 精选、已相关性过滤的文献）。
+    # 不再回退到 02_literature_candidates.json（全量候选，含未入选的跑题噪声），
+    # 否则噪声文献会被误引。仅当 01 缺失/为空时才退而求其次用候选池。
+    if not (lit.get("papers")):
+        cand_path = base / "02_literature_candidates.json"
+        if cand_path.exists():
+            try:
+                cands = json.loads(cand_path.read_text(encoding="utf-8"))
+                if isinstance(cands, list) and cands:
+                    lit = {"papers": cands}
+                elif isinstance(cands, dict) and cands.get("papers"):
+                    lit = cands
+            except Exception:
+                pass
     refs = build_references(lit)
     ref_lines = []
     for r in refs:
@@ -1134,10 +1139,11 @@ def main() -> int:
         lim.append("正如同行评审所指出的，当前证据链仍有待加强，需要在后续工作中补强。")
     limitations_block = "\n".join(f"{i+1}. {t}" for i, t in enumerate(lim))
 
+    _spec_title = (spec.get("title") or spec.get("topic") or "").strip()
     if is_multi:
-        title = f"{direction}：跨数据集泛化性对比的机理实证研究"
+        title = _spec_title or f"{direction}：跨数据集泛化性对比的机理实证研究"
     else:
-        title = f"{direction}：基于 {dataset} 数据集的机理实证研究"
+        title = _spec_title or f"{direction}：基于 {dataset} 数据集的机理实证研究"
 
     parts = []
     parts.append(f"# {title}\n")

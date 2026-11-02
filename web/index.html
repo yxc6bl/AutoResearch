@@ -102,6 +102,30 @@
     <label>数据集（可选，留空由 Planner 自动选）</label>
     <select id="dataset"><option value="">— 自动选择 —</option></select>
 
+    <hr style="border:none;border-top:1px dashed var(--line);margin:14px 0">
+    <label>自定义真实数据（可选，优先于上面的内置集）</label>
+    <div class="row">
+      <div style="flex:1">
+        <label style="margin-top:0">数据集网址（CSV/XLSX 公开链接）</label>
+        <input id="dataUrl" placeholder="https://.../data.csv">
+      </div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <div style="flex:1">
+        <label style="margin-top:0">或上传文件（CSV/XLSX）</label>
+        <input id="dataFile" type="file" accept=".csv,.xlsx,.xls">
+      </div>
+      <div style="flex:1">
+        <label style="margin-top:0">目标列名/索引</label>
+        <input id="target" placeholder="如 target 或 13">
+      </div>
+      <div style="flex:1">
+        <label style="margin-top:0">分隔符(可选)</label>
+        <input id="sep" placeholder="默认逗号，分号写 ;">
+      </div>
+    </div>
+    <div class="hint">填了网址或上传文件，就优先用它喂进系统；留空才走上面的内置数据集。这就是「任意真实数据都能吃」的入口。</div>
+
     <div class="row" id="roundsRow">
       <div style="flex:1">
         <label>迭代轮数</label>
@@ -168,14 +192,32 @@ el('runBtn').onclick=()=>{
   const apikey=el('apikey').value.trim();
   if(!topic){alert('请填写研究主题');return;}
   if(!apikey){alert('请填入你的 API Key（仅本次运行使用，不会保存）');return;}
-  const body={mode:el('mode').value, topic, dataset:el('dataset').value, rounds:parseInt(el('rounds').value||'3',10), api_key:apikey};
-  el('runBtn').disabled=true; el('term').textContent='';
-  setStatus('运行中…','running');
-  fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
-    .then(r=>r.json()).then(d=>{
-      if(d.error){setStatus('错误：'+d.error,'failed');el('runBtn').disabled=false;return;}
-      pollTask(d.task_id);
-    }).catch(e=>{setStatus('请求失败：'+e,'failed');el('runBtn').disabled=false;});
+  const dataUrl=el('dataUrl').value.trim();
+  const target=el('target').value.trim();
+  const sep=el('sep').value.trim();
+  const fileInput=el('dataFile');
+  const onSend=(data_b64, data_filename)=>{
+    const body={mode:el('mode').value, topic, dataset:el('dataset').value,
+      rounds:parseInt(el('rounds').value||'3',10), api_key:apikey,
+      data_url:dataUrl, target, sep, data_b64, data_filename};
+    el('runBtn').disabled=true; el('term').textContent='';
+    setStatus('运行中…','running');
+    fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(r=>r.json()).then(d=>{
+        if(d.error){setStatus('错误：'+d.error,'failed');el('runBtn').disabled=false;return;}
+        pollTask(d.task_id);
+      }).catch(e=>{setStatus('请求失败：'+e,'failed');el('runBtn').disabled=false;});
+  };
+  // 若选了上传文件，先读成 base64
+  if(fileInput.files && fileInput.files[0]){
+    const f=fileInput.files[0];
+    const reader=new FileReader();
+    reader.onload=()=>onSend(reader.result, f.name);
+    reader.onerror=()=>{setStatus('文件读取失败','failed');el('runBtn').disabled=false;};
+    reader.readAsDataURL(f);
+  } else {
+    onSend('', 'upload.csv');
+  }
 };
 
 el('openBtn').onclick=()=>{

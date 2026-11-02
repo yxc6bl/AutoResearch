@@ -47,21 +47,36 @@ def _next_id() -> str:
 
 
 def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
-                 out_dir: Path, api_key: str | None = None):
+                 out_dir: Path, api_key: str | None = None,
+                 data_path: str | None = None, data_url: str | None = None,
+                 target: str = "", sep: str = ""):
     """在子线程里跑流水线，把 stdout/stderr 累积到 TASKS[task_id]['log']。
 
     api_key：用户在网页填入的 Key，仅注入本次子进程环境变量，不落盘、不写日志。
     优先级高于服务端 .env；留空则回退到服务端 .env 配置。
+    data_path / data_url：用户自带 CSV 或公开数据集网址（二选一，覆盖内置 dataset）。
     """
     cmd = [sys.executable, "auto_research.py"]
     if mode == "iterate":
         cmd += ["iterate", "--topic", topic, "--rounds", str(rounds), "--out", str(out_dir)]
-        if dataset:
-            cmd += ["--dataset", dataset]
     else:  # plan
         cmd += ["plan", "--topic", topic, "--out", str(out_dir)]
-        if dataset:
-            cmd += ["--dataset", dataset]
+
+    # 数据集来源优先级：网址 > 上传文件 > 内置/自动
+    if data_url:
+        cmd += ["--url", data_url]
+        if target:
+            cmd += ["--target", target]
+        if sep:
+            cmd += ["--sep", sep]
+    elif data_path:
+        cmd += ["--data", str(data_path)]
+        if target:
+            cmd += ["--target", target]
+        if sep:
+            cmd += ["--sep", sep]
+    elif dataset:
+        cmd += ["--dataset", dataset]
 
     # 仅注入本次运行所需环境变量；auto_research 的 load_dotenv 不会覆盖已存在的 Key
     env = os.environ.copy()
@@ -198,6 +213,11 @@ class Handler(BaseHTTPRequestHandler):
         dataset = (data.get("dataset") or "").strip()
         rounds = int(data.get("rounds", 3))
         api_key = (data.get("api_key") or "").strip() or None
+        target = (data.get("target") or "").strip()
+        sep = (data.get("sep") or "").strip()
+        data_url = (data.get("data_url") or "").strip() or None
+        data_b64 = (data.get("data_b64") or "").strip()
+        data_filename = (data.get("data_filename") or "upload.csv").strip()
 
         if mode == "open":  # 打开已有目录，不跑流水线
             d = (data.get("dir") or "").strip()
@@ -215,14 +235,41 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "主题不能为空"}, 400)
             return
 
+        # 处理上传文件（base64 解码落盘）
+        data_path = None
+        if data_b64:
+            import base64
+            try:
+                # 去掉 data:xxx;base64, 前缀
+                if "," in data_b64:
+                    data_b64 = data_b64.split(",", 1)[1]
+                blob = base64.b64decode(data_b64)
+                suffix = ".xlsx" if data_filename.lower().endswith((".xlsx", ".xls")) else ".csv"
+                out_dir = ROOT / "out_web" / "_uploads"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                fpath = out_dir / f"upload_{_next_id()}{suffix}"
+                fpath.write_bytes(blob)
+                data_path = str(fpath)
+            except Exception as e:  # noqa: BLE001
+                self._json({"error": f"文件解码失败：{e}"}, 400)
+                return
+
         tid = _next_id()
         out_dir = ROOT / "out_web" / tid
         out_dir.mkdir(parents=True, exist_ok=True)
+        log_head = f"[server] 启动流水线：mode={mode} topic={topic}"
+        if data_url:
+            log_head += f" | 数据集网址={data_url}"
+        elif data_path:
+            log_head += f" | 上传文件={data_path}"
+        else:
+            log_head += f" | 数据集={dataset or '自动'}"
         with _lock:
-            TASKS[tid] = {"status": "running", "log": [f"[server] 启动流水线：mode={mode} topic={topic}"],
+            TASKS[tid] = {"status": "running", "log": [log_head],
                           "out_dir": str(out_dir), "proc": None}
         threading.Thread(
-            target=run_pipeline, args=(tid, mode, topic, dataset, rounds, out_dir, api_key),
+            target=run_pipeline,
+            args=(tid, mode, topic, dataset, rounds, out_dir, api_key, data_path, data_url, target, sep),
             daemon=True,
         ).start()
         self._json({"task_id": tid})
