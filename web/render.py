@@ -89,20 +89,22 @@ def md_to_html(md: str) -> str:
 # ── 评分 verdict → 卡片 HTML ──────────────────────────────────────────
 
 _DIM_COLOR = {
-    "consistency": "#2e7d32", "structure": "#1565c0", "authenticity": "#6a1b9a",
-    "anti_ai": "#00838f", "literature": "#ad1457", "content_quality": "#ef6c00",
+    "topic_sig": "#6a1b9a", "literature": "#ad1457", "structure": "#1565c0",
+    "methodology": "#2e7d32", "innovation": "#ef6c00", "writing_norms": "#00838f",
+    "consistency": "#444",
 }
 _DIM_NAME = {
-    "consistency": "一致性", "structure": "结构", "authenticity": "真实性",
-    "anti_ai": "反AI腔", "literature": "文献质量", "content_quality": "内容严谨度",
+    "topic_sig": "选题意义", "literature": "文献调研", "structure": "逻辑构建",
+    "methodology": "专业能力·方法内容", "innovation": "创新", "writing_norms": "撰写质量与规范",
+    "consistency": "零编造硬门",
 }
 
 def _score_list(v: dict) -> list[tuple[str, float]]:
-    """把 scores 字段统一成 [(中文名, 分数)]，兼容 dict 与 list[str] 两种形态。"""
+    """把 scores 字段统一成 [(中文名, 分数)]，按 rubric 维度顺序排列。"""
     sc = v.get("scores") or {}
     if isinstance(sc, dict):
-        order = ["consistency", "structure", "authenticity", "anti_ai", "literature", "content_quality"]
-        return [( _DIM_NAME.get(k, k), float(sc[k])) for k in order if k in sc]
+        order = ["topic_sig", "literature", "structure", "methodology", "innovation", "writing_norms", "consistency"]
+        return [(_DIM_NAME.get(k, k), float(sc[k])) for k in order if k in sc]
     return []
 
 def verdict_to_html(v: dict) -> str:
@@ -110,6 +112,7 @@ def verdict_to_html(v: dict) -> str:
     gate = v.get("gate", "")
     passed = v.get("passed", False)
     lit_grade = v.get("literature_grade", "")
+    grade = v.get("grade", "")
     issues = v.get("issues", []) or []
 
     badge = (
@@ -117,6 +120,7 @@ def verdict_to_html(v: dict) -> str:
         if passed else
         '<span class="badge bad">✘ 未通过 · 建议重做</span>'
     )
+    grade_badge = f'<span class="badge grade">{html.escape(str(grade))}</span>' if grade else ""
     lit_badge = f'<span class="badge lit">文献评级 {html.escape(str(lit_grade))}</span>' if lit_grade else ""
 
     bars = []
@@ -140,7 +144,7 @@ def verdict_to_html(v: dict) -> str:
         <div class="score-big">{overall}</div>
         <div class="verdict-meta">
           <div class="verdict-label">综合质量评分</div>
-          <div class="verdict-badges">{badge}{lit_badge}</div>
+          <div class="verdict-badges">{badge}{grade_badge}{lit_badge}</div>
         </div>
       </div>
       <div class="dims">{''.join(bars)}</div>
@@ -254,6 +258,7 @@ blockquote{background:#f0f4fb;border-left:4px solid var(--accent);margin:12px 0;
 .badge.ok{background:#e6f4ea;color:#1e7e34}
 .badge.bad{background:#fdecea;color:#c0392b}
 .badge.lit{background:#fce4ec;color:#ad1457}
+.badge.grade{background:#e8eaf6;color:#283593;font-weight:700}
 .dims{display:grid;grid-template-columns:1fr 1fr;gap:10px 24px}
 .dim-head{display:flex;justify-content:space-between;font-size:13px;margin-bottom:3px}
 .dim-head b{color:var(--accent)}
