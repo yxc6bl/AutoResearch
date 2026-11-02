@@ -288,7 +288,7 @@ def check_innovation(md: str):
     return max(0, score), issues
 
 
-def check_writing_norms(md: str):
+def check_writing_norms(md: str, mode: str = "general"):
     """撰写质量与学术规范维度（权重 15%）。
 
     依据：哈工大撰写质量(10%)；辽大学术规范30%（文字表达/格式/诚信）；
@@ -310,8 +310,8 @@ def check_writing_norms(md: str):
     else:
         recency_score = 100 if (recent5 >= 5 and recent2 >= 1) else 70
         rec_issue = [] if recency_score == 100 else ["参考文献缺乏近五年 / 近两年文献"]
-    # 深技大格式合规（关键词/摘要/字数/前置/外文文献）并入撰写规范维度
-    fmt_norm, fmt_norm_issues = check_format_compliance(md)
+    # 格式合规（按机构模式：general 通用下限 / sztu 深技大硬要求）并入撰写规范维度
+    fmt_norm, fmt_norm_issues = check_format_compliance(md, mode)
     score = round(0.45 * ai + 0.25 * format_score + 0.15 * recency_score + 0.15 * fmt_norm)
     issues = list(ai_markers) + fmt_issue + rec_issue + fmt_norm_issues
     return max(0, min(100, score)), issues
@@ -344,7 +344,7 @@ def _cjk4grams(text: str):
     return set(''.join(chars[i:i + 4]) for i in range(len(chars) - 3))
 
 
-def check_duplication(md: str, lit_candidates=None):
+def check_duplication(md: str, lit_candidates=None, mode: str = "general"):
     """本地查重预估（仅本地自检，不含知网全网库）。
 
     深技大规定：知网文字重合率 <30% 合格，校级优秀 <20%。本函数无法直接调
@@ -353,6 +353,8 @@ def check_duplication(md: str, lit_candidates=None):
       (1) 自重复：论文内两句话 4-gram Jaccard≥0.7 且长度接近 → 判定近重复；
       (2) 标题复刻：论文章节句与参考文献标题 4-gram Jaccard≥0.8 且重叠≥8字。
     返回 estimated_rate(0~1)、self_rate、title_rate、样本与告警级别。
+    flag 仅在 mode="sztu" 时给出（查重为深技大硬性要求）；general 模式只做信息性预估，
+    不触发不及格告警（各校本校查重口径不同，交由用户按所在学校复核）。
     """
     sents = _cn_sentences(md)
     if len(sents) < 5:
@@ -401,25 +403,33 @@ def check_duplication(md: str, lit_candidates=None):
 
     est = min(1.0, self_rate + 0.5 * title_rate)
     flag = None
-    if est >= 0.30:
-        flag = "fail(≥30% 合格线)"
-    elif est >= 0.20:
-        flag = "warn(≥20% 校级优秀线)"
+    if mode == "sztu":
+        if est >= 0.30:
+            flag = "fail(≥30% 合格线)"
+        elif est >= 0.20:
+            flag = "warn(≥20% 校级优秀线)"
     return {"estimated_rate": round(est, 4), "self_rate": round(self_rate, 4),
             "title_rate": round(title_rate, 4), "samples": samples, "flag": flag}
 
 
-def check_format_compliance(md: str):
-    """深技大格式合规（计入撰写规范维度）：关键词 3-4个且每词≤6字、中文摘要≥200字、
-    全文中文≥12000字、必备前置「封面」「诚信声明」、外文文献≥2篇。"""
+def check_format_compliance(md: str, mode: str = "general"):
+    """格式合规（计入撰写规范维度），按机构模式收紧/放宽。
+
+    general（默认，通用学术标准）：通用硬要求——关键词 3-4 个且每词≤6字、外文文献≥2 篇、
+        中文摘要≥200 字、全文字数≥8000 字（通用下限，不作深技大 12000 硬线）、
+        封面/诚信声明为推荐项（缺失仅轻微扣分）。
+    sztu（深圳技术大学预设）：在通用要求之上叠加深技大公文通硬要求——全文字数≥12000、
+        必备前置「封面」「诚信声明」（缺失重扣）。
+    """
     issues = []
     score = 100
+    sztu = (mode == "sztu")
     # 关键词
     m = re.search(r'关键词[：:]\s*(.+)', md)
     if m:
         kws = [k.strip().strip('*').strip('`').strip() for k in re.split(r'[；;]', m.group(1)) if k.strip()]
         if len(kws) > 4:
-            issues.append(f"关键词 {len(kws)} 个（深技大要求 3-4 个）")
+            issues.append(f"关键词 {len(kws)} 个（通用要求 3-4 个）")
             score -= 15
         over = [k for k in kws if len(k) > 6]
         if over:
@@ -433,27 +443,28 @@ def check_format_compliance(md: str):
     if am:
         cn = sum(1 for c in am.group(1) if '一' <= c <= '鿿')
         if cn < 200:
-            issues.append(f"中文摘要 {cn} 字（深技大要求≥200字）")
+            issues.append(f"中文摘要 {cn} 字（要求≥200字）")
             score -= 15
     # 全文字数
     cn_all = sum(1 for c in md if '一' <= c <= '鿿')
-    if cn_all < 12000:
-        issues.append(f"全文中文 {cn_all} 字（深技大要求≥12000字）")
-        score -= 15
+    word_floor = 12000 if sztu else 8000
+    if cn_all < word_floor:
+        issues.append(f"全文中文 {cn_all} 字（{'深技大要求' if sztu else '通用下限'}≥{word_floor}字）")
+        score -= (15 if sztu else 10)
     # 必备前置
     if '诚信声明' not in md:
-        issues.append("缺少「诚信声明」章节（深技大必备前置）")
-        score -= 10
+        issues.append("缺少「诚信声明」章节" + ("（深技大必备前置）" if sztu else "（建议补齐）"))
+        score -= (10 if sztu else 5)
     if '封面' not in md:
-        issues.append("缺少「封面」要素（深技大必备前置）")
-        score -= 10
+        issues.append("缺少「封面」要素" + ("（深技大必备前置）" if sztu else "（建议补齐）"))
+        score -= (10 if sztu else 5)
     # 外文文献≥2
     mr = re.search(r'#{1,4}\s*参考文献', md)
     ref = md[mr.start():] if mr else ""
     ref_items = re.findall(r'^\[\d+\].*$', ref, re.M)
     foreign = sum(1 for it in ref_items if re.search(r'[A-Za-z]{4,}', it))
     if foreign < 2:
-        issues.append(f"外文文献 {foreign} 篇（深技大要求≥2篇）")
+        issues.append(f"外文文献 {foreign} 篇（要求≥2篇）")
         score -= 10
     return max(0, score), issues
 
@@ -469,8 +480,163 @@ def _review_organization(md: str):
     return score, issue
 
 
-def run(paper_path, lit_candidates=None, store=None, out_path=None):
-    """主入口：对一篇论文给出评分 verdict。"""
+def check_research_depth(md: str, analysis_json=None):
+    """研究深度 / 论题复杂度评估（新方法，信息性维度，不计入加权分）。
+
+    把论文归类到三种研究范式之一，并给出削弱论题深度的风险信号：
+      - 原创/改进方法研究：明确提出新框架/算法/模型，并配消融或跨数据集验证。
+      - 模型对比型实证研究：仅对现有方法做统一基准对比（本系统默认产出即此类）。
+    同时检测「默认超参 / 小样本 / 缺消融」等削弱深度的信号，给出提升建议。
+    """
+    proposes = bool(re.search(
+        r'本文提出[^\n。]{0,40}(框架|算法|模型|方法|网络|模块|策略|流程|机制)', md))
+    default_hp = bool(re.search(
+        r'默认超?参数|默认配置|默认设置|未进行.*调优|未系统.*调优|未对超参数|默认超参数配置', md))
+    ablation = bool(re.search(r'消融|超参数.*搜索|网格搜索|参数寻优|调优实验|敏感性分析', md))
+    multi = ("跨数据集" in md) or (
+        isinstance(analysis_json, dict) and analysis_json.get("task_type") == "multi_dataset")
+    n = None
+    if isinstance(analysis_json, dict):
+        n = (analysis_json.get("n_samples") or analysis_json.get("n")
+             or analysis_json.get("sample_count") or analysis_json.get("num_samples"))
+    small = (n is not None and isinstance(n, int) and n < 500)
+    if proposes:
+        level = "原创/改进方法研究" if (ablation or multi) else "改进型（有方法提出但缺消融/跨数据集验证）"
+    else:
+        level = "模型对比型实证研究"
+    signals = {
+        "proposes_method": proposes,
+        "default_hyperparams": default_hp,
+        "ablation_or_tuning": ablation,
+        "multi_dataset": multi,
+        "small_sample": small,
+        "n_samples": n,
+    }
+    adv = []
+    if not proposes:
+        adv.append("未提出新方法，属现有方法对比型；若需提升论题深度，可在 spec 中增加「本文提出的改进方法」"
+                   "（如融合集成 / 特征工程 / 超参数寻优）并配消融分析作为贡献点。")
+    if default_hp:
+        adv.append("全文使用默认超参数，方法潜力可能被低估；建议补充超参数寻优或敏感性分析。")
+    if small:
+        adv.append(f"样本量仅约 {n} 条，结论外推性受限；建议补充外部数据集或显式说明小样本适用性边界。")
+    if not multi and not ablation:
+        adv.append("缺消融 / 跨数据集验证，贡献的因果归因偏弱，易被判为「换数据集跑分」。")
+    return {"level": level, "signals": signals, "advisory": adv}
+
+
+def check_quality_profile(md: str, candidates=None, analysis_json=None) -> dict:
+    """整篇文章质量画像（新方法，信息性维度，不计入加权分）。
+
+    直接回应「不要只判深度，整篇文章质量都要评判」：从六个互相独立的轴线给论文画像，
+    每轴 0~100 并附诊断，再给综合分与最弱项。六轴：
+      文献丰富度 / 数学严谨度 / 方法贡献度 / 实验严谨度 / 结构与叙事 / 写作规范。
+    该画像只用于「量」与「诊断」，不参与 rubric 加权，故不会拉低既有总分。
+    """
+    prof: dict = {}
+    cands = candidates or []
+    n = len(cands)
+    tiers = [c.get("venue_tier") or 0 for c in cands]
+    top_ratio = (sum(1 for t in tiers if t >= 0.8) / n) if n else 0.0
+    avg_q = (sum(c.get("quality_score", 0) or 0 for c in cands) / n) if n else 0.0
+    lit = 100
+    if n < 30:
+        lit -= 30
+    elif n < 45:
+        lit -= 10
+    if top_ratio < 0.2:
+        lit -= 20
+    elif top_ratio < 0.4:
+        lit -= 10
+    prof["literature_richness"] = {
+        "score": max(0, lit), "count": n,
+        "top_venue_ratio": round(top_ratio, 2), "avg_quality": round(avg_q, 2),
+        "diagnosis": (f"入选文献 {n} 篇、顶刊/顶会占比 {top_ratio:.0%}；"
+                      + ("文献量偏少或权威度不足，建议扩充至 40+ 篇并提升权威来源。"
+                         if lit < 80 else "文献量与权威度达标。")),
+    }
+    # 数学严谨度
+    eq_blocks = len(re.findall(r'式\s*[（(]\d+[）)]', md))
+    has_deriv = bool(re.search(r'其中|推导|代入|展开|由式', md))
+    math = 100
+    if eq_blocks < 3:
+        math -= 40
+    elif eq_blocks < 5:
+        math -= 20
+    if not has_deriv:
+        math -= 15
+    prof["mathematical_rigor"] = {
+        "score": max(0, math), "formula_count": eq_blocks, "has_derivation": has_deriv,
+        "diagnosis": (f"编号公式 {eq_blocks} 个" + ("、缺符号推导说明" if not has_deriv else "、含符号推导")
+                      + ("；公式密度偏低，建议补充问题形式化与评估框架。" if math < 80 else "。")),
+    }
+    # 方法贡献度（复用研究深度结论）
+    d = check_research_depth(md, analysis_json)
+    lvl = d["level"]
+    mscore = {"原创/改进方法研究": 100,
+              "改进型（有方法提出但缺消融/跨数据集验证）": 75,
+              "模型对比型实证研究": 45}.get(lvl, 60)
+    prof["methodological_contribution"] = {
+        "score": mscore, "level": lvl,
+        "diagnosis": "方法贡献层级：" + lvl + ("；建议补充方法创新点。" if mscore < 80 else "；具备方法贡献。"),
+    }
+    # 实验严谨度
+    exp = _slice_chapter(md, "实验设置与数据", ["实验结果与分析"]) or ""
+    exp += _slice_chapter(md, "实验结果与分析", ["深入分析与"]) or ""
+    exp += _slice_chapter(md, "深入分析与", ["讨论", "结论"]) or ""
+    rig = {
+        "cv": bool(re.search(r'交叉验证|随机种子|多种子|种子', exp or "")),
+        "ablation": bool(re.search(r'消融|敏感性分析|参数寻优|网格搜索', exp or "")),
+        "cross_dataset": ("跨数据集" in md),
+        "significance": bool(re.search(r'显著性|mcnemar|卡方|χ²|chi|配对', (exp or "") + md)),
+        "realnum": bool(re.search(r'\d+\.\d+%?|\d+%', md)),
+    }
+    es = 100
+    if not rig["cv"]:
+        es -= 25
+    if not rig["significance"]:
+        es -= 20
+    if not rig["realnum"]:
+        es -= 20
+    if not (rig["ablation"] or rig["cross_dataset"]):
+        es -= 15
+    prof["experimental_rigor"] = {
+        "score": max(0, es), **rig,
+        "diagnosis": ("实验严谨性：含交叉验证/多种子" + ("与显著性检验" if rig["significance"] else "但缺显著性检验")
+                      + ("；建议补充消融或跨数据集验证。" if not (rig["ablation"] or rig["cross_dataset"])
+                         else "；含消融/跨数据集验证。")),
+    }
+    # 结构与叙事
+    st, mc, mr = check_structure(md)
+    narrative = bool(re.search(r'摘要|目录|本章小结|绪论', md))
+    prof["structure_narrative"] = {
+        "score": st, "missing_core": mc, "missing_rec": mr,
+        "diagnosis": (("章节完整。" if not mc else f"缺核心章节：{mc}。")
+                      + ("叙事要素齐全。" if narrative else "叙事要素不全。")),
+    }
+    # 写作规范
+    wn, wn_is = check_writing_norms(md, "general")
+    prof["writing_norms"] = {
+        "score": wn, "issues": wn_is[:3],
+        "diagnosis": f"撰写规范分 {wn}" + ("；存在套话/格式问题需修。" if wn < 80 else "；基本规范。"),
+    }
+    keys = ["literature_richness", "mathematical_rigor", "methodological_contribution",
+            "experimental_rigor", "structure_narrative", "writing_norms"]
+    overall = round(sum(prof[k]["score"] for k in keys) / len(keys))
+    grade = "优秀" if overall >= 90 else ("良好" if overall >= 80 else ("中等" if overall >= 70 else "待提升"))
+    prof["overall"] = overall
+    prof["grade"] = grade
+    prof["summary"] = (f"整篇文章质量画像综合 {overall} 分（{grade}）。"
+                       f"最弱项见各分项诊断；优先补强最弱维度可最有效提升论题厚度与深度。")
+    return prof
+
+
+def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = "general"):
+    """主入口：对一篇论文给出评分 verdict。
+
+    mode: "general"（默认，通用学术标准，985 rubric）或 "sztu"（深圳技术大学预设，
+    叠加深技大公文通硬要求：12000 字、封面/诚信声明必备、查重硬门）。
+    """
     md = Path(paper_path).read_text(encoding="utf-8")
     verdict = {"passed": False, "gate": "hard_fail", "scores": {}, "issues": [], "suggestions": []}
 
@@ -542,7 +708,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None):
         verdict["suggestions"].append("结论明确创新点 / 独立见解，建议单列「本文创新点」小节")
 
     # 6) 撰写质量与学术规范
-    wn, wn_is = check_writing_norms(md)
+    wn, wn_is = check_writing_norms(md, mode)
     verdict["scores"]["writing_norms"] = wn
     for i in wn_is:
         verdict["issues"].append("撰写规范：" + i)
@@ -553,8 +719,8 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None):
         if "参考文献" in i:
             verdict["suggestions"].append("补充近五年 / 近两年文献，引用总数达到 ≥20")
 
-    # 7) 查重预估自检（深技大：知网重合率 <30% 合格、校级优秀 <20%）
-    dup = check_duplication(md, cands)
+    # 7) 查重预估自检（深技大：知网重合率 <30% 合格、校级优秀 <20%；general 模式仅信息性预估）
+    dup = check_duplication(md, cands, mode)
     verdict["estimated_plagiarism_rate"] = dup["estimated_rate"]
     verdict["plagiarism_flag"] = dup["flag"]
     verdict["plagiarism_samples"] = dup["samples"]
@@ -567,6 +733,53 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None):
                                 "请降低论文内部重复句与对参考文献标题的逐字复刻；"
                                 "正式提交前仍须用知网做全网查重（本预估不含知网库）")
         verdict["suggestions"].append("改写重复/复刻段落，降低查重预估重合率；提交前用知网全网查重复核")
+
+    # 8) 研究深度 / 论题复杂度（新维度，信息性，不计入加权分；直接回应「论题是否过简单」）
+    _analysis_path = Path(paper_path).resolve().parent.parent / "03_experiment.json"
+    _aj = None
+    if _analysis_path.exists():
+        try:
+            _aj = json.loads(_analysis_path.read_text(encoding="utf-8"))
+            if isinstance(_aj, dict) and isinstance(_aj.get("analysis"), dict):
+                _aj = _aj["analysis"]
+        except Exception:
+            _aj = None
+    depth = check_research_depth(md, _aj)
+    verdict["research_depth"] = depth
+
+    # 9) 整篇文章质量画像（六维，信息性，不计入加权分；直接回应「整篇质量如何评判」）
+    profile = check_quality_profile(md, cands, _aj)
+    verdict["quality_profile"] = profile
+    _qkeys = ("literature_richness", "mathematical_rigor", "methodological_contribution",
+              "experimental_rigor", "structure_narrative", "writing_norms")
+    _weak = min(_qkeys, key=lambda k: profile[k]["score"])
+    verdict["suggestions"].append(
+        f"整篇质量画像综合 {profile['overall']} 分（{profile['grade']}），最弱维度"
+        f"「{_weak}」（{profile[_weak]['score']} 分）：{profile[_weak]['diagnosis']}")
+    if depth["level"] == "模型对比型实证研究":
+        verdict["suggestions"].insert(
+            0,
+            "本论文属「模型对比型」研究，与高质量范文（方法创新型）在方法原创性上存在本质差距；"
+            "若需提升论题深度，可在 spec 中增加「本文提出的改进方法」并配消融/跨数据集验证。")
+    for _a in depth["advisory"]:
+        verdict["suggestions"].append("研究深度：" + _a)
+
+    # 9) 范文对标（懒加载 benchmark_corpus，若存在且 corpus/ 有范文则对标）
+    try:
+        _bm_path = ROOT / "benchmark_corpus.py"
+        _corpus_dir = ROOT / "corpus"
+        if _bm_path.exists() and _corpus_dir.exists():
+            import importlib.util as _iu
+            _spec = _iu.spec_from_file_location("benchmark_corpus", str(_bm_path))
+            _bm = _iu.module_from_spec(_spec)
+            _spec.loader.exec_module(_bm)
+            _rep = _bm.benchmark(str(paper_path), str(_corpus_dir))
+            verdict["corpus_benchmark"] = _rep
+            _gap = _rep.get("headline_gap")
+            if _gap:
+                verdict["suggestions"].append("范文对标：" + _gap)
+    except Exception:
+        pass
 
     # 综合与门控
     overall = round(sum(WEIGHTS[k] * verdict["scores"][k] for k in WEIGHTS), 1)
@@ -603,6 +816,8 @@ def main():
     ap.add_argument("paper", help="paper_full.md 路径")
     ap.add_argument("--lit", help="文献候选 JSON（02_literature_candidates.json）路径")
     ap.add_argument("--out", help="输出 verdict JSON 路径")
+    ap.add_argument("--mode", default="general",
+                    help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     args = ap.parse_args()
     cands = None
     if args.lit and Path(args.lit).exists():
@@ -611,7 +826,7 @@ def main():
             cands = d if isinstance(d, list) else (d.get("papers") or d.get("candidates") or [])
         except Exception:
             cands = None
-    v = run(args.paper, lit_candidates=cands, out_path=args.out)
+    v = run(args.paper, lit_candidates=cands, out_path=args.out, mode=args.mode)
     print(json.dumps(v, ensure_ascii=False, indent=2))
     sys.exit(0 if v["passed"] else 1)
 

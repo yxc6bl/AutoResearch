@@ -82,15 +82,19 @@ def _dataset_meta(data_override: dict | None) -> str | None:
             f"特征列含 {feats}{tinfo}。")
 
 
-def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
+def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general") -> dict:
     """程序化 API：给定 spec，端到端产出分析 + 论文。
 
     返回 dict：{analysis, out_dir, paper(路径或None), errors(list)}
+    mode: general（默认，通用学术标准）或 sztu（深圳技术大学预设）。
     """
     out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1) 写 spec 副本（论文生成器要读标题 / 指标 / 假设等）
+    # 写入机构模式，供 generate_paper 决定封面/诚信声明措辞
+    spec = dict(spec)
+    spec["institution_mode"] = mode
     (out_dir / "task_spec.json").write_text(
         json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -113,7 +117,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
             _q = (spec.get("literature_query") or spec.get("topic")
                   or spec.get("direction") or spec.get("research_question") or "")
             if _q:
-                _papers = la.run(_q, max_results=20, top_n=20, out_path=lit_path,
+                _papers = la.run(_q, max_results=25, top_n=45, out_path=lit_path,
                                  source_tag=str(out_dir))
                 print(f"[literature] 检索/记忆到 {len(_papers)} 篇文献")
             else:
@@ -171,7 +175,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
                             _cands = None
                     if _md.exists():
                         _verdict = ea.run(
-                            str(_md), lit_candidates=_cands,
+                            str(_md), lit_candidates=_cands, mode=mode,
                             out_path=out_dir / "06_paper" / "07_eval_verdict.json")
                         result["eval"] = _verdict
                         _ok = "[通过]" if _verdict["passed"] else "[未通过(建议重做)]"
@@ -191,7 +195,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True) -> dict:
 
 def cmd_run(args) -> int:
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
-    res = run_task(spec, args.out, make_paper=not args.no_paper)
+    res = run_task(spec, args.out, make_paper=not args.no_paper, mode=args.mode)
     a = res["analysis"]
     summary = {
         "out_dir": res["out_dir"],
@@ -258,7 +262,7 @@ def cmd_plan(args) -> int:
             la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
             papers = la.run(
                 spec.get("literature_query") or args.topic,
-                max_results=20, top_n=20, out_path=out_dir / "01_literature.json",
+                max_results=25, top_n=45, out_path=out_dir / "01_literature.json",
                 source_tag=str(out_dir),
             )
             print(f"[literature] 检索/记忆到 {len(papers)} 篇文献")
@@ -266,7 +270,7 @@ def cmd_plan(args) -> int:
             print(f"[literature] 检索失败（不影响主流程）：{e}")
 
     # 4) 跑分析 + 出论文
-    res = run_task(spec, out_dir, make_paper=not args.no_paper)
+    res = run_task(spec, out_dir, make_paper=not args.no_paper, mode=args.mode)
     a = res["analysis"]
     summary = {
         "out_dir": res["out_dir"],
@@ -334,12 +338,12 @@ def cmd_iterate(args) -> int:
                 la = _load_module(ROOT / "agents" / "literature_agent.py", "literature_agent")
                 la.run(
                     prev_spec.get("literature_query") or args.topic,
-                    max_results=10, out_path=out_dir / "01_literature.json",
+                    max_results=25, out_path=out_dir / "01_literature.json",
                     source_tag=str(out_dir),
                 )
             except Exception as e:  # noqa: BLE001
                 print(f"[literature] 检索失败（不影响主流程）：{e}")
-        res = run_task(prev_spec, out_dir, make_paper=not args.no_paper)
+        res = run_task(prev_spec, out_dir, make_paper=not args.no_paper, mode=args.mode)
         prev_result = res["analysis"]
         _ds_items = prev_spec.get("datasets") or []
         if not _ds_items and prev_spec.get("data"):
@@ -373,6 +377,8 @@ def main() -> int:
     rp.add_argument("--spec", required=True, help="任务 spec JSON 路径")
     rp.add_argument("--out", default="out_auto", help="产物输出目录")
     rp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
+    rp.add_argument("--mode", default="general",
+                    help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     rp.set_defaults(func=cmd_run)
 
     pp = sub.add_parser("plan", help="给一句研究主题，自动规划 spec + 拉文献 + 出论文")
@@ -386,6 +392,8 @@ def main() -> int:
     pp.add_argument("--na_values", default="", help="缺失值标记（如 '?'，多个用逗号分隔）")
     pp.add_argument("--no-literature", action="store_true", help="跳过 arXiv 文献检索")
     pp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
+    pp.add_argument("--mode", default="general",
+                    help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     pp.set_defaults(func=cmd_plan)
 
     ip = sub.add_parser("iterate", help="给主题，Planner 多轮迭代（扩宽数据集/方法）自动出论文")
@@ -400,6 +408,8 @@ def main() -> int:
     ip.add_argument("--na_values", default="", help="缺失值标记（如 '?'，多个用逗号分隔）")
     ip.add_argument("--no-literature", action="store_true", help="跳过 arXiv 文献检索")
     ip.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
+    ip.add_argument("--mode", default="general",
+                    help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     ip.set_defaults(func=cmd_iterate)
 
     args = ap.parse_args()

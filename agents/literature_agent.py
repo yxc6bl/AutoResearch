@@ -138,11 +138,29 @@ def _venue_tier(venue: str, url: str = "") -> float:
     return 0.0
 
 
+# ── 参考文献角色分类（用于综述按路线组织 + 保证正文全覆盖引用） ──
+_ROLE_SURVEY = ("survey", "review", "systematic review", "state-of-the-art", "taxonomy", "literature review")
+_ROLE_DATASET = ("dataset", "benchmark", "corpus", "database", "data set")
+_ROLE_THEORY = ("theory", "theoretical", "framework", "foundation", "principle", "formalism")
+
+
+def _classify_role(p: dict) -> str:
+    """把文献归类为 综述 / 基准数据集 / 理论基础 / 方法 之一（依据标题关键词）。"""
+    t = (p.get("title") or "").lower()
+    if any(k in t for k in _ROLE_SURVEY):
+        return "综述"
+    if any(k in t for k in _ROLE_DATASET):
+        return "基准数据集"
+    if any(k in t for k in _ROLE_THEORY):
+        return "理论基础"
+    return "方法"
+
+
 def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
                   max_retries: int = 3) -> list[dict]:
     params = {
         "search": query,
-        "per_page": max_results,
+        "per_page": max(50, int(max_results) * 3),
         "sort": "relevance_score:desc",
         "select": "id,title,abstract_inverted_index,authorships,primary_location,"
                   "publication_year,cited_by_count,doi,relevance_score",
@@ -267,22 +285,48 @@ def fetch(query: str, max_results: int = 10,
         if not pid or pid in seen:
             continue
         p["source"] = "arxiv" if "arxiv.org" in str(p.get("url", "")) else "openalex"
+        p["venue_tier"] = _venue_tier(p.get("venue"), p.get("url"))
+        p["role"] = _classify_role(p)
         p["quality_score"] = _quality_score(p)
         seen[pid] = p
     return sorted(seen.values(), key=lambda x: x.get("quality_score", 0), reverse=True)
 
 
 # ── 选择窗口 ──
-def select(candidates: list[dict], mode: str = "auto", top_n: int = 8,
+def select(candidates: list[dict], mode: str = "auto", top_n: int = 40,
            chosen_ids: list[str] | None = None) -> list[dict]:
-    """从候选中选定用于论文的文献。
-    mode="auto"：取 quality_score 最高的 top_n（流水线默认，不阻塞）。
-    chosen_ids 给定：按使用者勾选返回（网页界面将走这条路）。
+    """从候选中选定用于论文的文献（流水线默认 auto，不阻塞）。
+
+    选择策略（对齐「文献数 ↑ / 顶刊占比 ↑ / 角色覆盖」三项短板）：
+      1) 先确保顶刊/顶会配额：quality_score 排序后，优先取 venue_tier≥0.8 的前
+         max(10, top_n//3) 篇，保证顶会/顶刊来源占比；
+      2) 再用剩余候选按质量分填满至 top_n；
+      3) chosen_ids 给定时按使用者勾选返回（网页界面将走这条路）。
     """
     if chosen_ids is not None:
         idset = set(chosen_ids)
         return [c for c in candidates if c["id"] in idset]
-    return candidates[:top_n]
+    for c in candidates:
+        c.setdefault("venue_tier", _venue_tier(c.get("venue"), c.get("url")))
+        c.setdefault("role", _classify_role(c))
+    ranked = sorted(candidates, key=lambda x: x.get("quality_score", 0), reverse=True)
+    venue_quota = max(10, top_n // 3)
+    chosen, seen_ids = [], set()
+    for c in ranked:
+        if c.get("venue_tier", 0) >= 0.8 and \
+           sum(1 for x in chosen if x.get("venue_tier", 0) >= 0.8) < venue_quota:
+            chosen.append(c)
+            seen_ids.add(c["id"])
+        if len(chosen) >= top_n:
+            break
+    for c in ranked:
+        if c["id"] in seen_ids:
+            continue
+        chosen.append(c)
+        seen_ids.add(c["id"])
+        if len(chosen) >= top_n:
+            break
+    return chosen
 
 
 def _now_iso() -> str:
@@ -299,7 +343,7 @@ def _store_candidate(store: MemoryStore, c: dict, tag: str) -> None:
 
 def run(query: str, max_results: int = 10, sources: tuple = ("arxiv", "openalex"),
         store: MemoryStore | None = None, out_path: Path | None = None,
-        source_tag: str = "", top_n: int = 8,
+        source_tag: str = "", top_n: int = 40,
         selection: list[str] | None = None) -> list[dict]:
     """执行一次文献获取：多源抓取 → 落记忆 → 选择 → 写产物。
 
