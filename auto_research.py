@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from engine import trace  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent
 ANALYSIS_ENGINE = ROOT / "engine" / "analysis_engine.py"
 GEN_PAPER = ROOT / "paper" / "generate_paper.py"
@@ -216,6 +218,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     )
 
     # 2) 文献：LM 驱动检索 Agent（真正理解选题去搜+筛）→ 文献审评 Agent（第二双眼睛）
+    _t_stage = time.time()
     lit_path = out_dir / "01_literature.json"
     _need_fetch = False
     if not lit_path.exists():
@@ -268,6 +271,10 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
         json.dumps(hyps, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
+    trace.record(out_dir, "literature", time.time() - _t_stage,
+                 detail=("复用已有" if not _need_fetch else "新检索"))
+    _t_stage = time.time()
+
     # 3) 确定性分析（ExperimentAgent 封装，写 project memory）
     result: dict = {"analysis": None, "out_dir": str(out_dir), "paper": None, "errors": []}
     exp_path = out_dir / "03_experiment.json"
@@ -282,6 +289,11 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     if analysis.get("error"):
         result["errors"].append("分析失败: " + str(analysis["error"]))
         return result
+
+    trace.record(out_dir, "analysis", time.time() - _t_stage,
+                 status=("error" if result["analysis"].get("error") else "ok"),
+                 detail=str(result["analysis"].get("best_method") or ""))
+    _t_stage = time.time()
 
     # 4) 生成论文 + 评审闭环（WritingAgent 写作 → EvalAgent 的 LLM 评审官审 → 回滚重写）
     #    一个人写、另一个人审：LLM 评审官审不过（verdict=revise）就把意见写成 04_review.json，
@@ -359,10 +371,18 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
             result["errors"].append(f"generate_paper 异常: {e}")
 
         # 交付状态：模型没参与写作就明确标「不可交付」，防止半成品被当成品
+        _deliv = True
         try:
-            mark_delivery(out_dir)
+            _dstat = mark_delivery(out_dir)
+            _deliv = bool(_dstat.get("deliverable", True))
         except Exception as e:  # noqa: BLE001
             print(f"[交付状态] 判定跳过：{e}")
+        try:
+            trace.record(out_dir, "write+review", time.time() - _t_stage,
+                         status=("error" if result["errors"] else "ok"),
+                         detail=("deliverable" if _deliv else "degraded"))
+        except Exception:
+            pass
 
         # 6) 文献使用反馈：记录本次哪些论文真的被正文引用，供后续检索优先复用
         try:
@@ -647,7 +667,11 @@ def cmd_step(args) -> int:
             return 1
         spec = json.loads(spec_p.read_text(encoding="utf-8"))
         ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")
+        _t0 = time.time()
         res = ea.run(spec, out / "03_experiment.json")
+        trace.record(out, "analysis", time.time() - _t0,
+                     status=("error" if res.get("error") else "ok"),
+                     detail=str(res.get("best_method") or ""))
         if res.get("error"):
             print("[step experiment] 失败：", res["error"])
             return 1
@@ -658,9 +682,13 @@ def cmd_step(args) -> int:
 
     if name == "write":
         wa = _load_module(ROOT / "agents" / "writing_agent.py", "writing_agent")
+        _t0 = time.time()
         r = wa.run(out, out / "task_spec.json", timeout=args.timeout)
         print(f"[step write] returncode={r['returncode']} paper={r['paper']}")
-        mark_delivery(out, r.get("llm_written"))
+        _d = mark_delivery(out, r.get("llm_written"))
+        trace.record(out, "write", time.time() - _t0,
+                     status=("ok" if r["returncode"] == 0 else "error"),
+                     detail=("deliverable" if _d.get("deliverable") else "degraded"))
         if r["returncode"] != 0:
             print(r["stderr"][-800:])
             return 1
@@ -695,11 +723,33 @@ def cmd_step(args) -> int:
             print(f"[step polish] 缺少 {md}，先跑 step --name write")
             return 1
         pol = _load_module(ROOT / "agents" / "polish_agent.py", "polish_agent")
-        pol.run(str(md))
+        _t0 = time.time()
+        _rep = pol.run(str(md))
+        trace.record(out, "polish", time.time() - _t0,
+                     detail=f"changes={_rep.get('total', 0)}")
         return 0
 
     print(f"[step] 未知步骤：{name}")
     return 1
+
+
+def cmd_trace(args) -> int:
+    """查看某次运行的执行轨迹：各阶段耗时、状态、最慢的一步。"""
+    from engine import trace
+
+    sm = trace.summary(args.out)
+    if not sm["n_stages"]:
+        print(f"{args.out} 下没有执行记录（00_trace.jsonl）。")
+        return 1
+    print(f"共 {sm['n_stages']} 个阶段，累计 {sm['total_s']}s"
+          + (f"，最慢：{sm['slowest']['stage']}（{sm['slowest']['duration_s']}s）"
+             if sm["slowest"] else ""))
+    for r in sm["stages"]:
+        flag = "" if r["status"] == "ok" else f" [{r['status']}]"
+        print(f"  {r['ts'][11:]}  {r['stage']:14s} {r['duration_s']:8.2f}s  {r['detail']}{flag}")
+    if sm["failed"]:
+        print(f"失败阶段：{'、'.join(sm['failed'])}")
+    return 0
 
 
 def cmd_feedback(args) -> int:
@@ -983,6 +1033,10 @@ def main() -> int:
     sp.add_argument("--planner", action="store_true", help="plan 用 LLM 规划器（默认确定性解析）")
     sp.add_argument("--timeout", type=int, default=1800, help="write 步骤子进程超时")
     sp.set_defaults(func=cmd_step)
+
+    tp = sub.add_parser("trace", help="查看某次运行的执行轨迹（各阶段耗时/状态）")
+    tp.add_argument("--out", required=True, help="产物目录")
+    tp.set_defaults(func=cmd_trace)
 
     fbp = sub.add_parser("feedback", help="反馈台账：统计/教训/补记/标记修复/导出回归用例")
     fbp.add_argument("--stats", action="store_true", help="按类型统计问题分布")
