@@ -49,7 +49,8 @@ def _norm_type(t: str) -> str:
 def add(detail: str, type: str = "其他", severity: str = "P2",
         stage: str = "", run_dir: str = "", topic: str = "",
         evidence: str = "", action: str = "", status: str = "open",
-        source: str = "manual") -> dict:
+        source: str = "manual", provenance: str = "human",
+        confidence: str = "medium") -> dict:
     """追加一条反馈记录。返回写入的记录。"""
     rec = {
         "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
@@ -63,6 +64,10 @@ def add(detail: str, type: str = "其他", severity: str = "P2",
         "action": (action or "").strip()[:200],
         "status": status if status in ("open", "doing", "fixed", "wontfix") else "open",
         "source": source,
+        # 来源与把握程度：参考 nanoMuse 的「记忆要能溯源」——一条规则判出来的问题，
+        # 和一个人工批注、模型判断，可信度不同，后续使用时的权重也应不同。
+        "provenance": provenance if provenance in ("rule", "model", "human") else "human",
+        "confidence": confidence if confidence in ("high", "medium", "low") else "medium",
     }
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with open(LEDGER, "a", encoding="utf-8") as f:
@@ -115,12 +120,16 @@ def lessons(limit: int = 5, min_count: int = 2) -> list[str]:
         if r.get("status") in ("fixed", "wontfix"):
             continue
         agg.setdefault(r.get("type") or "其他", []).append(r)
+    _rank = {"human": 3, "model": 2, "rule": 1}
     out = []
     for t, items in sorted(agg.items(), key=lambda kv: -len(kv[1])):
         if len(items) < min_count:
             continue
-        sample = items[-1].get("detail") or ""
-        out.append(f"[{t}] 已出现 {len(items)} 次，上次：{sample}")
+        items.sort(key=lambda r: _rank.get(r.get("provenance"), 0), reverse=True)
+        head = items[0]
+        sample = head.get("detail") or ""
+        out.append(f"[{t}] 已出现 {len(items)} 次（来源 {head.get('provenance', '?')}），"
+                   f"上次：{sample}")
         if len(out) >= limit:
             break
     return out
@@ -163,11 +172,12 @@ def record_eval_verdict(verdict: dict, run_dir: str, topic: str = "") -> int:
         elif any(k in s for k in ("套话", "单句", "段落", "术语")):
             t = "写作风格"
         add(s, type=t, severity="P1", stage="eval", run_dir=run_dir,
-            topic=topic, source="eval")
+            topic=topic, source="eval", provenance="rule", confidence="high")
         n += 1
     for h in (verdict.get("llm_judge", {}) or {}).get("hallucinations", [])[:10]:
         add(str(h), type="内容矛盾", severity="P0", stage="eval",
-            run_dir=run_dir, topic=topic, source="eval")
+            run_dir=run_dir, topic=topic, source="eval",
+            provenance="model", confidence="medium")
         n += 1
     return n
 

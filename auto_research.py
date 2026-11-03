@@ -627,7 +627,8 @@ def cmd_feedback(args) -> int:
     if args.add:
         rec = FB.add(args.add, type=args.type, severity=args.severity,
                      stage=args.stage, run_dir=args.out or "", topic=args.topic,
-                     source="manual")
+                     source="manual", provenance=args.provenance,
+                     confidence=args.confidence)
         print(json.dumps(rec, ensure_ascii=False, indent=2))
         return 0
     # 默认：最近 10 条
@@ -879,6 +880,10 @@ def main() -> int:
     fbp.add_argument("--fix", type=int, default=0, help="标记第 N 条的状态")
     fbp.add_argument("--status", default="fixed", choices=["fixed", "doing", "wontfix", "open"])
     fbp.add_argument("--min-count", type=int, default=2)
+    fbp.add_argument("--provenance", default="human", choices=["human", "model", "rule"],
+                     help="这条反馈的来源：人/模型/规则")
+    fbp.add_argument("--confidence", default="medium", choices=["high", "medium", "low"],
+                     help="这条反馈的把握程度")
     fbp.set_defaults(func=cmd_feedback)
 
     dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
