@@ -40,3 +40,7 @@ corpus/
 
 # ── 实验图表产物（脚本直跑时可能落在仓库根） ──
 plots/
+
+# ── 运行期反馈台账与回归用例（各自机器生成） ──
+memory/*.jsonl
+memory/regression_cases.json

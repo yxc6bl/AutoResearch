@@ -675,6 +675,23 @@ WRITER_SYSTEM = """你是一位严谨的中文学术论文写作者，只做一�
 WRITER_SYSTEM += STYLE_RULES
 
 
+def _feedback_lessons() -> str:
+    """读取反馈台账里的高频未修复问题，作为写作时的硬约束注入。
+
+    这是 feedback 闭环的「消费端」：问题被记录 → 反复出现 → 下次写作前就必须规避，
+    而不是每次重新发现、重新解释。
+    """
+    try:
+        from engine import feedback as FB
+        items = FB.lessons(limit=5, min_count=2)
+        if not items:
+            return ""
+        return ("\n【历史反馈（同类问题已在本系统中反复出现，本次务必避免）】\n"
+                + "\n".join(f"- {x}" for x in items))
+    except Exception:
+        return ""
+
+
 def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
     """把真实素材压成一份给 LLM 的事实包。"""
     metrics = exp.get("metrics") or []
@@ -786,6 +803,9 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
         lines.append("## 真实参考文献（只能引用这些，引用格式用 [编号]）")
         for r in refs:
             lines.append(f"[{r['num']}] {r['authors']}. {r['title']}. {r['venue']}, {r['year']}.")
+    _lessons = _feedback_lessons()
+    if _lessons:
+        lines.append(_lessons)
     return "\n".join(lines)
 
 

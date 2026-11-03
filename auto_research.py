@@ -580,6 +580,17 @@ def cmd_step(args) -> int:
         v = ea.run(str(md), out_path=out / "06_paper" / "07_eval_verdict.json")
         print(f"[step eval] 综合 {v.get('overall')}｜硬门 {v.get('gate')}｜"
               f"通过={v.get('passed')}")
+        try:  # 自动采集：评审问题进反馈台账，供后续写作规避
+            from engine import feedback as FB
+            spec_p = out / "task_spec.json"
+            topic = ""
+            if spec_p.exists():
+                topic = json.loads(spec_p.read_text(encoding="utf-8")).get("title", "")
+            n = FB.record_eval_verdict(v, str(out), topic)
+            if n:
+                print(f"[step eval] 已记录 {n} 条反馈 → memory/feedback.jsonl")
+        except Exception as e:  # noqa: BLE001
+            print(f"[step eval] 反馈记录跳过：{e}")
         return 0
 
     if name == "polish":
@@ -593,6 +604,39 @@ def cmd_step(args) -> int:
 
     print(f"[step] 未知步骤：{name}")
     return 1
+
+
+def cmd_feedback(args) -> int:
+    """反馈台账：查看统计/教训、手工补记、标记修复、导出回归用例。"""
+    from engine import feedback as FB
+
+    if args.stats:
+        print(json.dumps(FB.stats(), ensure_ascii=False, indent=2))
+        return 0
+    if args.lessons:
+        items = FB.lessons(min_count=args.min_count)
+        print(json.dumps(items, ensure_ascii=False, indent=2) if items
+              else "暂无反复出现的问题（同一类型出现 ≥2 次才会成为教训）")
+        return 0
+    if args.export_cases:
+        print(json.dumps(FB.export_cases(), ensure_ascii=False, indent=2))
+        return 0
+    if args.fix:
+        print("已标记" if FB.mark(args.fix, args.status) else "序号越界")
+        return 0
+    if args.add:
+        rec = FB.add(args.add, type=args.type, severity=args.severity,
+                     stage=args.stage, run_dir=args.out or "", topic=args.topic,
+                     source="manual")
+        print(json.dumps(rec, ensure_ascii=False, indent=2))
+        return 0
+    # 默认：最近 10 条
+    rows = FB.load()[-10:]
+    for r in rows:
+        print(f"{r['ts']} [{r['type']}/{r['severity']}] {r['detail'][:70]}")
+    if not rows:
+        print("台账为空。用 --add 手工补记，或跑 step --name eval 自动采集。")
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -821,6 +865,21 @@ def main() -> int:
     sp.add_argument("--planner", action="store_true", help="plan 用 LLM 规划器（默认确定性解析）")
     sp.add_argument("--timeout", type=int, default=1800, help="write 步骤子进程超时")
     sp.set_defaults(func=cmd_step)
+
+    fbp = sub.add_parser("feedback", help="反馈台账：统计/教训/补记/标记修复/导出回归用例")
+    fbp.add_argument("--stats", action="store_true", help="按类型统计问题分布")
+    fbp.add_argument("--lessons", action="store_true", help="输出写作前应规避的教训")
+    fbp.add_argument("--export-cases", action="store_true", help="导出已修复问题的回归用例")
+    fbp.add_argument("--add", default="", help="手工补记一条问题描述")
+    fbp.add_argument("--type", default="其他", help="问题类型（数据错配/方法缺失/结构缺陷/内容矛盾/文献不足/写作风格/可复现性）")
+    fbp.add_argument("--severity", default="P2", choices=["P0", "P1", "P2"])
+    fbp.add_argument("--stage", default="manual")
+    fbp.add_argument("--topic", default="")
+    fbp.add_argument("--out", default="", help="关联的产物目录")
+    fbp.add_argument("--fix", type=int, default=0, help="标记第 N 条的状态")
+    fbp.add_argument("--status", default="fixed", choices=["fixed", "doing", "wontfix", "open"])
+    fbp.add_argument("--min-count", type=int, default=2)
+    fbp.set_defaults(func=cmd_feedback)
 
     dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
     dcp.set_defaults(func=cmd_doctor)
