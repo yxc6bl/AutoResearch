@@ -41,6 +41,14 @@ from engine import llm_client as LLM  # noqa: E402
 
 # ── 基础工具 ──────────────────────────────────────────────────────
 def _load(path: Path) -> dict:
+    """读取 JSON 产物；文件缺失时返回空 dict。
+
+    为什么要容忍：模块可单独调用（step --name write）时，用户可能没有跑文献检索，
+    不该因为缺 01_literature.json 就整篇写不出来——正文会如实标注「未提供文献」。
+    """
+    if not path.exists():
+        print(f"[generate_paper] 未找到 {path.name}，按空数据处理")
+        return {}
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -1330,7 +1338,9 @@ def main() -> int:
         if r["url"]:
             line += f". {r['url']}"
         ref_lines.append(line + ".")
-    references_block = "\n".join(ref_lines)
+    references_block = "\n".join(ref_lines) or (
+        "（本次生成未包含文献数据：未执行文献检索，或检索结果为空。"
+        "该章节需在补全文献后重新生成。）")
 
     # LLM 撰写文字（网关不可用/限流/重试耗尽时返回 {}，自动走 _fallback_sections）
     try:

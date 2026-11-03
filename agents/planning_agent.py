@@ -42,3 +42,16 @@ def iterate(prev_spec: dict, prev_result: dict, client=None, model=None,
     if isinstance(nxt, dict):
         store.put("project", f"spec_round_{round_idx}", {"spec": nxt})
     return nxt
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="规划 Agent：研究主题 → 任务 spec（可单独调用）")
+    ap.add_argument("--topic", required=True, help="研究主题/选题")
+    ap.add_argument("--out", required=True, help="spec 输出路径，如 out_x/task_spec.json")
+    ap.add_argument("--dataset", default="", help="可选：sklearn 内置数据集名（iris/wine/...）")
+    a = ap.parse_args()
+    _data = {"source": "sklearn", "name": a.dataset} if a.dataset else None
+    _spec = run(a.topic, data_override=_data, out_path=a.out)
+    print(json.dumps(_spec, ensure_ascii=False, indent=2)[:3000])

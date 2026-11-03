@@ -511,6 +511,90 @@ def cmd_datasets(args) -> int:
     return 0
 
 
+def cmd_step(args) -> int:
+    """只跑一个步骤（对应「模块可单独调用」）：plan / experiment / write / eval / polish。
+
+    每一步只读写自己那份产物，不依赖前一步的进程状态：
+      plan       → task_spec.json（默认用题目解析器，确定性；--planner 走 LLM 规划）
+      experiment → 03_experiment.json（读 task_spec.json）
+      write      → 06_paper/paper_full.{md,docx}（读 task_spec + 02/03/01）
+      eval       → 06_paper/07_eval_verdict.json（读 paper_full.md）
+      polish     → 06_paper/paper_full_polished.md（读 paper_full.md，纯规则）
+    """
+    name = args.name
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if name == "plan":
+        if not args.topic:
+            print("[step plan] 需要 --topic")
+            return 1
+        if args.planner:
+            pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
+            data = ({"source": "sklearn", "name": args.dataset} if args.dataset else None)
+            spec = pa.run(args.topic, data_override=data, out_path=out / "task_spec.json")
+            print("[step plan] 已用 LLM 规划器生成 spec")
+        else:
+            import engine.topic_parser as tp
+            data = ({"source": "sklearn", "name": args.dataset} if args.dataset else None)
+            spec = tp.assemble_title_spec(args.topic, data_override=data)
+            (out / "task_spec.json").write_text(
+                json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[step plan] 确定性解析：数据集={spec.get('_match_note')}")
+        print(f"  产物：{out / 'task_spec.json'}")
+        print("  下一步：python auto_research.py step --name experiment --out " + str(out))
+        return 0
+
+    if name == "experiment":
+        spec_p = out / "task_spec.json"
+        if not spec_p.exists():
+            print(f"[step experiment] 缺少 {spec_p}，先跑 step --name plan")
+            return 1
+        spec = json.loads(spec_p.read_text(encoding="utf-8"))
+        ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")
+        res = ea.run(spec, out / "03_experiment.json")
+        if res.get("error"):
+            print("[step experiment] 失败：", res["error"])
+            return 1
+        print(f"[step experiment] 完成：best={res.get('best_method')} "
+              f"value={res.get('best_value')} metrics={len(res.get('metrics') or [])}")
+        print("  下一步：python auto_research.py step --name write --out " + str(out))
+        return 0
+
+    if name == "write":
+        wa = _load_module(ROOT / "agents" / "writing_agent.py", "writing_agent")
+        r = wa.run(out, out / "task_spec.json", timeout=args.timeout)
+        print(f"[step write] returncode={r['returncode']} paper={r['paper']}")
+        if r["returncode"] != 0:
+            print(r["stderr"][-800:])
+            return 1
+        print("  下一步：step --name eval 或 step --name polish")
+        return 0
+
+    if name == "eval":
+        md = out / "06_paper" / "paper_full.md"
+        if not md.exists():
+            print(f"[step eval] 缺少 {md}，先跑 step --name write")
+            return 1
+        ea = _load_module(ROOT / "agents" / "eval_agent.py", "eval_agent")
+        v = ea.run(str(md), out_path=out / "06_paper" / "07_eval_verdict.json")
+        print(f"[step eval] 综合 {v.get('overall')}｜硬门 {v.get('gate')}｜"
+              f"通过={v.get('passed')}")
+        return 0
+
+    if name == "polish":
+        md = out / "06_paper" / "paper_full.md"
+        if not md.exists():
+            print(f"[step polish] 缺少 {md}，先跑 step --name write")
+            return 1
+        pol = _load_module(ROOT / "agents" / "polish_agent.py", "polish_agent")
+        pol.run(str(md))
+        return 0
+
+    print(f"[step] 未知步骤：{name}")
+    return 1
+
+
 def cmd_doctor(args) -> int:
     """一条命令自检：模型网关 + 文献数据源是否可用。明天想知道「好了没」就跑它。"""
     import time
@@ -727,6 +811,16 @@ def main() -> int:
     fp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     fp.set_defaults(func=cmd_from_title)
+
+    sp = sub.add_parser("step", help="只跑某一步（plan/experiment/write/eval/polish），便于单模块调用")
+    sp.add_argument("--name", required=True,
+                    choices=["plan", "experiment", "write", "eval", "polish"])
+    sp.add_argument("--out", required=True, help="产物目录")
+    sp.add_argument("--topic", default="", help="plan 步骤需要：题目/主题")
+    sp.add_argument("--dataset", default="", help="plan 步骤可选：sklearn 数据集名")
+    sp.add_argument("--planner", action="store_true", help="plan 用 LLM 规划器（默认确定性解析）")
+    sp.add_argument("--timeout", type=int, default=1800, help="write 步骤子进程超时")
+    sp.set_defaults(func=cmd_step)
 
     dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
     dcp.set_defaults(func=cmd_doctor)

@@ -46,3 +46,21 @@ def run(spec: dict, exp_path, store: MemoryStore | None = None):
         "analysis": analysis,
     })
     return analysis
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="实验 Agent：按 spec 跑确定性实验（可单独调用）")
+    ap.add_argument("--spec", required=True, help="task_spec.json 路径")
+    ap.add_argument("--out", required=True, help="分析产物输出路径，如 out_x/03_experiment.json")
+    a = ap.parse_args()
+    _spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
+    _res = run(_spec, a.out)
+    if _res.get("error"):
+        print("实验失败：", _res["error"])
+        raise SystemExit(1)
+    print(json.dumps({"best_method": _res.get("best_method"),
+                      "best_value": _res.get("best_value"),
+                      "n_metrics": len(_res.get("metrics") or [])},
+                     ensure_ascii=False, indent=2))
