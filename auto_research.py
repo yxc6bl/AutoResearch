@@ -386,6 +386,77 @@ def cmd_iterate(args) -> int:
     return 0
 
 
+def cmd_from_title(args) -> int:
+    """题目驱动执行：老师给题目/方向 → 确定性解析 → 匹配数据集 → 出论文。
+
+    不依赖 LLM（纯关键词规则），断网也能跑。论文标题直接使用老师给的题目。
+    """
+    import engine.topic_parser as tp  # 同源模块，直接 import 即可
+
+    title = args.title.strip()
+    direction = (args.direction or "").strip()
+    data_override = None
+    if args.data:
+        data_override = {"source": "csv", "path": str(Path(args.data).resolve()),
+                         "target": args.target or "target"}
+        if args.sep:
+            data_override["sep"] = args.sep
+        if args.na_values:
+            data_override["na_values"] = args.na_values
+    elif args.dataset:
+        data_override = {"source": "sklearn", "name": args.dataset}
+
+    method_hints = None
+    if args.methods:
+        method_hints = [m.strip() for m in args.methods.split(",") if m.strip()]
+
+    # 解析（先不绑定数据，便于在缺失时给出可读提示）
+    intent = tp.parse_title(title, direction)
+    print(f"[解析] 任务类型={intent['task_type']}  匹配数据集={intent['matched_dataset'] or '无'}  "
+          f"方法提示={intent['method_hints'] or '默认'}  "
+          f"暂不支持={intent['unsupported_methods'] or '无'}")
+
+    if not data_override:
+        matched = tp.match_dataset(title, direction)
+        if not matched:
+            print("[错误] 题目未匹配到本地数据集。可用数据集：")
+            for ds in tp.DATASET_CATALOG:
+                print(f"   - {ds['label']}（{ds['task']}）：关键词 {ds['domain_kw'][:3]}...")
+            print("请用 --data <CSV路径> --target <目标列> 自带数据，或 --dataset <sklearn名> 指定内置集。")
+            return 1
+
+    spec = tp.assemble_title_spec(title, direction, data_override=data_override,
+                                 method_hints=method_hints)
+    if spec.get("data") is None:
+        print("[错误] 无法确定数据集绑定。")
+        return 1
+    print(f"[绑定] {spec['_match_note']}")
+    if spec.get("_unsupported_methods"):
+        print(f"[提示] 题目提及但引擎暂未内置的方法：{spec['_unsupported_methods']}；"
+              f"将以经典机器学习方法 + 融合集成方法完成，论文如实说明。")
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    res = run_task(spec, out_dir, make_paper=not args.no_paper, mode=args.mode)
+    a = res["analysis"]
+    summary = {
+        "out_dir": res["out_dir"],
+        "paper": res["paper"],
+        "best_method": a.get("best_method"),
+        "best_value": a.get("best_value"),
+        "plots": [p.get("file") for p in a.get("plots", [])],
+        "errors": res["errors"],
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if a.get("error"):
+        print("分析层报错：", a["error"])
+        return 1
+    if a.get("task_type") != "multi_dataset" and (not a.get("metrics") or a.get("best_method") is None):
+        print("分析未产生有效结果。")
+        return 1
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="通用 Auto Research 入口：agent 喂 spec，它跑分析并产出论文"
@@ -430,6 +501,21 @@ def main() -> int:
     ip.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     ip.set_defaults(func=cmd_iterate)
+
+    fp = sub.add_parser("from_title", help="给老师给的论文题目/方向，确定性解析并出论文（不依赖 LLM）")
+    fp.add_argument("--title", required=True, help="老师给的论文题目（如「基于随机森林的心脏病预测研究」）")
+    fp.add_argument("--direction", default="", help="导师给的大方向/补充说明（可选，辅助领域匹配）")
+    fp.add_argument("--out", default="out_title", help="产物输出目录")
+    fp.add_argument("--data", default="", help="自带 CSV 路径（与 --target 配合，覆盖自动匹配）")
+    fp.add_argument("--dataset", default="", help="指定 sklearn 内置数据集名（如 iris / wine / breast_cancer）")
+    fp.add_argument("--target", default="", help="CSV 中目标列名或列索引")
+    fp.add_argument("--sep", default="", help="CSV 分隔符（如分号 ';'）")
+    fp.add_argument("--na_values", default="", help="缺失值标记（如 '?'）")
+    fp.add_argument("--methods", default="", help="指定方法 key 列表（rf,lr,svm,knn,gb,dt,nb，逗号分隔）")
+    fp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
+    fp.add_argument("--mode", default="general",
+                    help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
+    fp.set_defaults(func=cmd_from_title)
 
     args = ap.parse_args()
     if getattr(args, "func", None) is None:
