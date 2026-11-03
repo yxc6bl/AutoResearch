@@ -53,31 +53,72 @@ TITLES = [
 ]
 
 OK, MISS, WRONG = [], [], []
+
+# 不可执行题目的归因：区分「能力缺口」与「题目本身不适合本引擎」
+_REASONS = [
+    ("视觉/视频后端", ["图像", "视频", "检测", "分割", "去雨", "标志", "车辆识别", "无人收银", "收银"],
+     "需图像/视频模型（CNN 主干、检测头）；当前仅支持像素扁平化的小规模图像集"),
+    ("文本/语言模型", ["语义", "文本", "自然语言", "问答", "大语言模型", "知识图谱", "检索增强"],
+     "需文本语料与序列模型；当前文本仅支持 TF-IDF + 浅层分类"),
+    ("图/网络结构", ["图神经网络", "社交网络", "图结构", "过平滑"],
+     "需图数据与 GNN 后端，表格流水线无法表达节点-边结构"),
+    ("时序/时空预测", ["时空", "客流", "车流", "交通流", "短时"],
+     "需时序建模（滑窗、序列模型）；当前按独立样本建模，无法刻画时间依赖"),
+    ("领域数据缺失", ["复合材料", "弹性", "入侵检测", "模态检测", "流失", "游戏"],
+     "属真实领域数据题，需引入对应公开数据集（如 NSL-KDD、游戏流失数据）"),
+    ("非机器学习题", ["牛顿法", "数值方法", "复杂度分析", "定理证明"],
+     "纯数值/理论算法题，产出应是推导与复杂度分析，而非模型对比实验"),
+]
+
+
+def _diagnose(title: str):
+    for name, kws, tip in _REASONS:
+        if any(k in title for k in kws):
+            return name, tip
+    return "数据集目录未覆盖", "可在 DATASET_CATALOG 增补同类公开数据集，或用 --data 指定自有数据"
+
+
 for i, (src, t) in enumerate(TITLES, 1):
     r = parse_title(t)
     ds = r["matched_dataset"]
+    modality = r["matched_modality"]
     task = r["task_type"]
     hints = "、".join(r["method_hints"]) or "—"
     unsup = "、".join(r["unsupported_methods"]) or "—"
     if ds is None:
         verdict = "不可执行"
         MISS.append(t)
+        reason, tip = _diagnose(t)
     else:
-        # 简单误匹配判定：题目含「图像/文本/自然语言/问答/视频/语言模型/图谱」却匹配到表格集
-        semantic_kw = ["图像", "文本", "自然语言", "问答", "视频", "语言模型", "图谱", "网络（社交）"]
-        if any(k in t for k in semantic_kw):
-            verdict = "误匹配?"
+        # 模态一致性校验：题目点明的模态（图像/文本）必须与匹配数据集的 modality 一致，
+        # 否则视为误匹配（如「图像题」被错配到表格集）。
+        t_img = any(k in t for k in ["图像", "人脸", "面部", "像素", "img", "image", "face"])
+        t_text = any(k in t for k in ["文本", "语义", "自然语言", "nlp", "语料", "文档", "新闻"])
+        reason, tip = "—", "—"
+        if t_img and modality != "image":
+            verdict = "误匹配(应图像)"
+            WRONG.append(t)
+        elif t_text and modality != "text":
+            verdict = "误匹配(应文本)"
             WRONG.append(t)
         else:
             verdict = "可执行"
             OK.append(t)
-    print(f"{i:2d} [{src:6s}] {verdict:5s} | {task:12s} | {str(ds):28s} | 方法:{hints:18s} | 不支持:{unsup}")
+    print(f"{i:2d} [{src:6s}] {verdict:10s} | {task:12s} | mod:{str(modality):6s} | {str(ds):30s} | 方法:{hints:18s} | 不支持:{unsup}")
     print(f"     题目：{t}")
+    if verdict != "可执行":
+        print(f"     归因：{reason} —— {tip}")
 
 print("\n================ 汇总 ================")
 print(f"可执行(MATCH): {len(OK)}/{len(TITLES)}")
 print(f"误匹配(语义错): {len(WRONG)}/{len(TITLES)}  -> {WRONG}")
 print(f"不可执行(无数据集): {len(MISS)}/{len(TITLES)}")
-print("\n-- 不可执行的题目清单 --")
+print(f"可接住率: {round(100*len(OK)/len(TITLES),1)}%")
+print("\n-- 不可执行的题目清单（按缺口归类）--")
+_buckets = {}
 for t in MISS:
-    print("   ×", t)
+    _buckets.setdefault(_diagnose(t)[0], []).append(t)
+for name, items in sorted(_buckets.items(), key=lambda kv: -len(kv[1])):
+    print(f"   [{name}] {len(items)} 题")
+    for t in items:
+        print("      ×", t)

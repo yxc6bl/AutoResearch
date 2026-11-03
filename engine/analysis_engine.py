@@ -140,7 +140,9 @@ def _load_sklearn_generic(name: str):
         else [f"f{i}" for i in range(X.shape[1])]
     )
     yu = np.unique(y)
-    if np.issubdtype(y.dtype, np.integer) and len(yu) <= 20:
+    # 整数型标签一律视为分类（类别索引可能 >20，如 40 类人脸、1000 类图像网），
+    # 避免把多类分类误判成回归。
+    if np.issubdtype(y.dtype, np.integer):
         task = "classification"
     elif len(yu) <= 20 and np.all(np.mod(y.astype(float), 1) == 0):
         task = "classification"
@@ -210,17 +212,23 @@ def _load_file(d: dict, src: str):
 def _load_openml(dataset_id, version=None, task_type=None):
     from sklearn.datasets import fetch_openml
 
-    b = fetch_openml(data_id=dataset_id, version=version, as_frame=True)
+    kwargs = {"data_id": dataset_id, "as_frame": True}
+    if version:  # 新版本 sklearn 不接受 version=None，缺省时让它自动选 active 版本
+        kwargs["version"] = version
+    b = fetch_openml(**kwargs)
     df = b.frame if hasattr(b, "frame") else b.data
     target = b.target_names[0]
     y = np.asarray(df[target].values)
-    X = df.drop(columns=[target]).values.astype(float)
-    feat = list(df.drop(columns=[target]).columns)
+    # 保留 DataFrame（含列类型），交给下游 build_tabular_preprocessor 统一处理
+    # 数值列→中位数插补+标准化，类别列（含 OpenML 的字符/类别型列）→独热/序数编码，
+    # 与本地表格文件走完全相同的混合类型预处理路径，避免类别列被 astype(float) 崩掉。
+    X = df.drop(columns=[target])
+    feat = list(X.columns)
     yu = np.unique(y)
     numeric = np.issubdtype(y.dtype, np.number)
     task = task_type or (
         "classification"
-        if (not numeric or (len(yu) <= 20 and np.all(np.equal(yu, np.floor(yu)))) )
+        if (not numeric or (len(yu) <= 20 and np.all(np.equal(yu, np.floor(yu)))))
         else "regression"
     )
     if task not in ("classification", "regression"):
@@ -338,6 +346,45 @@ def describe_preprocessing(X, roles: dict):
     return report
 
 
+def _load_text(d: dict):
+    """加载文本数据集。
+
+    支持两种来源：
+      - name=="fetch_20newsgroups"：sklearn 内置新闻组（需联网首次下载，缓存后离线可用）；
+      - path 指向本地 CSV：含文本列与标签列，离线可跑，用于无网络环境或快速验证。
+
+    返回 (docs, y, None, "classification")：docs 为原始文档字符串列表，
+    特征提取（TF-IDF）推迟到 CV 管道内执行，杜绝数据泄漏。feature_names 为 None
+    （文本特征由 TF-IDF 在 fit 阶段动态确定）。
+    """
+    from sklearn.datasets import fetch_20newsgroups
+
+    # 本地 CSV 优先：离线可跑，无需联网
+    if d.get("path"):
+        import pandas as pd
+        p = Path(d["path"])
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parents[1] / p
+        df = pd.read_csv(p)
+        text_col = d.get("text_col", df.columns[0])
+        target = d.get("target", df.columns[-1])
+        docs = [str(x) for x in df[text_col].tolist()]
+        y_raw = df[target]
+        if pd.api.types.is_numeric_dtype(y_raw) and y_raw.nunique() > 20:
+            y = y_raw.values
+        else:
+            from sklearn.preprocessing import LabelEncoder
+            y = LabelEncoder().fit_transform(y_raw.astype(str).values)
+        return docs, np.asarray(y), None, "classification"
+    name = d.get("name") or "fetch_20newsgroups"
+    if name == "fetch_20newsgroups":
+        b = fetch_20newsgroups(subset="all", remove=("headers", "footers", "quotes"))
+        docs = [str(x) for x in b.data]
+        y = np.asarray(b.target)
+        return docs, y, None, "classification"
+    raise ValueError(f"文本数据源暂不支持：{name}（可用 fetch_20newsgroups 或本地 CSV path）")
+
+
 def _load_dataset_inner(spec: dict):
     """根据 spec 加载 (X, y, feature_names, task_type)（内部实现）。"""
     d = spec.get("data") or {}
@@ -369,6 +416,8 @@ def _load_dataset_inner(spec: dict):
         file_data = dict(d)
         file_data["task_type"] = spec.get("task_type") or d.get("task_type")
         return _load_url(file_data)
+    if src == "text":
+        return _load_text(d)
     if src in DATASETS:  # 兜底：source 直接写内置名
         return DATASETS[src]()
     raise ValueError(f"不支持的数据源：{src}")
@@ -391,8 +440,16 @@ def load_dataset(spec: dict):
     统一出口包装：无论来源是 sklearn / 本地文件 / OpenML，ndarray 一律按
     feature_names 转成 DataFrame，使下游 build_tabular_preprocessor 能识别
     哪些列是数值、哪些是字符串类别，从而支持真实世界的混合类型表格。
+
+    文本源（source=="text"）例外：返回原始文档字符串列表（不转 DataFrame），
+    特征提取交由 CV 管道内的 TF-IDF 完成，避免泄漏。
     """
     import pandas as pd
+
+    d = spec.get("data") or {}
+    if d.get("source") == "text":
+        X, y, feat, task = _load_text(d)
+        return X, y, None, task
 
     X, y, feat, task = _load_dataset_inner(spec)
     if not isinstance(X, pd.DataFrame):
@@ -559,6 +616,48 @@ def build_estimator(spec, seed: int):
         except Exception:
             return None
     return None
+
+
+def _adapt_methods_to_scale(method_specs: dict, methods: list,
+                            n_samples: int, task_type: str) -> list:
+    """按样本量把「理论上正确、工程上不可行」的估算器换成同族可扩展版本。
+
+    真实毕设数据常是数万行：SVC 的核矩阵是 O(n²)（4.8 万行会跑几十分钟），
+    梯度提升的精确分裂也随 n 线性放大常数。这里做**同族替换**而非静默跳过，
+    并把替换原因写入 analysis["adaptations"]，供论文如实披露。
+    """
+    notes = []
+    if not n_samples:
+        return notes
+    for m in list(methods):
+        s = method_specs.get(m)
+        if not isinstance(s, dict) or s.get("__proposed__") or not s.get("estimator"):
+            continue
+        est = s["estimator"]
+        new_est, new_params, reason = None, None, ""
+        if est.endswith("sklearn.svm.SVC") and n_samples > 12000:
+            new_est = "sklearn.svm.LinearSVC"
+            new_params = {"C": 1.0, "max_iter": 5000, "random_state": "<seed>"}
+            reason = f"n={n_samples} 时核 SVM 的 O(n²) 核矩阵不可行，替换为线性 SVM（同一最大间隔框架）"
+        elif est.endswith("sklearn.svm.SVR") and n_samples > 12000:
+            new_est = "sklearn.svm.LinearSVR"
+            new_params = {"C": 1.0, "max_iter": 5000, "random_state": "<seed>"}
+            reason = f"n={n_samples} 时核 SVR 训练代价过高，替换为线性 SVR"
+        elif est.endswith("GradientBoostingClassifier") and n_samples > 20000:
+            new_est = "sklearn.ensemble.HistGradientBoostingClassifier"
+            new_params = {"max_iter": 200, "random_state": "<seed>"}
+            reason = f"n={n_samples} 时精确梯度提升过慢，替换为直方图分箱实现（同族算法，分裂近似）"
+        elif est.endswith("GradientBoostingRegressor") and n_samples > 20000:
+            new_est = "sklearn.ensemble.HistGradientBoostingRegressor"
+            new_params = {"max_iter": 200, "random_state": "<seed>"}
+            reason = f"n={n_samples} 时精确梯度提升过慢，替换为直方图分箱实现（同族算法，分裂近似）"
+        if not new_est:
+            continue
+        method_specs[m] = {"name": s.get("name", m), "estimator": new_est,
+                           "params": new_params, "_adapted_from": est}
+        notes.append({"method": m, "from": est, "to": new_est, "reason": reason})
+        print(f"[scale] {m}: {est.split('.')[-1]} → {new_est.split('.')[-1]}（{reason}）")
+    return notes
 
 
 def _normalize_methods(raw) -> list:
@@ -735,6 +834,176 @@ def _ensemble_mean_metric(base_specs, is_reg, voting, main_metric, objective, X,
     return float(np.mean(vals)) if vals else None
 
 
+# ── 文本任务分支：TF-IDF 管道 + 经典/神经网络分类器，在 CV 内做特征提取 ──
+def _tfidf_kwargs(docs) -> dict:
+    """按语种选择 TF-IDF 配置：中文用字符 n-gram，英文用词级 + 停用词。
+
+    中文没有空格分词，词级 min_df 过滤在短文本上会把特征砍空；char_wb 二元组
+    是中文文本分类的稳妥默认，无需外部分词器。
+    """
+    sample = "".join(str(x)[:200] for x in list(docs)[:200])
+    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    ratio = cjk / max(1, len(sample))
+    if ratio > 0.15:  # 中文（或中英混排）语料
+        return {"analyzer": "char_wb", "ngram_range": (1, 2), "min_df": 1,
+                "max_features": 30000, "sublinear_tf": True}
+    return {"analyzer": "word", "ngram_range": (1, 1), "min_df": 2,
+            "max_features": 20000, "sublinear_tf": True, "stop_words": "english"}
+
+
+def _run_text(spec: dict, method_specs: dict, methods: list, skipped_methods: list,
+              out_path: Path, main_metric: str, objective: str, proposed) -> dict:
+    """文本分类任务的确定性分析：用 Pipeline(TfidfVectorizer, est) 在每折内
+    拟合 TF-IDF（杜绝泄漏），复用主流程的 seed_metrics / 显著性 / 逐类指标结构，
+    产出与论文生成器兼容的 analysis 字典。文本模式下不启用融合集成（避免管道嵌套）。
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.pipeline import Pipeline
+    from sklearn.model_selection import train_test_split
+
+    X, y, _, task_type = load_dataset(spec)
+    _adapt = _adapt_methods_to_scale(method_specs, methods, len(X), "classification")
+    _tf_kw = _tfidf_kwargs(X)
+    seed_metrics: dict[str, dict[str, list]] = {m: {} for m in methods}
+    seed_train_metrics: dict[str, dict[str, list]] = {m: {} for m in methods}
+    best_pred_cache: dict[str, np.ndarray] = {}
+    best_y_test: np.ndarray | None = None
+    confmat_cache: dict[str, list] = {}
+
+    for seed in SEEDS:
+        X_tr, X_te, y_tr, y_te = train_test_split(
+            X, y, test_size=TEST_SIZE, random_state=seed, stratify=y)
+        for m in methods:
+            pm_spec = method_specs[m]
+            if pm_spec.get("__proposed__"):
+                continue  # 文本模式跳过融合集成
+            est = build_estimator(pm_spec, seed)
+            if est is None:
+                continue
+            pipe = Pipeline([
+                ("tfidf", TfidfVectorizer(**_tf_kw)),
+                ("clf", est),
+            ])
+            try:
+                pipe.fit(X_tr, y_tr)
+                yp_tr = pipe.predict(X_tr)
+                yp = pipe.predict(X_te)
+            except Exception as e:  # noqa: BLE001
+                skipped_methods.append({"method": m, "seed": seed, "reason": str(e)})
+                continue
+            acc = float(accuracy_score(y_te, yp))
+            f1m = float(f1_score(y_te, yp, average="macro", zero_division=0))
+            acc_tr = float(accuracy_score(y_tr, yp_tr))
+            f1m_tr = float(f1_score(y_tr, yp_tr, average="macro", zero_division=0))
+            seed_metrics[m].setdefault("accuracy", []).append(acc)
+            seed_metrics[m].setdefault("f1_macro", []).append(f1m)
+            seed_train_metrics[m].setdefault("accuracy", []).append(acc_tr)
+            seed_train_metrics[m].setdefault("f1_macro", []).append(f1m_tr)
+            if seed == SEEDS[0]:
+                best_pred_cache[m] = yp
+                best_y_test = y_te
+                confmat_cache[m] = confusion_matrix(y_te, yp).tolist()
+
+    def _mean(m, k):
+        arr = seed_metrics.get(m, {}).get(k)
+        return float(np.mean(arr)) if arr else None
+
+    ranked = sorted(
+        [m for m in methods if _mean(m, main_metric) is not None],
+        key=lambda m: _mean(m, main_metric),
+        reverse=(objective != "minimize"),
+    )
+    if not ranked:
+        return {"error": "文本任务候选方法均未成功产生指标", "skipped_methods": skipped_methods,
+                "task_type": "classification", "modality": "text"}
+    best_method = ranked[0]
+    second_method = ranked[1] if len(ranked) > 1 else ""
+
+    analysis: dict = {"task_type": "classification", "modality": "text",
+                      "best_method": best_method, "seed_variance": {}, "plots": []}
+    # 文本分支没有表格预处理报告，这里补齐数据规模元信息（论文式(2)要填真实 n），
+    # 并注明特征表示方式，避免正文误称「原始特征维度」。
+    analysis["preprocessing"] = {
+        "n_samples": int(len(X)), "n_raw_features": None,
+        "columns": [],
+        "representation": ("TF-IDF 字符 1-2gram" if _tf_kw.get("analyzer") == "char_wb"
+                           else "TF-IDF 词级 unigram"),
+    }
+    analysis["adaptations"] = _adapt
+    for m in methods:
+        for k, arr in seed_metrics.get(m, {}).items():
+            if not arr:
+                continue
+            arr = np.asarray(arr, dtype=float)
+            analysis["seed_variance"][f"{m}_{k}"] = {
+                "mean": float(arr.mean()), "std": float(arr.std(ddof=0)),
+                "seeds": [float(x) for x in arr],
+            }
+    analysis["train_test_gap"] = {}
+    for m in methods:
+        t_arr = seed_metrics.get(m, {}).get(main_metric)
+        tr_arr = seed_train_metrics.get(m, {}).get(main_metric)
+        if t_arr and tr_arr and len(t_arr) == len(tr_arr):
+            g = np.asarray(t_arr, dtype=float) - np.asarray(tr_arr, dtype=float)
+            analysis["train_test_gap"][m] = float(g.mean())
+
+    per_class: dict = {}
+    for m in methods:
+        yp = best_pred_cache.get(m)
+        if yp is None or best_y_test is None:
+            continue
+        from sklearn.metrics import precision_recall_fscore_support
+        p, r, f, _ = precision_recall_fscore_support(best_y_test, yp, zero_division=0)
+        entry = {}
+        for ci, (pp, rr, ff) in enumerate(zip(p, r, f)):
+            entry[f"class_{ci}_precision"] = float(pp)
+            entry[f"class_{ci}_recall"] = float(rr)
+            entry[f"class_{ci}_f1"] = float(ff)
+        per_class[m] = entry
+    analysis["per_class"] = per_class
+    analysis["confusion_matrix"] = confmat_cache
+    analysis["feature_importance"] = {}
+    analysis["significance"] = _significance(best_method, second_method, seed_metrics, main_metric)
+
+    # ── 兼容 generate_paper 的 metrics 列表格式（文本分支同样必须给真实数字） ──
+    _metrics_list = []
+    for m in methods:
+        _arr = seed_metrics.get(m, {}).get(main_metric)
+        if _arr:
+            _metrics_list.append({
+                "name": m,
+                "value": float(np.mean(_arr)),
+                "setting": (f"TF-IDF（{analysis['preprocessing']['representation']}）"
+                            f"+ {m}（{len(SEEDS)} 种子均值，std={np.std(_arr, ddof=0):.4f}）"),
+            })
+    analysis["metrics"] = _metrics_list
+    _barr = seed_metrics.get(best_method, {}).get(main_metric)
+    if _barr:
+        analysis["best_value"] = float(np.mean(_barr))
+    analysis["skipped_methods"] = skipped_methods
+    analysis.setdefault("best_round", 1)
+    analysis.setdefault("terminal_state", "deterministic_multi_seed_text_analysis")
+    analysis.setdefault(
+        "findings",
+        f"确定性文本分析引擎在 TF-IDF 管道内完成特征提取（折内拟合，杜绝泄漏），"
+        f"基于 {len(SEEDS)} 个随机种子复现实验，主指标 {main_metric} 最优为 {best_method}"
+        f"（{analysis.get('best_value', 'n/a')}），并报告逐类指标、混淆矩阵与配对显著性。",
+    )
+    # 文本分支同样出图（准确率对比柱状图 + 最优方法混淆矩阵），与主流程一致
+    try:
+        _pd = out_path.parent / "plots"
+        _pd.mkdir(parents=True, exist_ok=True)
+        analysis["plots"] = _classification_plots(seed_metrics, confmat_cache, {},
+                                                 best_method, _pd)
+        for p in analysis["plots"]:
+            if p.get("file"):
+                p["path"] = f"plots/{p['file']}"
+    except Exception as e:  # noqa: BLE001
+        print(f"[text] 绘图跳过（不影响结果）：{e}")
+        analysis["plots"] = []
+    return analysis
+
+
 # ── 主入口 ──────────────────────────────────────────────────────────────
 def run_analysis(spec: dict, out_path: Path) -> dict:
     """运行确定性分析，图写入 out_path.parent/'plots'，返回 ANALYSIS_JSON dict。
@@ -788,10 +1057,18 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
     objective = spec.get("objective") or "maximize"
     if not methods:
         return {"error": "没有可运行的候选方法", "skipped_methods": skipped_methods}
+    # ── 文本任务分支：TF-IDF 管道在 CV 内做特征提取（防泄漏），与主流程解耦 ──
+    if (spec.get("data") or {}).get("source") == "text":
+        return _run_text(spec, method_specs, methods, skipped_methods,
+                         out_path, main_metric, objective, _proposed)
+
     try:
         X, y, feat_names, task_type = load_dataset(spec)
     except Exception as e:
         return {"error": f"无法加载数据集：{e}"}
+
+    # 大数据集自动换用可扩展的同族估算器（SVC→LinearSVC 等），并记录替换原因
+    adaptations = _adapt_methods_to_scale(method_specs, methods, len(X), task_type)
 
     # 预处理报告：如实记录每列类型、缺失量与编码方式（论文需披露，不得隐藏）
     try:
@@ -1174,6 +1451,8 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
     )
     # 透明记录：因缺少依赖（如未安装 xgboost/lightgbm/torch）而被自动跳过的方法
     analysis["skipped_methods"] = skipped_methods
+    # 透明记录：因样本量过大而做的同族估算器替换（不静默改变实验口径）
+    analysis["adaptations"] = adaptations
     return analysis
 
 

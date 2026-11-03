@@ -203,6 +203,55 @@ def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
     raise RuntimeError(f"OpenAlex 检索失败（已重试 {max_retries} 次）：{last!r}")
 
 
+# ── Semantic Scholar 源（可选，默认关闭） ──
+# 覆盖带期刊/会议元数据的正式论文 + 引用量，弥补「基本是预印本」的短板，进一步「扩大范围」。
+# 该 API 公共端点限流较严（无 Key 约 1 req/10s），故默认不启用；设置环境变量
+# AUTORESEARCH_USE_SEMSCHOLAR=1 才接入。失败时静默跳过，绝不拖垮主流程。
+SEMANTIC_SCHOLAR = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+
+def fetch_semantic_scholar(query: str, max_results: int = 10, timeout: int = 12,
+                           max_retries: int = 1) -> list[dict]:
+    """从 Semantic Scholar Graph API 拉取正式论文（含 venue / 引用量）。失败抛异常由调用方吞掉。"""
+    params = {
+        "query": query,
+        "limit": min(100, max(10, int(max_results) * 2)),
+        "fields": "title,abstract,year,venue,authors,citationCount,externalIds,url",
+    }
+    url = SEMANTIC_SCHOLAR + "?" + urllib.parse.urlencode(params)
+    last = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "AutoResearch/1.2 (literature fetch)"})
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+                data = json.loads(r.read().decode("utf-8", "ignore"))
+            out = []
+            for p in data.get("data", []):
+                doi = (p.get("externalIds") or {}).get("DOI")
+                oid = p.get("url") or ""
+                key = ("doi:" + doi) if doi else ("s2:" + (oid.rsplit("/", 1)[-1] or p.get("title", "")))
+                authors = ", ".join(
+                    a.get("name", "") for a in (p.get("authors") or []) if a.get("name"))
+                out.append({
+                    "id": key,
+                    "title": (p.get("title") or "").strip(),
+                    "authors": authors,
+                    "venue": (p.get("venue") or "").strip() or "Semantic Scholar",
+                    "year": str(p.get("year") or ""),
+                    "url": doi or oid,
+                    "abstract": (p.get("abstract") or "")[:700],
+                    "cited_by_count": p.get("citationCount") or 0,
+                    "relevance_score": 0.0,
+                })
+            return out
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt < max_retries:
+                time.sleep(2.0 * attempt)
+    raise RuntimeError(f"Semantic Scholar 检索失败：{last!r}")
+
+
 # ── 质量评分（venue 档次为核心信号） ──
 def _cite_score(cites: int, year: int) -> float:
     """被引数按「每年被引」对数归一，避免新论文因被引少被系统性压低。"""

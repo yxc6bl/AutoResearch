@@ -39,7 +39,7 @@ def _env():
     return env
 
 
-def run(out_dir, task_spec_path, store: MemoryStore | None = None, timeout: int = 600):
+def run(out_dir, task_spec_path, store: MemoryStore | None = None, timeout: int = 1800):
     """调用 generate_paper 生成论文；返回 {paper, paper_md, returncode, stderr}。"""
     store = store or default_store
     out_dir = Path(out_dir)

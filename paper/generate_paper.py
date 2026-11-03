@@ -34,6 +34,9 @@ if str(ROOT) not in sys.path:
 from paper.thesis_template import (  # noqa: E402
     STYLE_RULES, chapter_heading, CHAPTERS, CHAPTER_BY_KEY,
 )
+# 统一走共享 LLM 客户端：自带网关握手探测（识别 401/限流）、指数退避重试、全局节流与熔断器；
+# 因此本模块的散文写作在网关不可用/被限流时会干净地返回 {}，由 main() 自动降级为 _fallback_sections。
+from engine import llm_client as LLM  # noqa: E402
 
 
 # ── 基础工具 ──────────────────────────────────────────────────────
@@ -136,8 +139,11 @@ _DATASET_CN = {
 
 
 def _dataset_label(spec: dict) -> str:
-    """从 spec 推断可读的数据集名（兼容 data.name 与旧 dataset 字段）。"""
+    """从 spec 推断可读的数据集名（兼容 data.label / data.name / 旧 dataset 字段）。"""
     d = spec.get("data") or {}
+    # 题目解析器已给出可读中文标签（含 OpenML/Olivetti/文本等），优先使用
+    if d.get("label"):
+        return d["label"]
     name = d.get("name") or spec.get("dataset") or "指定数据集"
     if name in _DATASET_CN:
         return _DATASET_CN[name]
@@ -915,9 +921,8 @@ def _templated_summary(key: str, spec, analysis, best_method, best_value_str, da
 
 
 def llm_write_summaries(spec, exp, refs, analysis, best_method, best_value_str, dataset, facts):
-    """为各内容章生成「本章小结」，返回 {key: 小结文本}。失败返回 {}。"""
-    client, model, extra = _llm_client()
-    if client is None:
+    """为各内容章生成「本章小结」，返回 {key: 小结文本}。失败/网关不可用返回 {}。"""
+    if not LLM.available():
         return {}
     prompt = f"""{facts}
 
@@ -933,7 +938,7 @@ def llm_write_summaries(spec, exp, refs, analysis, best_method, best_value_str, 
   "s_deep": "深入分析与假设检验本章小结",
   "s_discussion": "讨论本章小结"}}"""
     try:
-        r = _llm_json(client, model, extra, prompt)
+        r = LLM.chat_json(prompt, system=WRITER_SYSTEM, temperature=0.3, max_tokens=2000)
     except Exception:
         return {}
     keys = {"s_intro": "intro", "s_related": "related", "s_method": "method",
@@ -948,9 +953,8 @@ def llm_write_summaries(spec, exp, refs, analysis, best_method, best_value_str, 
 
 
 def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, review):
-    """返回 dict，含 LLM 撰写的各文字段；失败时返回 {}。"""
-    client, model, extra = _llm_client()
-    if client is None:
+    """返回 dict，含 LLM 撰写的各文字段；网关不可用/失败时返回 {}（由 main 走 fallback）。"""
+    if not LLM.available():
         return {}
     facts = _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value)
     sub_list = spec.get("sub_hypotheses", [])
@@ -990,7 +994,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
   "keywords_en": "对应的英文关键词，逗号分隔",
   "intro": "绪论正文 3 段（不要写章/节标题，直接写三段正文）：第1段该方向的实际重要性与现有研究的缺口（引用文献 [编号]）；第2段本文具体要回答的机理问题；第3段本文贡献（编号列出3-4条，都要有具体数字或具体动作）",
   "related": "国内外研究现状正文 4-6 段（不要写标题，直接写正文）：按主题（不是逐篇罗列）综述上述文献，说明它们各自的立场与局限，并指出本文与它们的关系与差异。必须广泛出现 [编号] 引用，至少引用 25 篇不同文献的编号，覆盖不同方法路线（如传统机器学习、集成学习、深度学习等）。"}}"""
-    r1 = _llm_json(client, model, extra, p1)
+    r1 = LLM.chat_json(p1, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
     out.update({k: v for k, v in r1.items() if isinstance(v, str) and v.strip()})
 
     # 独立批次：研究方法 / 实验设置的展开叙述（长文本单独生成，避免与 p1 合并后输出过长被截断）
@@ -999,7 +1003,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 请基于以上真实素材撰写研究方法与实验设置的展开叙述，输出 JSON：
 {{"method_narrative": "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释每一类候选方法的数学模型与核心归纳偏置——线性回归/岭回归/Lasso 的线性假设与正则化、随机森林回归的集成与递归分区、支持向量回归的核诱导映射、KNN 的局部类比；说明各方法超参数的设定依据（树的数量、核函数与 C/gamma、正则化系数 alpha）与本次数据特性（样本量、特征尺度、非线性程度）的关系；解释为何选择相应评价指标。须基于真实素材中的方法名与数据事实，严禁编造算法或数字。",
   "exp_narrative": "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）：说明数据集的来源与每个特征列的物理语义、为何对数值特征做标准化/对类别特征做编码、缺失值插补为何在训练折上拟合以避免信息泄漏、训练/测试划分比例与 5 种随机种子复现的动机、主指标与次要指标的选取理由。须基于真实素材，不得编造数据规模以外的数字。"}}"""
-    r1b = _llm_json(client, model, extra, p1b)
+    r1b = LLM.chat_json(p1b, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
     out.update({k: v for k, v in r1b.items() if isinstance(v, str) and v.strip()})
 
     # 第二批：结果叙述 + 深入分析 + 子假设裁决
@@ -1018,7 +1022,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 
 子假设清单：
 {sub_str}"""
-    r2 = _llm_json(client, model, extra, p2)
+    r2 = LLM.chat_json(p2, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
     out.update({k: v for k, v in r2.items() if v})
 
     # 第三批：讨论 + 结论 + 局限性补充
@@ -1039,7 +1043,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 {{"discussion": "讨论章（不少于1100字，至少 4-5 段，充分展开，严禁写浓缩版）：(1) 本文发现与前述文献如何呼应或冲突（带 [编号] 引用，至少再引用 3 篇不同文献），以及本文发现在实践上的具体含义（给方法选型的具体建议，而不是泛泛而谈）；(2) 本文结论成立的条件与边界——在什么数据规模/特征结构/噪声条件下结论可能不成立；(3) 从方法论角度反思：为何统一评估框架（固定划分、多种子复现、配对显著性检验）比单次跑分更可靠；(4) 本文证据对工程降噪设计或后续气动建模研究的启示。讨论中提到的假设结论必须与上面“子假设已裁定结果”一致。",
   "conclusion": "（本段由系统确定性生成，无需你写；直接输出空字符串即可）",
   "limitations_extra": "1-3 条本文特有的局限性（基于素材中的真实不足，不要写放之四海皆准的套话）"}}"""
-    r3 = _llm_json(client, model, extra, p3)
+    r3 = LLM.chat_json(p3, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
     out.update({k: v for k, v in r3.items() if isinstance(v, str) and v.strip()})
 
     return out
@@ -1293,8 +1297,12 @@ def main() -> int:
         ref_lines.append(line + ".")
     references_block = "\n".join(ref_lines)
 
-    # LLM 撰写文字
-    written = llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, review)
+    # LLM 撰写文字（网关不可用/限流/重试耗尽时返回 {}，自动走 _fallback_sections）
+    try:
+        written = llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, review)
+    except Exception as e:  # noqa: BLE001
+        print(f"[generate_paper] LLM 写作异常，转确定性兜底：{e}")
+        written = {}
     used_llm = bool(written.get("abstract"))
     if not written.get("abstract"):
         written = _fallback_sections(spec, exp, refs, best_method, best_value, main_metric)
@@ -1537,6 +1545,17 @@ def main() -> int:
                          f"数据经标准化等必要预处理后按固定比例划分训练集与测试集。"
                          f"实验由确定性分析引擎依据任务规格直接执行候选方法，{round_txt}\n")
 
+    # 如实披露因样本规模而做的同族估算器替换（不隐藏实验口径变化）
+    _adapts = (analysis or {}).get("adaptations") or []
+    if _adapts:
+        _items = "；".join(
+            f"{a.get('method')}（{str(a.get('from')).rsplit('.', 1)[-1]} 替换为 "
+            f"{str(a.get('to')).rsplit('.', 1)[-1]}）" for a in _adapts)
+        parts.append(
+            f"还需说明，受样本规模约束，部分候选方法采用了同族可扩展实现：{_items}。"
+            "替换前后保持相同的算法族与相同的评价口径，但优化目标或分裂搜索方式存在差异，"
+            "因此涉及这些方法的性能比较应放在该前提下理解，而不宜等同于标准实现的公开基准成绩。\n")
+
     parts.append(chapter_heading("results") + "\n")
     if is_multi:
         parts.append("### 5.1 跨数据集泛化性对比\n")
@@ -1674,8 +1693,11 @@ def main() -> int:
 
     # ── 分章小结：LLM 生成 + 确定性兜底，插入到各章末尾（结论章除外） ──
     facts_for_summary = _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value)
-    summaries = llm_write_summaries(spec, exp, refs, analysis, best_method, best_value_str,
-                                   dataset, facts_for_summary)
+    try:
+        summaries = llm_write_summaries(spec, exp, refs, analysis, best_method, best_value_str,
+                                        dataset, facts_for_summary)
+    except Exception:  # noqa: BLE001
+        summaries = {}
     # 兜底：任何缺失的章用确定性小结补齐，保证「小结」计数达标
     for _ck in ("intro", "related", "method", "exp_setup", "results", "deep", "discussion"):
         if not summaries.get(_ck):

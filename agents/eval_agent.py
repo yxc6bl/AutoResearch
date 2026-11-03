@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 import audit_consistency as audit  # noqa: E402
+from engine import llm_client as LLM  # noqa: E402
 
 # ── 权重与等级（溯源见 docs/EVAL_RUBRIC.md） ──────────────────────────
 WEIGHTS = {
@@ -271,20 +272,29 @@ def check_methodology(md: str):
     return max(0, score), issues
 
 
-def check_innovation(md: str):
+def check_innovation(md: str, faithful: bool = False):
     """创新维度。依据：哈工大创新与成效(25%)；北大⑤观点新颖；中科大创新与特色。
 
     结论章应明确创新点/独立见解/本文贡献，并区分本人与他人工作。
+    faithful=True（忠实复现/对比选题，未提新方法）：放宽判定，认可「系统性对比/实证刻画」
+    类贡献表述，不再因「无新算法」而判 0 分（那本就不是此类选题的要求）。
     """
     concl = _slice_chapter(md, "结论与展望", ["参考文献", "致谢"]) or md
-    has_innov = bool(re.search(r'创新|独立见解|本文提出|本文贡献|本文设计|本文首次|新颖', concl))
+    if faithful:
+        _re = r'创新|独立见解|本文提出|本文贡献|本文设计|本文首次|新颖|本文系统比较|本文实证|本文刻画|本文工作|本文围绕|本文对比'
+    else:
+        _re = r'创新|独立见解|本文提出|本文贡献|本文设计|本文首次|新颖'
+    has_innov = bool(re.search(_re, concl))
     has_section = bool(re.search(r'创新点|本文贡献|独立见解', md))
     issues = []
     if not has_innov:
-        issues.append("结论未明确创新点 / 独立见解，或未区分本人与他人工作")
+        issues.append("结论未明确创新点 / 独立见解 / 本文工作贡献，或未区分本人与他人工作")
     elif not has_section:
-        issues.append("结论提及贡献但缺少独立的「创新点」小节，建议单列")
-    score = 100 if (has_innov and has_section) else (60 if has_innov else 0)
+        issues.append("结论提及贡献但缺少独立的「本文贡献」小节，建议单列")
+    if faithful:
+        score = 100 if has_innov else (70 if has_section else 40)
+    else:
+        score = 100 if (has_innov and has_section) else (60 if has_innov else 0)
     return max(0, score), issues
 
 
@@ -525,7 +535,7 @@ def check_research_depth(md: str, analysis_json=None):
     return {"level": level, "signals": signals, "advisory": adv}
 
 
-def check_quality_profile(md: str, candidates=None, analysis_json=None) -> dict:
+def check_quality_profile(md: str, candidates=None, analysis_json=None, faithful: bool = False) -> dict:
     """整篇文章质量画像（新方法，信息性维度，不计入加权分）。
 
     直接回应「不要只判深度，整篇文章质量都要评判」：从六个互相独立的轴线给论文画像，
@@ -576,6 +586,10 @@ def check_quality_profile(md: str, candidates=None, analysis_json=None) -> dict:
     mscore = {"原创/改进方法研究": 100,
               "改进型（有方法提出但缺消融/跨数据集验证）": 75,
               "模型对比型实证研究": 45}.get(lvl, 60)
+    # 忠实复现模式：本文未提新方法本就是选题使然，按「严谨实证对比」给合理分，不判缺陷
+    if faithful and lvl == "模型对比型实证研究":
+        mscore = 70
+        d = dict(d, level="忠实实证对比研究")
     prof["methodological_contribution"] = {
         "score": mscore, "level": lvl,
         "diagnosis": "方法贡献层级：" + lvl + ("；建议补充方法创新点。" if mscore < 80 else "；具备方法贡献。"),
@@ -631,6 +645,103 @@ def check_quality_profile(md: str, candidates=None, analysis_json=None) -> dict:
     return prof
 
 
+def _ground_truth(analysis: dict) -> str:
+    """从真实实验结果压缩出「事实清单」，供 LLM 评审官比对论文是否编造数字。"""
+    if not isinstance(analysis, dict):
+        return "（无实验事实可对照）"
+    bits = []
+    bits.append(f"任务类型：{analysis.get('task_type','')}")
+    if analysis.get("n_samples") is not None:
+        bits.append(f"样本量：{analysis['n_samples']}")
+    if analysis.get("n_features") is not None:
+        bits.append(f"特征数：{analysis['n_features']}")
+    bits.append(f"最优方法（按主指标）：{analysis.get('best_method','')} = {analysis.get('best_value','')}")
+    metrics = analysis.get("metrics") or []
+    for m in metrics[:12]:
+        if isinstance(m, dict):
+            bits.append(f"- {m.get('name','')} = {m.get('value','')}")
+    if analysis.get("significance"):
+        bits.append(f"显著性检验：{str(analysis['significance'])[:200]}")
+    if analysis.get("seed_variance"):
+        bits.append(f"多种子方差：{str(analysis['seed_variance'])[:200]}")
+    if analysis.get("proposed_method"):
+        bits.append(f"本文提出方法：{analysis['proposed_method']}（已做消融，消融结果见实验产物）")
+    else:
+        bits.append("本文未提出新方法（忠实复现/对比选题），不应声称提出新算法/框架")
+    return "\n".join(bits)
+
+
+def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "general") -> dict:
+    """LLM 评审官：像答辩委员一样审论文，给六维分 + 找幻觉 + 给修订意见。
+
+    这是「一个人写、另一个人审」里的「审」。它把论文与真实实验事实（ground truth）
+    对照，专门抓编造数字 / 与裁决表矛盾 / 跑题 / 贡献夸大等 deterministic 规则难识别的问题。
+    网关不可用时返回 {"available": False}，调用方回退到确定性 rules 评分。
+
+    返回 dict：{
+      available, scores(6维0-100), overall(0-100),
+      hallucinations[...], issues[...], unsupported_claims[...], suggestions[...], verdict("pass"/"revise")
+    }
+    """
+    if not LLM.available():
+        return {"available": False, "reason": "gateway_unavailable"}
+    try:
+        md = Path(paper_path).read_text(encoding="utf-8")
+    except Exception:
+        return {"available": False, "reason": "paper_not_found"}
+
+    gt = _ground_truth(analysis)
+    prompt = (
+        f"你是本科毕业设计（论文）答辩评委。请严格审阅下面这篇论文，并对照【真实实验事实】"
+        f"判断论文是否编造数字、是否与事实矛盾、是否跑题、是否夸大贡献。\n\n"
+        f"【真实实验事实（论文必须与之完全一致，不得出现事实清单之外的数字/方法/文献）】\n{gt}\n\n"
+        f"【入选文献数量】{lit_count} 篇\n\n"
+        f"【机构模式】{mode}（general=通用学术标准；sztu=深技大硬要求：≥12000字、封面/诚信声明必备）\n\n"
+        "请输出 JSON：\n"
+        "{\n"
+        '  "scores": {"topic_sig":0-100, "literature":0-100, "structure":0-100,'
+        ' "methodology":0-100, "innovation":0-100, "writing_norms":0-100},\n'
+        '  "overall": 0-100 加权综合分,\n'
+        '  "hallucinations": ["与事实清单矛盾/编造的具体处（如某数字、某方法名）"],\n'
+        '  "issues": ["结构/逻辑/文献/深度方面的具体问题"],\n'
+        '  "unsupported_claims": ["论文中无事实支撑、应改写或删除的断言（将反馈给写作端重写）"],\n'
+        '  "suggestions": ["具体可执行的修改建议（每条都要落到章节或写法）"],\n'
+        '  "verdict": "pass" 或 "revise"\n'
+        "}\n"
+        "评分要点：methodology 权重最高，重点看实验是否真实、对比基线/显著性/消融是否齐备；"
+        "若论文出现事实清单之外的数字或方法，hallucinations 必须指出；"
+        "若选题是忠实复现/对比（事实清单已注明未提新方法），不应因「无新算法」判不及格，"
+        "而应看其对比深度与实证严谨度。verdict 为 revise 当且仅当存在幻觉、严重结构缺失或核心事实矛盾。"
+    )
+    try:
+        out = LLM.chat_json(prompt + "\n\n【论文全文】\n" + md,
+                            system=LLM.FACT_FIRST_SYSTEM, temperature=0.2, max_tokens=2600)
+    except Exception as e:  # noqa: BLE001
+        return {"available": False, "reason": f"llm_error:{e}"}
+    if not isinstance(out, dict) or "overall" not in out:
+        return {"available": False, "reason": "bad_json"}
+    sc = out.get("scores") or {}
+    for k in WEIGHTS:
+        try:
+            sc[k] = float(sc.get(k, 0))
+        except Exception:
+            sc[k] = 0.0
+    try:
+        overall = float(out.get("overall", 0))
+    except Exception:
+        overall = sum(WEIGHTS[k] * sc.get(k, 0) for k in WEIGHTS)
+    return {
+        "available": True,
+        "scores": sc,
+        "overall": round(overall, 1),
+        "hallucinations": out.get("hallucinations") or [],
+        "issues": out.get("issues") or [],
+        "unsupported_claims": out.get("unsupported_claims") or [],
+        "suggestions": out.get("suggestions") or [],
+        "verdict": out.get("verdict", "revise"),
+    }
+
+
 def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = "general"):
     """主入口：对一篇论文给出评分 verdict。
 
@@ -639,6 +750,21 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
     """
     md = Path(paper_path).read_text(encoding="utf-8")
     verdict = {"passed": False, "gate": "hard_fail", "scores": {}, "issues": [], "suggestions": []}
+
+    # 预载实验事实（ground truth），供创新/质量画像判定「忠实复现 vs 方法贡献」。
+    # 必须在 check_innovation（用到 _faithful）之前完成加载与派生，避免未赋值错误。
+    _analysis_path = Path(paper_path).resolve().parent.parent / "03_experiment.json"
+    _aj = None
+    if _analysis_path.exists():
+        try:
+            _aj = json.loads(_analysis_path.read_text(encoding="utf-8"))
+            if isinstance(_aj, dict) and isinstance(_aj.get("analysis"), dict):
+                _aj = _aj["analysis"]
+        except Exception:
+            _aj = None
+    # 忠实复现模式：本文未提新方法（proposed_method 为空）→ 放宽创新/贡献判定，
+    # 避免把「忠实围绕题目方法做实证」误判为「无创新不及格」。
+    _faithful = not (_aj and isinstance(_aj, dict) and _aj.get("proposed_method"))
 
     # 0) 零编造硬门（复用 audit，独立于 rubric 加权）
     tbl = audit.parse_verdict_table(md)
@@ -701,7 +827,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             verdict["suggestions"].append("修正参考文献与正文引用编号的对应关系")
 
     # 5) 创新
-    inn, inn_is = check_innovation(md)
+    inn, inn_is = check_innovation(md, faithful=_faithful)
     verdict["scores"]["innovation"] = inn
     for i in inn_is:
         verdict["issues"].append("创新：" + i)
@@ -735,20 +861,11 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
         verdict["suggestions"].append("改写重复/复刻段落，降低查重预估重合率；提交前用知网全网查重复核")
 
     # 8) 研究深度 / 论题复杂度（新维度，信息性，不计入加权分；直接回应「论题是否过简单」）
-    _analysis_path = Path(paper_path).resolve().parent.parent / "03_experiment.json"
-    _aj = None
-    if _analysis_path.exists():
-        try:
-            _aj = json.loads(_analysis_path.read_text(encoding="utf-8"))
-            if isinstance(_aj, dict) and isinstance(_aj.get("analysis"), dict):
-                _aj = _aj["analysis"]
-        except Exception:
-            _aj = None
     depth = check_research_depth(md, _aj)
     verdict["research_depth"] = depth
 
     # 9) 整篇文章质量画像（六维，信息性，不计入加权分；直接回应「整篇质量如何评判」）
-    profile = check_quality_profile(md, cands, _aj)
+    profile = check_quality_profile(md, cands, _aj, faithful=_faithful)
     verdict["quality_profile"] = profile
     _qkeys = ("literature_richness", "mathematical_rigor", "methodological_contribution",
               "experimental_rigor", "structure_narrative", "writing_norms")
@@ -780,6 +897,23 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
                 verdict["suggestions"].append("范文对标：" + _gap)
     except Exception:
         pass
+
+    # 10) LLM 评审官（「第二双眼睛」）：像答辩委员一样审，抓幻觉/跑题/夸大。
+    #     确定性硬门（一致性/谎言）仍是安全网不可绕过；此处把 LLM 评判作为补充信号，
+    #     若存在幻觉或 verdict=revise 则强制不通过（人审也会这么判）。
+    try:
+        _lj = llm_judge(str(paper_path), _aj, len(cands) if cands else 0, mode)
+        if _lj.get("available"):
+            verdict["llm_judge"] = _lj
+            if _lj.get("hallucinations"):
+                verdict["issues"].insert(0, "LLM评审官发现疑似幻觉：" + "；".join(_lj["hallucinations"][:5]))
+                verdict["suggestions"].insert(0, "按 LLM 评审官意见回滚改写，消除虚构数字/事实")
+                verdict["gate"] = "hard_fail"
+                verdict["passed"] = False
+            elif _lj.get("verdict") == "revise":
+                verdict["suggestions"].append("LLM评审官建议修订：" + "；".join(_lj.get("suggestions", [])[:3]))
+    except Exception as e:  # noqa: BLE001
+        print(f"[EvalAgent] LLM 评审官调用失败（不影响规则评分）：{e}")
 
     # 综合与门控
     overall = round(sum(WEIGHTS[k] * verdict["scores"][k] for k in WEIGHTS), 1)

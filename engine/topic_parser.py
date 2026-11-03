@@ -95,24 +95,44 @@ _METHOD_DEFS = {
         "params_reg": {},
         "cat": "概率生成模型",
     },
+    "mlp": {
+        "cn": "多层感知机（神经网络 / 深度学习）",
+        # 别名覆盖题目里常见的「神经网络 / 深度学习 / 卷积 / CNN / RNN / LSTM / Transformer」
+        # 等写法：当前引擎可用的深度学习后端即 sklearn 多层感知机（MLP），对这些写法
+        # 一律按 MLP 接入，使「基于深度学习的 X」类题目真正可跑，而非标记为「不支持」。
+        # 注：CNN/RNN/LSTM 是更专门的架构，若未来接入 torch 可在此扩展，但 MLP 作为
+        # 通用神经网络基线，已能支撑绝大多数表格 / 图像扁平化 / 文本 TF-IDF 场景。
+        "aliases": ["多层感知机", "神经网络", "深度学习", "mlp", "multilayer perceptron",
+                    "neural network", "deep learning", "全连接网络", "fcnn",
+                    "卷积", "cnn", "卷积神经网络", "循环神经网络", "rnn", "lstm",
+                    "transformer", "注意力", "attention"],
+        "clf": "sklearn.neural_network.MLPClassifier",
+        "reg": "sklearn.neural_network.MLPRegressor",
+        "params_clf": {"hidden_layer_sizes": [64, 32], "max_iter": 500,
+                       "early_stopping": True, "random_state": "<seed>"},
+        "params_reg": {"hidden_layer_sizes": [64, 32], "max_iter": 500,
+                       "early_stopping": True, "random_state": "<seed>"},
+        "cat": "神经网络",
+    },
 }
 
-# 题目里出现这些写法但目前引擎未内置后端 → 记录为「暂不支持」，不阻塞主流程
+# 题目里出现这些写法但目前引擎未内置后端 → 记录为「暂不支持」，不阻塞主流程。
+# 现仅保留本引擎确实无法承载的写法（如强化学习、图神经网络、生成对抗网络等）。
+# 注意：「深度学习 / 神经网络 / CNN / RNN / LSTM / Transformer」已统一由 mlp 接入，
+# 不再列为不支持，从而让「基于深度学习的 X」类题目可跑。
 _UNSUPPORTED_METHOD_HINTS = {
-    "神经网络": "neural network / mlp",
-    "深度学习": "deep learning",
-    "卷积": "cnn",
-    "cnn": "cnn",
-    "循环神经网络": "rnn",
-    "rnn": "rnn",
-    "lstm": "lstm",
-    "transformer": "transformer",
+    "强化学习": "reinforcement learning / rl",
+    "图神经网络": "graph neural network / gnn",
+    "生成对抗网络": "gan",
+    "gan": "gan",
 }
 
-# 各任务类型的默认候选方法（题目未指定方法时采用）
+# 各任务类型的默认候选方法（题目未指定方法时采用）。
+# 含 mlp（神经网络/深度学习基线），使每篇论文默认就有 6 个可对比模型，
+# 含一个真实深度学习基线；题目点名的方法始终排在最前。
 _DEFAULT_METHODS = {
-    "classification": ["rf", "lr", "svm", "knn", "gb"],
-    "regression": ["rf", "lr", "svm", "knn", "gb"],
+    "classification": ["rf", "mlp", "lr", "svm", "knn", "gb"],
+    "regression": ["rf", "mlp", "lr", "svm", "knn", "gb"],
     "clustering": ["kmeans", "agglomerative"],
 }
 
@@ -208,6 +228,115 @@ DATASET_CATALOG = [
         "target_cn": "一年后的疾病进展量化值",
         "n": 442, "feat": 10,
     },
+    # ── 扩展数据集：覆盖更多真实毕设高频主题（房价 / 图像 / 文本 / 信用 / 营销） ──
+    {
+        "key": "california_housing",
+        "label": "加州房价数据集（sklearn 内置）",
+        "source": "sklearn",
+        "name": "fetch_california_housing",
+        "task": "regression",
+        "modality": "tabular",
+        "domain_kw": ["房价", "housing", "california", "房地产", "价格预测",
+                      "回归预测", "地产"],
+        "lit_query": "california housing price prediction regression machine learning",
+        "desc_cn": "加州房价预测",
+        "target_cn": "街区房价中位数（万美元）",
+        "n": 20640, "feat": 8,
+    },
+    {
+        "key": "olivetti_faces",
+        "label": "Olivetti 人脸数据集（sklearn 内置，像素扁平化）",
+        "source": "sklearn",
+        "name": "fetch_olivetti_faces",
+        "task": "classification",
+        "modality": "image",
+        "domain_kw": ["人脸", "面部", "人脸识别", "face", "faces", "olivetti",
+                      "图像分类", "图像识别", "像素", "面部识别"],
+        "lit_query": "face recognition classification machine learning olivetti eigenfaces",
+        "desc_cn": "人脸身份识别",
+        "target_cn": "人物类别（40 类）",
+        "n": 400, "feat": 4096,
+    },
+    {
+        "key": "newsgroups",
+        "label": "20 类新闻组文本数据集（sklearn 内置，TF-IDF 管道）",
+        "source": "text",
+        "name": "fetch_20newsgroups",
+        "task": "classification",
+        "modality": "text",
+        "domain_kw": ["文本", "新闻", "情感", "语义", "自然语言", "文档分类",
+                      "主题分类", "text", "newsgroup", "nlp", "语料", "文本分类"],
+        "lit_query": "text classification 20 newsgroups TF-IDF machine learning",
+        "desc_cn": "文本主题分类",
+        "target_cn": "新闻组主题类别（20 类）",
+        "n": 18000, "feat": "tfidf",
+    },
+    {
+        "key": "text_sample",
+        "label": "本地文本样例数据集（离线可跑，TF-IDF 管道）",
+        "source": "text",
+        "path": "data/text_sample.csv",
+        "text_col": "text",
+        "target": "label",
+        "task": "classification",
+        "modality": "text",
+        "domain_kw": ["文本", "文档", "语料", "主题分类", "文本分类", "情感", "语义"],
+        "lit_query": "text classification TF-IDF local sample machine learning",
+        "desc_cn": "文本主题分类（本地样例）",
+        "target_cn": "文档主题类别",
+        "n": 105, "feat": "tfidf",
+    },
+    # ── OpenML 经典数据集（运行时联网拉取并缓存；直接对应信用/营销/质量/分类等高频题） ──
+    {
+        "key": "openml_adult",
+        "label": "Adult 收入预测数据集（OpenML 1590）",
+        "source": "openml",
+        "dataset_id": 1590,
+        "task": "classification",
+        "modality": "tabular",
+        "domain_kw": ["收入", "信用", "信用评分", "成人", "adult", "income",
+                      "人口普查", "客户分群", "分群", "薪资"],
+        "lit_query": "adult income prediction classification census machine learning",
+        "desc_cn": "居民收入是否超 5 万美元预测",
+        "target_cn": "收入档位（>50K / <=50K）",
+    },
+    {
+        "key": "openml_bank",
+        "label": "Bank Marketing 银行营销数据集（OpenML 1461）",
+        "source": "openml",
+        "dataset_id": 1461,
+        "task": "classification",
+        "modality": "tabular",
+        "domain_kw": ["银行", "营销", "bank", "营销响应", "客户", "认购", "理财",
+                      "电话营销", "定期存款"],
+        "lit_query": "bank marketing term deposit prediction classification",
+        "desc_cn": "银行定期存款认购预测",
+        "target_cn": "是否认购定期存款",
+    },
+    {
+        "key": "openml_wine_quality",
+        "label": "Wine Quality 葡萄酒质量数据集（OpenML 40498）",
+        "source": "openml",
+        "dataset_id": 40498,
+        "task": "regression",
+        "modality": "tabular",
+        "domain_kw": ["葡萄酒", "wine", "质量", "quality", "口感", "酿酒", "红酒"],
+        "lit_query": "wine quality prediction regression machine learning",
+        "desc_cn": "葡萄酒质量评分预测",
+        "target_cn": "质量评分（连续）",
+    },
+    {
+        "key": "openml_mushroom",
+        "label": "Mushroom 蘑菇可食性数据集（OpenML 900）",
+        "source": "openml",
+        "dataset_id": 900,
+        "task": "classification",
+        "modality": "tabular",
+        "domain_kw": ["蘑菇", "mushroom", "毒性", "可食", "真菌", "毒菌"],
+        "lit_query": "mushroom edibility classification machine learning",
+        "desc_cn": "蘑菇可食性判别",
+        "target_cn": "可食/有毒类别",
+    },
 ]
 
 
@@ -216,6 +345,37 @@ DATASET_CATALOG = [
 # ─────────────────────────────────────────────────────────────────────────────
 def _norm(text: str) -> str:
     return (text or "").lower()
+
+
+def detect_contribution_intent(title: str, direction: str = "") -> bool:
+    """判断选题是否需要「本文方法贡献」（而非忠实复现/对比）。
+
+    关键修复（用户反馈）：此前系统无论题目如何，都硬塞一个「融合集成方法」当贡献，
+    导致「基于随机森林」这类题目被强加集成贡献而跑题。本函数让贡献是否注入
+    由题目语义决定：
+
+      - 含明确改进/融合/提出类词（改进、优化、增强、融合、集成、新型、提出、轻量、快速、
+        improve、novel、propose、fusion、ensemble…）→ 需要方法贡献（True）；
+      - 仅点名某方法做「基于/应用/研究/对比/识别/预测/分析」（忠实复现）→ 不需要（False），
+        此时论文应忠实围绕该方法来做严谨的实证对比，而非另起炉灶造一个集成；
+      - 既无改进词也无忠实词（极泛题目）→ 默认给系统一个轻量集成贡献（True），
+        避免产出纯空对比、毫无增量。
+
+    返回 True 表示 run_task 应注入 proposed_method（融合集成）；False 表示忠实模式，
+    论文围绕题目点名的方法展开，不强行套贡献模板。
+    """
+    t = _norm(title + " " + direction)
+    CONTRIB = ["改进", "优化", "增强", "提升", "融合", "集成", "新型", "新算法", "新模型",
+               "提出", "轻量", "快速", "改进型", "improve", "enhanced", "novel",
+               "propose", "fusion", "ensemble", "lightweight"]
+    FAITHFUL = ["基于", "应用", "研究", "分类", "识别", "诊断", "检测", "预测", "对比",
+                "比较", "实证", "分析", "调查", "based on", "application", "survey",
+                "comparison", "empirical"]
+    if any(k in t for k in CONTRIB):
+        return True
+    if any(k in t for k in FAITHFUL):
+        return False
+    return True
 
 
 def detect_task_type(title: str, direction: str = "", matched_task: str = None) -> str:
@@ -253,14 +413,28 @@ def extract_method_hints(title: str, direction: str = "") -> tuple[list[str], li
 
 
 def match_dataset(title: str, direction: str = "", task_type: str = None) -> dict | None:
-    """按领域关键词重叠匹配最合适的数据集；命中 0 个关键词返回 None。"""
+    """按领域关键词重叠匹配最合适的数据集；命中 0 个关键词返回 None。
+
+    加权规则：
+      - 领域关键词命中 +1/个；
+      - 任务类型一致 +0.5；
+      - 模态一致（题目提「图像/人脸」→ image 集；提「文本/语义」→ text 集）+1，
+        从源头避免「图像题被错配到表格集」这类误匹配。
+    """
     t = _norm(title + " " + direction)
+    t_img = any(k in t for k in ["图像", "人脸", "面部", "像素", "img", "image", "face"])
+    t_text = any(k in t for k in ["文本", "语义", "自然语言", "nlp", "语料", "文档", "新闻"])
     best, best_score = None, 0
     for ds in DATASET_CATALOG:
         score = sum(1 for kw in ds["domain_kw"] if kw.lower() in t)
         # 任务类型一致时加权，避免「心脏病」被错配到回归集
         if task_type and ds.get("task") == task_type:
             score += 0.5
+        modality = ds.get("modality", "tabular")
+        if t_img and modality == "image":
+            score += 1.0
+        if t_text and modality == "text":
+            score += 1.0
         if score > best_score:
             best, best_score = ds, score
     return best if best_score > 0 else None
@@ -277,9 +451,9 @@ def build_candidate_methods(task_type: str, method_hints: list[str]) -> list[dic
         return [{"name": "K均值", "estimator": "kmeans"},
                 {"name": "层次聚类", "estimator": "agglomerative"}]
     keys: list[str] = list(method_hints) if method_hints else []
-    # 补齐基线，封顶 5 个，保证有对照且能构造融合集成
+    # 补齐基线，封顶 6 个，保证有对照且能构造融合集成
     for k in _DEFAULT_METHODS.get(task_type, []):
-        if len(keys) >= 5:
+        if len(keys) >= 6:
             break
         if k not in keys:
             keys.append(k)
@@ -300,10 +474,19 @@ def build_candidate_methods(task_type: str, method_hints: list[str]) -> list[dic
 
 
 def _data_binding(ds: dict) -> dict:
+    # 统一附带可读元信息（label/desc/target/modality），供论文正文明确定位数据集，
+    # 避免新数据源在正文里退化成「指定数据集」这类占位词。
+    meta = {"label": ds.get("label"), "desc_cn": ds.get("desc_cn"),
+            "target_cn": ds.get("target_cn"), "modality": ds.get("modality", "tabular")}
     if ds["source"] == "csv":
-        return {"source": "csv", "path": ds["path"], "target": ds["target"]}
+        return {"source": "csv", "path": ds["path"], "target": ds["target"], **meta}
     if ds["source"] == "sklearn":
-        return {"source": "sklearn", "name": ds["name"]}
+        return {"source": "sklearn", "name": ds["name"], **meta}
+    if ds["source"] == "text":
+        return {"source": "text", "name": ds.get("name"), **meta}
+    if ds["source"] == "openml":
+        return {"source": "openml", "dataset_id": ds["dataset_id"],
+                "version": ds.get("version"), **meta}
     raise ValueError(f"未知数据源：{ds['source']}")
 
 
@@ -338,7 +521,11 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         match_note = "使用用户自带/指定数据集"
     elif matched:
         data = _data_binding(matched)
-        match_note = f"匹配本地数据集：{matched['label']}（{matched['n']}样本/{matched['feat']}特征）"
+        _n, _f = matched.get("n"), matched.get("feat")
+        _scale = (f"{_n}样本/{_f}特征" if (_n and _f)
+                  else f"OpenML data_id={matched.get('dataset_id')}" if matched.get("source") == "openml"
+                  else "规模按实际加载")
+        match_note = f"匹配本地数据集：{matched['label']}（{_scale}）"
     else:
         data = None
         match_note = "未匹配到本地数据集，请用 --data/--dataset 指定，或扩充 DATASET_CATALOG"
@@ -378,6 +565,9 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         "direction": direction,
         "_match_note": match_note,
         "_unsupported_methods": unsupported,
+        # 忠实选题：是否需要方法贡献。由题目语义决定，run_task 据此决定是否注入融合集成。
+        # True=需要（题目要改进/融合/提出）；False=忠实复现（题目基于某方法做研究/对比）。
+        "_needs_contribution": detect_contribution_intent(title, direction),
     }
     return spec
 
@@ -391,8 +581,10 @@ def parse_title(title: str, direction: str = "") -> dict:
         "title": title,
         "task_type": task_type,
         "matched_dataset": matched["label"] if matched else None,
+        "matched_modality": matched.get("modality", "tabular") if matched else None,
         "method_hints": [(_METHOD_DEFS[k]["cn"] if k in _METHOD_DEFS else k) for k in hints],
         "unsupported_methods": unsupported,
+        "needs_contribution": detect_contribution_intent(title, direction),
     }
 
 
