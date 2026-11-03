@@ -90,6 +90,39 @@ def _dataset_meta(data_override: dict | None) -> str | None:
             f"特征列含 {feats}{tinfo}。")
 
 
+def wait_for_llm(max_wait: int = 0, interval: int = 60) -> bool:
+    """等待模型恢复：模型不可用时每隔 interval 秒重试一次，最多等 max_wait 秒。
+
+    用户的原话是「网关卡了，不就可以等待吗」——等待比降级更符合「只要高质量产出」
+    的定位。这里只做有上限的等待，不做无限重试。
+    """
+    from engine import llm_client as LLM
+
+    if LLM.available():
+        return True
+    if max_wait <= 0:
+        return False
+    waited = 0
+    while waited < max_wait:
+        step = min(interval, max_wait - waited)
+        print(f"[等待] 模型不可用，{step}s 后重试（已等待 {waited}s / 上限 {max_wait}s）")
+        time.sleep(step)
+        waited += step
+        LLM.reset_cache()
+        if LLM.available():
+            print(f"[等待] 模型已恢复（等待 {waited}s）")
+            return True
+    print(f"[等待] 超过上限 {max_wait}s，模型仍不可用")
+    return False
+
+
+def _existing_artifacts(out_dir: Path) -> list[str]:
+    """列出目录里已有的产物，用于失败时告诉用户「哪些东西保住了」。"""
+    names = ["task_spec.json", "01_literature.json", "02_hypotheses.json",
+             "03_experiment.json", "04_review.json", "06_paper/paper_full.md"]
+    return [n for n in names if (out_dir / n).exists()]
+
+
 def mark_delivery(out_dir, llm_written=None) -> dict:
     """判定这次产物能不能当交付稿，并写 06_paper/DELIVERY_STATUS.json。
 
@@ -354,6 +387,20 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
 def cmd_run(args) -> int:
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
     res = run_task(spec, args.out, make_paper=not args.no_paper, mode=args.mode)
+    # 中途断网的情形：开跑时模型可用，跑到写作时挂了 → 产物已生成但不可交付。
+    # 严格模式下这里必须失败退出，避免「悄悄给你一份半成品」。
+    if not getattr(args, "allow_degraded", False):
+        _st = out_dir / "06_paper" / "DELIVERY_STATUS.json"
+        if _st.exists():
+            try:
+                _d = json.loads(_st.read_text(encoding="utf-8"))
+            except Exception:
+                _d = {}
+            if _d.get("deliverable") is False:
+                print("\n[未产出可交付论文] " + "；".join(_d.get("reasons") or []))
+                print(f"  半成品与中间产物保留在 {out_dir}（已标【不可交付】），可直接续跑。")
+                return 3
+
     a = res["analysis"]
     summary = {
         "out_dir": res["out_dir"],
@@ -819,14 +866,19 @@ def cmd_from_title(args) -> int:
         print("\n未执行。去掉 --dry-run 即开始正式运行。")
         return 0
 
-    if getattr(args, "require_llm", False):
-        try:
-            from engine import llm_client as _LLM
-            if not _LLM.available():
-                print("[严格模式] 模型网关不可用，按 --require-llm 要求中止，未产出任何文件。")
-                return 2
-        except Exception as e:  # noqa: BLE001
-            print(f"[严格模式] 探测模型可用性失败：{e}")
+    # 默认严格：只要高质量稿，不接受降级稿。需要出半成品自测时显式加 --allow-degraded。
+    if not getattr(args, "allow_degraded", False):
+        _wait = int(getattr(args, "wait_llm", 0) or 0)
+        if not wait_for_llm(_wait):
+            _out = Path(args.out)
+            print("\n[未产出论文] 模型不可用，且未允许降级。")
+            _have = _existing_artifacts(_out) if _out.exists() else []
+            if _have:
+                print(f"  已保留的中间产物：{'、'.join(_have)}（重跑不会重做这些）")
+            print("  可选做法：")
+            print("    1) 稍后重试（会自动复用已有产物）：加 --wait-llm 600，或过一会儿再跑同一条命令")
+            print("    2) 只想先看实验/数据：加 --no-paper")
+            print("    3) 确需半成品自测：加 --allow-degraded（产物会标【不可交付】）")
             return 2
 
     out_dir = Path(args.out)
@@ -910,8 +962,12 @@ def main() -> int:
     fp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     fp.add_argument("--force", action="store_true",
                     help="强制重抓文献/重跑分析（默认断点续跑，复用已有 01_literature.json）")
+    fp.add_argument("--allow-degraded", action="store_true",
+                    help="允许在模型不可用时产出半成品（会标【不可交付】，仅用于自测）")
+    fp.add_argument("--wait-llm", type=int, default=0,
+                    help="模型不可用时最多等待多少秒（每 60s 重试一次），默认不等待")
     fp.add_argument("--require-llm", action="store_true",
-                    help="严格模式：模型不可用就直接失败退出，不产出半成品")
+                    help="（兼容旧参数）严格模式；现在默认即严格模式")
     fp.add_argument("--dry-run", action="store_true",
                     help="只预演解析结果（数据集/方法/检索式），不跑实验不出论文")
     fp.add_argument("--mode", default="general",
