@@ -79,7 +79,9 @@ def _client_or_none():
         extra = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))
     except Exception:
         extra = {}
-    client = OpenAI(base_url=base, api_key=key)
+    # max_retries=0：SDK 默认重试 2 次，会和本模块的退避重试叠乘（一次探测变 6 次请求），
+    # 网关回 502 时会表现为「卡住 60 秒以上」。重试策略统一由 _raw_chat 控制。
+    client = OpenAI(base_url=base, api_key=key, max_retries=0)
     return (client, model, extra)
 
 
@@ -154,9 +156,10 @@ def available() -> bool:
             return False
         client, model, extra = c
         # 轻握手：极小 prompt 验证连通性与鉴权（带限流感知重试）
+        # 快速失败：探测只是决定「走 LM 还是走确定性兜底」，不值得长时间等待
         _raw_chat(client, model, extra,
                   [{"role": "user", "content": "ping"}], max_tokens=2,
-                  timeout=12, max_attempts=2, backoff_base=2.0, cap=15.0)
+                  timeout=6, max_attempts=1)
         _CACHE_AVAIL = True
     except Exception:
         _CACHE_AVAIL = False
