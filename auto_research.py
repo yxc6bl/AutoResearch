@@ -17,6 +17,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -87,6 +88,47 @@ def _dataset_meta(data_override: dict | None) -> str | None:
     feats = [c for c in df.columns if c != target][:15]
     return (f"自定义表格数据集：预览 {len(df)} 行、共 {df.shape[1]} 列；"
             f"特征列含 {feats}{tinfo}。")
+
+
+def mark_delivery(out_dir, llm_written=None) -> dict:
+    """判定这次产物能不能当交付稿，并写 06_paper/DELIVERY_STATUS.json。
+
+    规则很直白：模型没参与写作（llm_written=False 或正文中文不足 6000 字）→ 判为
+    「不可交付」。这类稿子只能用于自测/定位/演示链路，不能当成品交上去。
+    """
+    out_dir = Path(out_dir)
+    md = out_dir / "06_paper" / "paper_full.md"
+    n_chars = 0
+    if md.exists():
+        n_chars = len(re.findall(r"[\u4e00-\u9fff]", md.read_text(encoding="utf-8")))
+    degraded = (llm_written is False) or (n_chars and n_chars < 6000) or (n_chars == 0)
+    reasons = []
+    if llm_written is False:
+        reasons.append("模型未参与写作（生成器走了确定性模板骨架）")
+    if n_chars and n_chars < 6000:
+        reasons.append(f"正文仅 {n_chars} 个汉字（正常应为 1.2 万字以上）")
+    if n_chars == 0:
+        reasons.append("未找到正文")
+    status = {
+        "deliverable": not degraded,
+        "llm_written": llm_written,
+        "chinese_chars": n_chars,
+        "reasons": reasons,
+        "hint": ("可交付" if not degraded else
+                 "不可交付：仅用于自测/定位链路，请等模型可用后重跑写作"),
+    }
+    try:
+        target = out_dir / "06_paper" / "DELIVERY_STATUS.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    if degraded:
+        print("【不可交付】" + "；".join(reasons))
+        print("           该产物仅供自测/定位，不要作为成品提交。")
+    else:
+        print(f"【可交付】正文 {n_chars} 字，模型参与写作。")
+    return status
 
 
 def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general",
@@ -283,7 +325,13 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"generate_paper 异常: {e}")
 
-        # 6) 文献使用反馈：记录本次哪些文献真的被正文引用，供后续检索优先复用
+        # 交付状态：模型没参与写作就明确标「不可交付」，防止半成品被当成品
+        try:
+            mark_delivery(out_dir)
+        except Exception as e:  # noqa: BLE001
+            print(f"[交付状态] 判定跳过：{e}")
+
+        # 6) 文献使用反馈：记录本次哪些论文真的被正文引用，供后续检索优先复用
         try:
             from engine import lit_feedback as LFB
             _mdp = out_dir / "06_paper" / "paper_full.md"
@@ -565,6 +613,7 @@ def cmd_step(args) -> int:
         wa = _load_module(ROOT / "agents" / "writing_agent.py", "writing_agent")
         r = wa.run(out, out / "task_spec.json", timeout=args.timeout)
         print(f"[step write] returncode={r['returncode']} paper={r['paper']}")
+        mark_delivery(out, r.get("llm_written"))
         if r["returncode"] != 0:
             print(r["stderr"][-800:])
             return 1
@@ -770,6 +819,16 @@ def cmd_from_title(args) -> int:
         print("\n未执行。去掉 --dry-run 即开始正式运行。")
         return 0
 
+    if getattr(args, "require_llm", False):
+        try:
+            from engine import llm_client as _LLM
+            if not _LLM.available():
+                print("[严格模式] 模型网关不可用，按 --require-llm 要求中止，未产出任何文件。")
+                return 2
+        except Exception as e:  # noqa: BLE001
+            print(f"[严格模式] 探测模型可用性失败：{e}")
+            return 2
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     res = run_task(spec, out_dir, make_paper=not args.no_paper, mode=args.mode,
@@ -851,6 +910,8 @@ def main() -> int:
     fp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     fp.add_argument("--force", action="store_true",
                     help="强制重抓文献/重跑分析（默认断点续跑，复用已有 01_literature.json）")
+    fp.add_argument("--require-llm", action="store_true",
+                    help="严格模式：模型不可用就直接失败退出，不产出半成品")
     fp.add_argument("--dry-run", action="store_true",
                     help="只预演解析结果（数据集/方法/检索式），不跑实验不出论文")
     fp.add_argument("--mode", default="general",

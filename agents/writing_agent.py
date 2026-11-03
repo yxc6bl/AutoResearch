@@ -56,10 +56,22 @@ def run(out_dir, task_spec_path, store: MemoryStore | None = None, timeout: int 
         "paper_docx": str(paper) if paper.exists() else None,
         "paper_md": str(paper_md) if paper_md.exists() else None,
     })
+    # generate_paper 会在 stdout 末尾打印一段 JSON 状态（含 llm_written），
+    # 这里解析出来，供上层判断「这是正常稿还是模板骨架稿」。
+    llm_written = None
+    try:
+        _out = proc.stdout or ""
+        _start = _out.rfind("{")
+        if _start >= 0:
+            llm_written = json.loads(_out[_start:]).get("llm_written")
+    except Exception:
+        llm_written = None
+
     return {
         "paper": str(paper) if paper.exists() else None,
         "paper_md": str(paper_md) if paper_md.exists() else None,
         "returncode": proc.returncode,
+        "llm_written": llm_written,
         "stderr": (proc.stderr or "")[-2500:],
     }
 
