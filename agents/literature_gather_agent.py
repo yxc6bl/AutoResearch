@@ -205,6 +205,125 @@ def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None 
     return pool
 
 
+# ── LM 逐篇阅读筛选（核心：AI 读文献，而不是匹配关键词） ──────────────────
+# 每批 12 篇，把「标题 + 摘要（最多 600 字）+ 出处」交给模型，逐篇回答：
+#   what      这篇做了什么（≤40 字）
+#   relation  与选题的关系：直接可比 / 方法可借鉴 / 背景 / 无关 / 未知
+#   usable_in 能用在论文哪一节：相关工作 / 方法 / 实验对比 / 引言 / 无
+#   why       判断依据（≤25 字）
+# 结果按 id 缓存到 0x_screen_cache.json，重跑不重复花钱。
+_REL_SCORE = {"直接可比": 0.95, "方法可借鉴": 0.72, "背景": 0.40, "未知": 0.30, "无关": 0.0}
+_ROLE_FROM_USE = {"相关工作": "方法", "方法": "方法", "实验对比": "基准数据集", "引言": "综述", "无": "方法"}
+
+
+def _lm_read_screen(topic: str, pool: list[dict], out_dir: Path,
+                    max_papers: int = 72, batch: int = 12,
+                    max_calls: int = 8, abstract_chars: int = 600,
+                    deadline: float | None = None) -> dict:
+    """让 LM 逐篇读摘要并给出可用性判断。返回 {id: verdict} 与统计。
+
+    失败/预算耗尽时返回已读到的部分——调用方按「已读优先、未读退回关键词」处理，
+    并据此标注 confidence。
+    """
+    # 成本可调：LIT_READ_MAX=逐篇阅读篇数上限（0=关闭），LIT_READ_CALLS=调用次数上限
+    try:
+        max_papers = int(os.environ.get("LIT_READ_MAX", max_papers))
+        max_calls = int(os.environ.get("LIT_READ_CALLS", max_calls))
+    except Exception:
+        pass
+    if max_papers <= 0:
+        return {}
+    cache_path = out_dir / "0x_screen_cache.json"
+    cache: dict = {}
+    try:
+        if cache_path.exists():
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        cache = {}
+
+    # 优先读「关键词分较高」的候选，控制成本
+    ordered = sorted(pool, key=lambda x: x.get("select_score") or x.get("quality_score") or 0,
+                     reverse=True)[:max_papers]
+    todo = [p for p in ordered if p.get("id") and p["id"] not in cache]
+    calls = 0
+    failed = 0
+    while todo and calls < max_calls:
+        if deadline and time.time() > deadline:
+            print("[GatherAgent] 已到时间预算，停止逐篇阅读（未读的退回关键词判断）")
+            break
+        chunk, todo = todo[:batch], todo[batch:]
+        items = [{
+            "id": p["id"],
+            "title": (p.get("title") or "")[:150],
+            "venue": (p.get("venue") or "")[:50],
+            "year": p.get("year"),
+            "abstract": (p.get("abstract") or "")[:abstract_chars] or "（无摘要）",
+        } for p in chunk]
+        prompt = (
+            f"研究选题：{topic}\n\n"
+            "你是这篇本科毕业设计的文献筛选人。请逐篇**读摘要**，判断它能否用于这篇论文，"
+            "而不是只做关键词匹配。对每篇输出：\n"
+            '  "what"：它做了什么（用了什么方法/数据、得到什么结论），≤40 个汉字；\n'
+            '  "relation"：与选题的关系，只能是 直接可比 / 方法可借鉴 / 背景 / 无关 / 未知；\n'
+            '    直接可比=同一个任务/同一类数据上的同类研究；方法可借鉴=方法或思路能迁移过来；\n'
+            '    背景=只提供领域背景；无关=主题不同；未知=摘要不足以判断。\n'
+            '  "usable_in"：能用在论文哪一节，只能是 相关工作 / 方法 / 实验对比 / 引言 / 无；\n'
+            '  "why"：判断依据，≤25 个汉字。\n'
+            "硬约束：只依据给出的标题与摘要，不得臆测；摘要为空且标题不足以判断时 relation=未知。\n"
+            '只输出 JSON：{"verdicts":[{"id":"...","what":"...","relation":"直接可比",'
+            '"usable_in":"相关工作","why":"..."}]}'
+        )
+        try:
+            out = LLM.chat_json(prompt + "\n\n候选文献：\n" + json.dumps(items, ensure_ascii=False),
+                                system=LLM.FACT_FIRST_SYSTEM, temperature=0.2, max_tokens=2400)
+            calls += 1
+        except Exception as e:  # noqa: BLE001
+            failed += 1
+            print(f"[GatherAgent] 阅读批次失败（第 {failed} 次）：{e}")
+            if failed >= 2:
+                break
+            continue
+        got = 0
+        for v in (out.get("verdicts") or []):
+            if not isinstance(v, dict) or not v.get("id"):
+                continue
+            cache[v["id"]] = {
+                "what": str(v.get("what") or "")[:80],
+                "relation": v.get("relation") if v.get("relation") in _REL_SCORE else "未知",
+                "usable_in": v.get("usable_in") or "无",
+                "why": str(v.get("why") or "")[:60],
+            }
+            got += 1
+        if got == 0:
+            failed += 1
+            if failed >= 2:
+                break
+        else:
+            failed = 0
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"[GatherAgent] 逐篇阅读：已判 {len(cache)} 篇，本轮调用 {calls} 次")
+    return cache
+
+
+def _apply_screen(pool: list[dict], screen: dict) -> int:
+    """把阅读结论写回候选：relation/usable_in/what → fit_score / role / gist。"""
+    n = 0
+    for p in pool:
+        v = screen.get(p.get("id"))
+        if not v:
+            continue
+        p["llm_relation"] = v["relation"]
+        p["llm_what"] = v["what"]
+        p["llm_why"] = v["why"]
+        p["llm_fit"] = _REL_SCORE.get(v["relation"], 0.3)
+        p["role"] = _ROLE_FROM_USE.get(v.get("usable_in"), p.get("role") or "方法")
+        if v.get("what"):
+            p["gist_cn"] = v["what"]        # 直接作为正文里的一句话概要
+        n += 1
+    return n
+
+
 # ── LM 智能筛选 + 缺口识别 ──────────────────────────────────────────────
 def _lm_filter(topic: str, pool: list[dict]) -> dict:
     """LM 对候选做 keep/drop + 角色 + 缺口。返回 {keep_ids, role_map, gaps, missing_queries}。"""
@@ -359,6 +478,22 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         "rounds": 1,
     }
 
+    # ③-a LM 逐篇阅读：让模型读摘要判断「做了什么 / 能不能用」，而不是关键词命中
+    _screen: dict = {}
+    if lm_driven:
+        try:
+            _screen = _lm_read_screen(topic, pool, out_dir, deadline=_deadline)
+            _n_applied = _apply_screen(pool, _screen) if _screen else 0
+            if _n_applied:
+                _rel = {}
+                for p in pool:
+                    r = p.get("llm_relation")
+                    if r:
+                        _rel[r] = _rel.get(r, 0) + 1
+                print(f"[GatherAgent] 阅读结论已应用 {_n_applied} 篇：{_rel}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[GatherAgent] 逐篇阅读跳过（不影响主流程）：{e}")
+
     # ③ LM 判定 keep / role / 缺口（只影响排序加分，不再作为硬过滤）
     filt = (_lm_filter(topic, pool) if lm_driven
             else {"keep_ids": None, "role_map": {}, "gaps": [], "missing_queries": []})
@@ -398,7 +533,13 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
     # 作为过滤条件使用；关键词兜底分不清任务语义，因此少选、并标注置信度。
     _lm_kept = [p for p in pool if p.get("id") in filt.get("keep_ids")] \
         if (lm_driven and filt.get("keep_ids")) else []
-    _cand = _lm_kept if len(_lm_kept) >= 15 else pool
+    if _screen:
+        # 语义筛选：读者判为「无关」的直接排除；未读到的保留交给关键词兜底
+        _cand = [p for p in pool if p.get("llm_relation") != "无关"]
+        if len(_cand) < 8:
+            _cand = pool
+    else:
+        _cand = _lm_kept if len(_lm_kept) >= 15 else pool
     _cap = top_n if _lm_kept else min(top_n, 30)
     # 门槛由召回策略决定（LIT_PROFILE=strict/balanced/recall），不再在这里写死
     chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap)
@@ -406,8 +547,10 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap,
                                                profile="recall")
         sel_report["fallback"] = "全部候选低于质量线，已放宽门槛（结果需人工复核）"
-    sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
+    sel_report["confidence"] = ("lm_read" if _screen else
+                                "lm_semantic" if _lm_kept else "keyword_only")
     sel_report["cap"] = _cap
+    sel_report["n_read"] = len(_screen)
     # ⑤-b 覆盖不足时换更宽的检索式再抓一轮（扩面，不降门槛）
     _TARGET_MIN = 20
     if len(chosen) < min(_TARGET_MIN, _cap):
@@ -425,7 +568,8 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             if _added:
                 pool += _added
                 chosen, sel_report = LA.select_by_role(pool, _fit_topic, max_total=_cap)
-                sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
+                sel_report["confidence"] = ("lm_read" if _screen else
+                                            "lm_semantic" if _lm_kept else "keyword_only")
                 sel_report["cap"] = _cap
                 report["broadened_queries"] = _wide[:3]
                 report["rounds"] = int(report.get("rounds") or 1) + 1

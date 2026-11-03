@@ -96,8 +96,12 @@ def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) ->
     # 控制喂给 LM 的体量
     view = papers[:60]
     items = [{"id": p.get("id"), "title": (p.get("title") or "")[:140],
-             "year": p.get("year"), "venue": (p.get("venue") or "")[:40],
-             "role": p.get("role"), "q": p.get("quality_score")} for p in view]
+              "year": p.get("year"), "venue": (p.get("venue") or "")[:40],
+              "role": p.get("role"), "q": p.get("quality_score"),
+              # 检索阶段 LM 已逐篇读过：带上它的「做了什么」与「关系判断」，
+              # 审评人才能判断「是否扣题」，而不是只看标题猜。
+              "what": p.get("llm_what") or p.get("gist_cn") or "",
+              "relation": p.get("llm_relation") or ""} for p in view]
     cand_n = len(candidates) if candidates else 0
     prompt = (
         f"研究选题：{topic}\n\n"
@@ -108,6 +112,7 @@ def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) ->
         "3) redundant_ids：与别的文献高度重复、可剔除的 id 列表；\n"
         "4) weak_ids：相关性弱或质量低、建议降级/剔除的 id 列表；\n"
         "5) missing_themes：还缺哪类重要文献/主题（如缺综述、缺最新深度学习对比、缺本数据集直接相关研究）；\n"
+        "   注意：若某篇标题看着相关、但 what 显示它做的其实是另一件事，请列入 weak_ids 并说明；\n"
         "6) recommended_add_queries：为补强覆盖应再搜的检索式；\n"
         "7) keep_ratio：建议保留比例（0-1）。\n"
         '只输出 JSON：{"coverage_score":8,"assessment":"...","redundant_ids":[],'

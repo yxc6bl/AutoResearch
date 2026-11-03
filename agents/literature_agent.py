@@ -665,7 +665,11 @@ def select_by_role(candidates: list[dict], topic: str,
     for c in candidates:
         c.setdefault("venue_tier", _venue_tier(c.get("venue"), c.get("url")))
         c.setdefault("role", _classify_role(c))
-        c["fit_score"] = fits.get(id(c), _fit_score(c, topic))
+        # LM 逐篇阅读过就以它的判断为准（语义级），关键词分只用于未读到的候选
+        if c.get("llm_fit") is not None:
+            c["fit_score"] = float(c["llm_fit"])
+        else:
+            c["fit_score"] = fits.get(id(c), _fit_score(c, topic))
         # 贴合度分档：core=直接可比（≥0.5），adjacent=相邻领域（0.35–0.5）。
         # 正文据此分组措辞，避免把「收入与健康」这类相邻研究写成「直接可比工作」。
         c["fit_tier"] = "core" if c["fit_score"] >= 0.5 else "adjacent"
