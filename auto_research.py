@@ -95,6 +95,24 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     # 写入机构模式，供 generate_paper 决定封面/诚信声明措辞
     spec = dict(spec)
     spec["institution_mode"] = mode
+    # 默认注入「本文提出的融合集成方法」作为方法贡献点：把候选方法融为一个软投票集成，
+    # 确定性、无需 LLM，让默认产出的论题自带方法贡献而非纯模型对比。spec 已自带则尊重之。
+    if "proposed_method" not in spec:
+        _cms = spec.get("candidate_methods") or []
+        _base_keys = []
+        for _m in _cms:
+            if isinstance(_m, str):
+                _base_keys.append(_m)
+            elif isinstance(_m, dict):
+                _base_keys.append(_m.get("name") or _m.get("estimator")
+                                  or f"m{len(_base_keys)}")
+        if len(_base_keys) >= 2:
+            spec["proposed_method"] = {
+                "name": "本文提出的融合集成方法",
+                "type": "voting",
+                "voting": "soft",
+                "base": _base_keys,
+            }
     (out_dir / "task_spec.json").write_text(
         json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -136,6 +154,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     )
 
     # 3) 确定性分析（ExperimentAgent 封装，写 project memory）
+    result: dict = {"analysis": None, "out_dir": str(out_dir), "paper": None, "errors": []}
     exp_path = out_dir / "03_experiment.json"
     try:
         ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")

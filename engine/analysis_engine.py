@@ -59,6 +59,7 @@ except Exception:
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import VotingClassifier, VotingRegressor
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -639,6 +640,101 @@ def _extract_importance(est, feat_names):
     return out
 
 
+# ── 本文提出的融合集成方法（确定性方法贡献，零编造） ─────────────────
+# 默认把候选方法融合为一个软投票集成，作为「本文提出的方法」参与统一基准对比，
+# 并在消融实验中逐一移除基学习器以量化各基学习器的边际贡献。所有数字来自真实重跑。
+_PROPOSED_KEY = "本文提出的融合集成方法"
+
+
+def _parse_proposed(spec, method_specs, methods, is_reg):
+    """解析 spec.proposed_method，返回 {key, base, voting} 或 None。
+
+    base 缺省为全部候选方法；仅保留真实存在且可构建的基学习器，
+    少于 2 个有效基学习器时返回 None（退化时不强行构造集成）。
+    """
+    pm = spec.get("proposed_method")
+    if not pm:
+        return None
+    raw_base = list(pm.get("base") or [])
+    if not raw_base:
+        raw_base = [m for m in methods if not method_specs[m].get("__proposed__")]
+    valid_base = [b for b in raw_base
+                  if b in method_specs and not method_specs[b].get("__proposed__")]
+    if len(valid_base) < 2:
+        return None
+    voting = (pm.get("voting") or ("soft" if not is_reg else "hard"))
+    if voting not in ("soft", "hard"):
+        voting = "soft" if not is_reg else "hard"
+    return {"key": pm.get("name") or _PROPOSED_KEY, "base": valid_base, "voting": voting}
+
+
+def _build_base_for_ensemble(bspec, seed, is_reg):
+    """为集成构建一个基学习器；分类任务下确保有 predict_proba（软投票需要）。"""
+    est = build_estimator(bspec, seed)
+    if est is None:
+        return None
+    if not is_reg and not hasattr(est, "predict_proba"):
+        # SVC 默认无概率输出：以 probability=True 重建以支持软投票
+        if "SVC" in type(est).__name__:
+            try:
+                from sklearn.svm import SVC
+                est = SVC(probability=True, random_state=seed)
+            except Exception:
+                return None
+        else:
+            return None
+    return est
+
+
+def _build_ensemble(base_specs, is_reg, voting, seed):
+    """用基学习器规格列表构造软/硬投票集成；有效基学习器不足 2 个返回 None。"""
+    estimators = []
+    for i, bs in enumerate(base_specs):
+        est = _build_base_for_ensemble(bs, seed, is_reg)
+        if est is None:
+            continue
+        estimators.append((f"b{i}", est))
+    if len(estimators) < 2:
+        return None
+    try:
+        if is_reg:
+            return VotingRegressor(estimators=estimators)
+        return VotingClassifier(estimators=estimators, voting=voting)
+    except Exception:
+        return None
+
+
+def _ensemble_mean_metric(base_specs, is_reg, voting, main_metric, objective, X, y):
+    """在 SEEDS 上重跑集成，返回主指标均值（用于消融实验的边际贡献量化）。"""
+    vals = []
+    for seed in SEEDS:
+        if is_reg:
+            X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=TEST_SIZE, random_state=seed)
+        else:
+            X_tr, X_te, y_tr, y_te = train_test_split(
+                X, y, test_size=TEST_SIZE, random_state=seed, stratify=y)
+        sc = _fit_prep(X_tr)
+        est = _build_ensemble(base_specs, is_reg, voting, seed)
+        if est is None:
+            return None
+        try:
+            est.fit(sc.transform(X_tr), y_tr)
+            yp = est.predict(sc.transform(X_te))
+        except Exception:
+            return None
+        if is_reg:
+            if main_metric == "mse":
+                vals.append(float(mean_squared_error(y_te, yp)))
+            else:
+                vals.append(float(r2_score(y_te, yp)))
+        else:
+            if main_metric in ("accuracy", "acc"):
+                vals.append(float(accuracy_score(y_te, yp)))
+            else:
+                vals.append(float(f1_score(y_te, yp, average="macro", zero_division=0)))
+    return float(np.mean(vals)) if vals else None
+
+
 # ── 主入口 ──────────────────────────────────────────────────────────────
 def run_analysis(spec: dict, out_path: Path) -> dict:
     """运行确定性分析，图写入 out_path.parent/'plots'，返回 ANALYSIS_JSON dict。
@@ -660,11 +756,25 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
             _seen_est[est] = m
         _methods_dedup.append(m)
     methods = _methods_dedup
+    # 注入「本文提出的融合集成方法」：作为候选之外的额外方法参与统一基准对比。
+    # 它是确定性的（投票融合候选方法），不依赖 LLM，且自带消融实验贡献点。
+    _is_reg_guess = ((spec.get("task_type") or (spec.get("data") or {}).get("task_type")) == "regression")
+    _proposed = _parse_proposed(spec, method_specs, methods, _is_reg_guess)
+    if _proposed:
+        methods.append(_proposed["key"])
+        method_specs[_proposed["key"]] = {
+            "__proposed__": True,
+            "base": _proposed["base"],
+            "voting": _proposed["voting"],
+        }
     declared_task = spec.get("task_type") or (spec.get("data") or {}).get("task_type")
     # 预检：能成功构建的方法才参与；缺少依赖（如未装 xgboost/torch）的记为跳过
     skipped_methods = []
     cluster_names = {"kmeans", "agglomerative", "dbscan"}
     for m in list(methods):
+        if method_specs[m].get("__proposed__"):
+            # 提议方法由引擎在种子循环内动态构建集成，预检跳过
+            continue
         if declared_task == "clustering" and any(n in m.lower() for n in cluster_names):
             continue
         try:
@@ -675,6 +785,7 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
             skipped_methods.append(m)
             methods.remove(m)
     main_metric = spec.get("metric") or "accuracy"
+    objective = spec.get("objective") or "maximize"
     if not methods:
         return {"error": "没有可运行的候选方法", "skipped_methods": skipped_methods}
     try:
@@ -844,7 +955,12 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
         Xtr = sc.transform(X_tr)
         Xte = sc.transform(X_te)
         for m in methods:
-            est = build_estimator(method_specs[m], seed)
+            pm_spec = method_specs[m]
+            if pm_spec.get("__proposed__"):
+                est = _build_ensemble(
+                    [method_specs[b] for b in pm_spec["base"]], is_reg, pm_spec["voting"], seed)
+            else:
+                est = build_estimator(pm_spec, seed)
             if est is None:
                 continue
             try:
@@ -922,6 +1038,30 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
         if t_arr and tr_arr and len(t_arr) == len(tr_arr):
             g = np.asarray(t_arr, dtype=float) - np.asarray(tr_arr, dtype=float)
             analysis["train_test_gap"][m] = float(g.mean())
+
+    # 本文提出的融合集成方法：记录身份并做消融实验（逐一移除基学习器，量化边际贡献）
+    if _proposed:
+        _pk = _proposed["key"]
+        analysis["proposed_method"] = _pk
+        analysis["proposed_base"] = list(_proposed["base"])
+        analysis["proposed_voting"] = _proposed["voting"]
+        _full = _mean(_pk, main_metric)
+        _ablation = []
+        if _full is not None and 2 <= len(_proposed["base"]) <= 6:
+            for b in _proposed["base"]:
+                _reduced = [x for x in _proposed["base"] if x != b]
+                if len(_reduced) < 2:
+                    continue
+                _val = _ensemble_mean_metric(
+                    [method_specs[x] for x in _reduced], is_reg, _proposed["voting"],
+                    main_metric, objective, X, y)
+                if _val is not None:
+                    _ablation.append({
+                        "removed": b,
+                        "value": round(float(_val), 4),
+                        "drop": round(float(_full - _val), 4),
+                    })
+        analysis["proposed_ablation"] = _ablation
 
     if is_reg:
         # 系数 / 残差 / 特征重要性
