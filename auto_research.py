@@ -543,6 +543,25 @@ def cmd_from_title(args) -> int:
         print(f"[提示] 题目提及但引擎暂未内置的方法：{spec['_unsupported_methods']}；"
               f"将以经典机器学习方法 + 融合集成方法完成，论文如实说明。")
 
+    # 预演模式：只打印「会跑什么」，不落盘、不打网关，避免错配题白跑几分钟
+    if getattr(args, "dry_run", False):
+        _d = spec.get("data") or {}
+        print("\n[预演] 本任务将执行：")
+        print(f"  论文题目：{spec.get('title')}")
+        print(f"  任务类型：{spec.get('task_type')}（主指标 {spec.get('metric')}，{spec.get('objective')}）")
+        print(f"  数据集：{spec.get('_match_note')}")
+        print(f"  数据绑定：source={_d.get('source')} "
+              f"{'name=' + str(_d.get('name')) if _d.get('name') else ''}"
+              f"{'data_id=' + str(_d.get('dataset_id')) if _d.get('dataset_id') else ''}"
+              f"{'path=' + str(_d.get('path')) if _d.get('path') else ''}")
+        print(f"  候选方法（{len(spec.get('candidate_methods') or [])} 个）："
+              f"{'、'.join(m.get('name', '?') for m in (spec.get('candidate_methods') or []))}")
+        print(f"  是否要求方法贡献：{'是' if spec.get('_needs_contribution') else '否（忠实复现题目点名方法）'}")
+        print(f"  文献检索式：{spec.get('literature_query')}")
+        print(f"  研究问题：{spec.get('research_question')}")
+        print("\n未执行。去掉 --dry-run 即开始正式运行。")
+        return 0
+
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     res = run_task(spec, out_dir, make_paper=not args.no_paper, mode=args.mode,
@@ -624,6 +643,8 @@ def main() -> int:
     fp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     fp.add_argument("--force", action="store_true",
                     help="强制重抓文献/重跑分析（默认断点续跑，复用已有 01_literature.json）")
+    fp.add_argument("--dry-run", action="store_true",
+                    help="只预演解析结果（数据集/方法/检索式），不跑实验不出论文")
     fp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     fp.set_defaults(func=cmd_from_title)
