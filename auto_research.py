@@ -283,6 +283,23 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"generate_paper 异常: {e}")
 
+        # 6) 文献使用反馈：记录本次哪些文献真的被正文引用，供后续检索优先复用
+        try:
+            from engine import lit_feedback as LFB
+            _mdp = out_dir / "06_paper" / "paper_full.md"
+            _litp = out_dir / "01_literature.json"
+            if _mdp.exists() and _litp.exists():
+                _papers = json.loads(_litp.read_text(encoding="utf-8")).get("papers") or []
+                _fb = LFB.record(str(spec.get("title") or spec.get("topic") or ""),
+                                 _papers, _mdp.read_text(encoding="utf-8"))
+                (out_dir / "05_lit_feedback.json").write_text(
+                    json.dumps(_fb, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"[Literature] 使用反馈：入选 {_fb['n_selected']} 篇，正文实际引用 {_fb['n_cited']} 篇")
+                result["lit_feedback"] = {"n_selected": _fb["n_selected"],
+                                          "n_cited": _fb["n_cited"]}
+        except Exception as e:  # noqa: BLE001
+            print(f"[Literature] 使用反馈记录失败（不影响主流程）：{e}")
+
     return result
 
 

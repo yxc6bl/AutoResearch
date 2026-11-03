@@ -37,21 +37,31 @@ from agents import literature_agent as LA  # noqa: E402
 # ── 检索式合成 ──────────────────────────────────────────────────────────
 def _keyword_queries(topic: str, task_type: str, method_cn: list[str],
                      dataset_query: str) -> list[str]:
-    """确定性兜底：从选题关键词派生检索式（无 LM 时用）。"""
-    qs = []
-    if dataset_query:
-        qs.append(dataset_query)
-    for m in method_cn[:3]:
-        qs.append(f"{m} machine learning")
-    if task_type == "classification":
-        qs.append("classification benchmark comparison survey")
-    elif task_type == "regression":
-        qs.append("regression prediction machine learning survey")
-    if topic:
-        # 题目本身的关键英文词（粗略去停用词）
-        toks = re.findall(r"[a-zA-Z][a-zA-Z0-9\- ]{2,}", topic)
-        if toks:
-            qs.append(" ".join(toks[:6]).strip())
+    """确定性兜底：派生**以领域词为主**的检索式（无 LM 时用）。
+
+    旧实现把方法名单独当检索式（如 "逻辑回归 machine learning"），抓回来的
+    全是通用机器学习论文，直接污染候选池。现在所有检索式都锚定领域短语，
+    方法名只作为领域短语的修饰词出现。
+    """
+    domain = (dataset_query or "").strip()
+    if not domain:
+        toks = [t for t in re.findall(r"[a-zA-Z][a-zA-Z\-]{2,}", topic)
+                if t.lower() not in LA._FIT_GENERIC]
+        domain = " ".join(toks[:5]).strip()
+    qs: list[str] = []
+    if domain:
+        qs.append(domain)
+        qs.append(f"{domain} survey review")
+        qs.append(f"{domain} benchmark evaluation")
+        for m in method_cn[:2]:
+            qs.append(f"{domain} {m}")
+        if task_type == "classification":
+            qs.append(f"{domain} classification comparison")
+        elif task_type == "regression":
+            qs.append(f"{domain} regression prediction")
+    else:
+        # 连领域词都抽不出来：退回按任务类型找综述，至少保证不是空池
+        qs.append(f"{task_type} machine learning benchmark survey")
     seen, uniq = set(), []
     for q in qs:
         q = q.strip()
@@ -93,36 +103,72 @@ def _lm_queries(topic: str, task_type: str, method_cn: list[str],
 
 
 # ── 候选抓取（广撒网） ──────────────────────────────────────────────────
-def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None = None) -> list[dict]:
+def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None = None,
+                saturate_rounds: int = 2, saturate_min_new: int = 5) -> list[dict]:
     """对每条检索式抓 arXiv + OpenAlex，合并去重，返回带评分的候选池。
 
-    deadline（time.time() 绝对时刻）用于兜住「网关/接口慢」的极端情况：到点即停，
-    用已抓到的候选继续走筛选，避免整条流水线被检索阶段拖死。
+    deadline：墙上时间预算，到点即停（慢接口不应拖死整条流水线）。
+    saturate_*：**饱和度停止**——连续 N 条检索式新增候选都少于阈值，说明该题文献池
+    已接近饱和，再搜只是重复。这是「能抓多少抓多少」的正确停止条件，而不是拍固定篇数。
     """
     raw: list[dict] = []
+    seen_ids: set[str] = set()
+    dry = 0
+    fails = 0
+    oa_down = False  # 本次运行内 OpenAlex 触发 429 后直接跳过，不再逐条重试空等
     for i, q in enumerate(queries):
         if deadline and time.time() > deadline:
             print(f"[GatherAgent] 已达检索时间预算，跳过剩余 {len(queries) - i} 条检索式"
                   f"（已抓 {len(raw)} 条候选，继续后续筛选）")
             break
-        if "arxiv.org" in q.lower():
-            pass
+        _before = len(seen_ids)
+        _ok = False
         # arXiv
         try:
-            raw += lit_mod.fetch_arxiv(q, max_results=max(8, per_query // 3))
+            _got = lit_mod.fetch_arxiv(q, max_results=max(8, per_query // 3))
+            raw += _got
+            _ok = _ok or bool(_got)
         except Exception as e:  # noqa: BLE001
             print(f"[GatherAgent] arXiv 检索失败（{q[:40]}）：{e}")
-        # OpenAlex
-        try:
-            raw += LA.fetch_openalex(q, max_results=per_query)
-        except Exception as e:  # noqa: BLE001
-            print(f"[GatherAgent] OpenAlex 检索失败（{q[:40]}）：{e}")
+        # OpenAlex（429 后本次运行内不再尝试）
+        if not oa_down:
+            try:
+                _got = LA.fetch_openalex(q, max_results=per_query)
+                raw += _got
+                _ok = _ok or bool(_got)
+            except Exception as e:  # noqa: BLE001
+                if "429" in str(e):
+                    oa_down = True
+                    print("[GatherAgent] OpenAlex 触发限流(429)，本次运行内跳过该源")
+                else:
+                    print(f"[GatherAgent] OpenAlex 检索失败（{q[:40]}）：{e}")
         # Semantic Scholar（可选，默认关闭；env AUTORESEARCH_USE_SEMSCHOLAR=1 启用，扩大正式论文覆盖）
         if os.environ.get("AUTORESEARCH_USE_SEMSCHOLAR"):
             try:
-                raw += LA.fetch_semantic_scholar(q, max_results=per_query)
+                _got = LA.fetch_semantic_scholar(q, max_results=per_query)
+                raw += _got
+                _ok = _ok or bool(_got)
             except Exception as e:  # noqa: BLE001
                 print(f"[GatherAgent] SemanticScholar 检索失败（{q[:40]}）：{e}")
+        # 全部数据源都失败：记为「抓取失败」，**不能**误判成「文献池饱和」
+        if not _ok:
+            fails += 1
+            if fails >= 3:
+                print("[GatherAgent] 连续 3 条检索式全部数据源失败（网络/限流），停止抓取")
+                break
+            continue
+        fails = 0
+        # 饱和度计数：本条检索式带来的新候选数
+        for p in raw:
+            pid = p.get("id") or p.get("url")
+            if pid:
+                seen_ids.add(pid)
+        _new = len(seen_ids) - _before
+        dry = dry + 1 if _new < saturate_min_new else 0
+        if dry >= saturate_rounds:
+            print(f"[GatherAgent] 文献池已饱和（连续 {dry} 条检索式新增 < {saturate_min_new} 条），"
+                  f"提前停止；累计 {len(seen_ids)} 条候选")
+            break
     # 相关性过滤 + 评分 + 去重
     before = len(raw)
     raw = [p for p in raw if LA._relevance_passes(p, "")]
@@ -201,6 +247,46 @@ def _rules_select(pool: list[dict], top_n: int) -> list[dict]:
     return LA.select(pool, mode="auto", top_n=top_n)
 
 
+def _add_gists(topic: str, papers: list[dict], max_papers: int = 40) -> int:
+    """为入选文献生成一句中文概要（≤40 字）：它做了什么。
+
+    只做客观转述，不评价优劣、不补充原文没有的信息；摘要为空且标题不足以判断时
+    返回空串，正文退回「标题 + 出处」——宁可少信息，不可编。
+    """
+    todo = [p for p in papers if not p.get("gist_cn")][:max_papers]
+    if not todo or not LLM.available():
+        return 0
+    items = [{"i": i, "t": (p.get("title") or "")[:130],
+              "a": (p.get("abstract") or "")[:200],
+              "v": (p.get("venue") or "")[:40], "y": p.get("year")}
+             for i, p in enumerate(todo)]
+    prompt = (
+        f"研究选题：{topic}\n\n"
+        "下面是从检索结果中选中的文献。请为每篇写一句中文说明：它做了什么（方法/数据/结论要点），"
+        "不超过 40 个汉字，客观转述，禁止评价优劣、禁止补充原文没有的信息；"
+        "摘要为空且仅凭标题无法判断时返回空字符串。\n"
+        '只输出 JSON：{"gists": {"0": "……", "1": "……"}}'
+    )
+    try:
+        out = LLM.chat_json(prompt + "\n\n文献：\n" + json.dumps(items, ensure_ascii=False),
+                            system=LLM.FACT_FIRST_SYSTEM, temperature=0.2, max_tokens=2000)
+    except Exception as e:  # noqa: BLE001
+        print(f"[GatherAgent] 文献概要生成失败，正文退回「标题+出处」：{e}")
+        return 0
+    gists = out.get("gists") or {}
+    n = 0
+    for k, v in gists.items():
+        try:
+            idx = int(k)
+        except Exception:
+            continue
+        if 0 <= idx < len(todo) and isinstance(v, str) and v.strip():
+            todo[idx]["gist_cn"] = v.strip()[:80]
+            n += 1
+    print(f"[GatherAgent] 文献概要：{n}/{len(todo)} 条")
+    return n
+
+
 def run(topic: str, task_type: str = "classification", method_cn: list[str] | None = None,
         dataset_query: str = "", out_dir: str | Path = "", top_n: int = 45,
         max_candidates: int = 250, source_tag: str = "",
@@ -229,6 +315,22 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
     pool = _fetch_pool(queries, per_query=40, deadline=_deadline)
     pool = pool[:max_candidates]
 
+    # 历史使用反馈：过去真正被正文引用过的文献优先（同类选题复用已验证的好文献）
+    try:
+        from engine import lit_feedback as LFB  # 同源模块
+        bm = LFB.bonus_map()
+        if bm:
+            hit = 0
+            for p in pool:
+                b = bm.get(LFB._norm_title(p.get("title")))
+                if b:
+                    p["score_bonus"] = float(p.get("score_bonus") or 0) + b
+                    hit += 1
+            if hit:
+                print(f"[GatherAgent] 历史反馈：{hit} 篇曾被引用的文献获得优先加权")
+    except Exception as e:  # noqa: BLE001
+        print(f"[GatherAgent] 反馈加权跳过（不影响检索）：{e}")
+
     report = {
         "topic": topic,
         "lm_driven": lm_driven,
@@ -239,54 +341,112 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         "rounds": 1,
     }
 
-    # ③ LM 筛选 + 缺口
-    filt = _lm_filter(topic, pool) if lm_driven else {"keep_ids": None, "role_map": {}, "gaps": [], "missing_queries": []}
+    # ③ LM 判定 keep / role / 缺口（只影响排序加分，不再作为硬过滤）
+    filt = (_lm_filter(topic, pool) if lm_driven
+            else {"keep_ids": None, "role_map": {}, "gaps": [], "missing_queries": []})
     if lm_driven and filt.get("keep_ids") is not None:
-        chosen = [p for p in pool if p.get("id") in filt["keep_ids"]]
-        # 应用 LM 给的角色（覆盖规则归类）
-        for p in chosen:
-            r = filt["role_map"].get(p.get("id"))
-            if r:
-                p["role"] = r
-        # 少于 top_n 时，用质量分补满，保证数量
-        if len(chosen) < top_n:
-            filled = sorted([p for p in pool if p.get("id") not in filt["keep_ids"]],
-                            key=lambda x: x.get("quality_score", 0), reverse=True)
-            for p in filled:
-                if len(chosen) >= top_n:
-                    break
-                chosen.append(p)
+        for p in pool:
+            if p.get("id") in filt["keep_ids"]:
+                p["score_bonus"] = 0.12          # LM 认可：排序加分
+                r = filt["role_map"].get(p.get("id"))
+                if r:
+                    p["role"] = r
         report["gaps"] = filt.get("gaps", [])
         report["missing_queries"] = filt.get("missing_queries", [])
 
-        # ④ 缺口回填：再抓一轮 missing_queries
+        # ④ 缺口回填：再抓一轮 missing_queries（同样受时间预算约束）
         mq = [q for q in (filt.get("missing_queries") or []) if isinstance(q, str) and q.strip()]
-        if mq and len(chosen) < top_n:
+        if mq:
             report["rounds"] = 2
             extra = _fetch_pool(mq[:4], per_query=30, deadline=_deadline)
-            extra_ids = {p.get("id") for p in chosen}
-            added = [p for p in extra if p.get("id") not in extra_ids]
-            pool += added
-            # 对新增候选做一次轻量 LM 筛选
-            ef = _lm_filter(topic, added) if added else {"keep_ids": None}
-            if ef.get("keep_ids") is not None:
+            known = {p.get("id") for p in pool}
+            added = [p for p in extra if p.get("id") not in known]
+            if added:
+                ef = _lm_filter(topic, added)
                 for p in added:
-                    if p.get("id") in ef["keep_ids"] and len(chosen) < top_n:
-                        r = ef["role_map"].get(p.get("id"))
+                    if ef.get("keep_ids") is None or p.get("id") in ef["keep_ids"]:
+                        p["score_bonus"] = 0.12 if ef.get("keep_ids") is not None else 0.0
+                        r = (ef.get("role_map") or {}).get(p.get("id"))
                         if r:
                             p["role"] = r
-                        chosen.append(p)
+                pool += added
             report["n_candidates"] = len(pool)
-    else:
-        # 兜底：规则精选
-        chosen = _rules_select(pool, top_n)
 
-    # 最终截到 top_n（无论如何不超上限，且尽量凑满）
-    chosen = chosen[:top_n]
-    if not chosen and pool:
-        chosen = pool[:top_n]
+    # ⑤ 角色覆盖式精选：数量由「每类最低覆盖 + 质量线」决定，不凑满固定篇数。
+    # 贴合度必须用「中文题目 + 英文数据集检索词」共同计算：中文题目本身没有英文领域词，
+    # 只用它会退化成所有候选同分（这也是之前边缘文献混进来的原因之一）。
+    _fit_topic = " ".join(x for x in (topic, dataset_query) if x)
+    # LM 在场时，它的 keep 是语义判断（能分清「收入预测」和「收入与健康」），
+    # 作为过滤条件使用；关键词兜底分不清任务语义，因此少选、并标注置信度。
+    _lm_kept = [p for p in pool if p.get("id") in filt.get("keep_ids")] \
+        if (lm_driven and filt.get("keep_ids")) else []
+    _cand = _lm_kept if len(_lm_kept) >= 15 else pool
+    _cap = top_n if _lm_kept else min(top_n, 30)
+    # 关键词兜底分不清「预测」与「相关研究」，门槛必须更严；LM 语义筛选时可以放宽
+    _floor = 0.20 if _lm_kept else 0.30
+    _min_score = 0.30 if _lm_kept else 0.30
+    chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap,
+                                           fit_floor=_floor, min_score=_min_score)
+    if not chosen:  # 全部低于质量线时退回放宽一档，保证流水线不空转
+        chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap,
+                                               fit_floor=0.0, min_score=0.0)
+        sel_report["fallback"] = "全部候选低于质量线，已放宽门槛（结果需人工复核）"
+    sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
+    sel_report["cap"] = _cap
+    # ⑤-b 覆盖不足时换更宽的检索式再抓一轮（扩面，不降门槛）
+    _TARGET_MIN = 20
+    if len(chosen) < min(_TARGET_MIN, _cap):
+        _doms = LA._domain_tokens(_fit_topic)[:3]
+        _wide = []
+        if _doms:
+            _d = " ".join(_doms)
+            _wide = [f"{_d} machine learning", f"{_d} survey", f"{_d} benchmark"]
+        else:
+            _wide = [f"{task_type} tabular data benchmark"]
+        try:
+            _extra = _fetch_pool(_wide[:3], per_query=40, deadline=_deadline)
+            _known = {p.get("id") or p.get("url") for p in pool}
+            _added = [p for p in _extra if (p.get("id") or p.get("url")) not in _known]
+            if _added:
+                pool += _added
+                chosen, sel_report = LA.select_by_role(pool, _fit_topic, max_total=_cap,
+                                                       fit_floor=_floor, min_score=_min_score)
+                sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
+                sel_report["cap"] = _cap
+                report["broadened_queries"] = _wide[:3]
+                report["rounds"] = int(report.get("rounds") or 1) + 1
+                report["n_candidates"] = len(pool)
+                print(f"[GatherAgent] 覆盖不足，已扩面重抓 {len(_added)} 条新候选 → 精选 {len(chosen)} 篇")
+        except Exception as e:  # noqa: BLE001
+            print(f"[GatherAgent] 扩面检索跳过：{e}")
+
+    # ⑤-c 下限兜底：严格筛选后不足 8 篇时逐级放宽，并明确标注需人工复核。
+    # 1 篇文献写不出综述章，但"凑到 45 篇噪声"更糟；这里的取舍是「能写 + 标红」。
+    _MIN_REFS = 8
+    if len(chosen) < _MIN_REFS:
+        _ch2, _rep2 = LA.select_by_role(_cand, _fit_topic,
+                                        max_total=max(_MIN_REFS, len(chosen)),
+                                        fit_floor=0.10, min_score=0.0)
+        if len(_ch2) > len(chosen):
+            chosen, sel_report = _ch2, _rep2
+            sel_report["relaxed"] = "严格门槛下不足 8 篇，已放宽到 0.10"
+        sel_report["confidence"] = "low"
+        sel_report["needs_review"] = True
+
+    report["selection"] = sel_report
+
+    if sel_report.get("role_stats"):
+        _short = {r: v["short"] for r, v in sel_report["role_stats"].items() if v.get("short")}
+        print(f"[GatherAgent] 角色覆盖：" +
+              "、".join(f"{r}{v['taken']}/{v['quota']}" for r, v in sel_report["role_stats"].items()))
+        if _short:
+            print(f"[GatherAgent] 覆盖缺口（如实报告，不凑数）：{_short}")
+        print(f"[GatherAgent] 剔除：跑题 {sel_report['dropped']['跑题']}、"
+              f"重复 {sel_report['dropped']['重复']} 篇")
 
     report["n_selected"] = len(chosen)
+    # ⑥ 为入选文献补一句话概要（失败则跳过，正文退回标题+出处）
+    report["n_gists"] = _add_gists(topic, chosen)
 
     # 写产物
     papers_path = out_dir / "01_literature.json"

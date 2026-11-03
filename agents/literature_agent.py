@@ -390,6 +390,204 @@ def _store_candidate(store: MemoryStore, c: dict, tag: str) -> None:
     store.put("literature", c["id"], rec)
 
 
+# ── 角色覆盖式精选（替代「凑满固定篇数」） ──────────────────────────────
+# 每类文献的最低覆盖数：低于它说明该类没抓到（如实报告缺口），而不是硬凑别的类。
+ROLE_QUOTAS = {"方法": 10, "理论基础": 6, "基准数据集": 4, "综述": 4}
+
+
+# 贴合度计算要剔除的「通用学术词」：它们出现在任何论文标题里，不能代表主题
+_FIT_GENERIC = {
+    "classification", "predict", "prediction", "predicting", "regression", "learning",
+    "machine", "deep", "neural", "network", "networks", "model", "models", "modeling",
+    "analysis", "analyses", "data", "dataset", "datasets", "method", "methods",
+    "approach", "approaches", "study", "studies", "based", "using", "use", "performance",
+    "evaluation", "evaluate", "comparison", "compare", "review", "survey", "system",
+    "systems", "framework", "application", "applications", "research", "paper",
+    "prediction", "estimation", "detection", "recognition", "algorithm", "algorithms",
+}
+
+
+def _domain_tokens(topic: str) -> list[str]:
+    """从选题里抽「领域词」：去掉通用学术词与停用词，只留能区分主题的词。"""
+    toks = re.findall(r"[a-z0-9\-]+", (topic or "").lower())
+    return [t for t in toks if len(t) > 3 and t not in _FIT_GENERIC and t not in _STOP]
+
+
+def _fit_scores(pool: list[dict], topic: str) -> dict:
+    """对整池候选计算题目贴合度（0–1）：领域词**邻近共现** + 池内稀有度加权。
+
+    为什么不用「词袋命中」：adult 题里，一篇《Census-linked cohort study of sepsis in
+    older adults》同时含 census 与 adult，但讲的是健康，不是收入预测。要求两个领域词
+    在标题中**相邻出现**（窗口 6 词），才能表达「adult census income」这类复合主题，
+    把「碰巧都出现」的论文挡在外面。
+    """
+    toks = _domain_tokens(topic)
+    if not toks:
+        return {id(p): 0.5 for p in pool}
+    n = max(1, len(pool))
+    df = {t: sum(1 for p in pool if t in (p.get("title") or "").lower()) for t in toks}
+    w = {t: math.log(1 + n / (1 + df[t])) for t in toks}
+    tot = sum(w.values()) or 1.0
+    out = {}
+    for p in pool:
+        title = (p.get("title") or "").lower()
+        abs_ = (p.get("abstract") or "").lower()
+        words = re.findall(r"[a-z0-9\-]+", title)
+        pos: dict[str, list[int]] = {}
+        for i, wd in enumerate(words):
+            if wd in w:
+                pos.setdefault(wd, []).append(i)
+        hit_t = set(pos)
+        # 邻近共现：任意两个不同领域词在标题中距离 ≤ 5 个词
+        pair_hit = any(abs(i - j) <= 5
+                       for a, ia in pos.items() for b, ib in pos.items() if a != b
+                       for i in ia for j in ib)
+        hit_a = {t for t in toks if t in abs_} - hit_t
+        if not hit_t and not hit_a:
+            out[id(p)] = 0.0
+            continue
+        s = (0.7 * sum(w[t] for t in hit_t) / tot
+             + 0.3 * sum(w[t] for t in hit_a) / tot)
+        hit_n = len(hit_t | hit_a)
+        if pair_hit:
+            s = min(1.0, s * 1.15)           # 复合主题命中，加分
+        elif len(toks) >= 3 and hit_n < 2:
+            s *= 0.30                        # 单词命中且不成对：强降权
+        else:
+            s *= 0.55                        # 多词命中但不相邻：中等降权
+        out[id(p)] = round(min(1.0, s), 3)
+    return out
+
+
+def _fit_score(p: dict, topic: str) -> float:
+    """单篇贴合度（无池上下文时的兜底，按领域词等权覆盖）。"""
+    toks = _domain_tokens(topic)
+    if not toks:
+        return 0.5
+    title = (p.get("title") or "").lower()
+    abs_ = (p.get("abstract") or "").lower()
+    hit_t = {t for t in toks if t in title}
+    hit_all = hit_t | {t for t in toks if t in abs_}
+    if not hit_all:
+        return 0.0
+    cover_t = len(hit_t) / len(toks)
+    cover_a = len(hit_all - hit_t) / len(toks)
+    return round(min(1.0, 0.7 * min(1.0, cover_t / 0.5) + 0.3 * min(1.0, cover_a / 0.6)), 3)
+
+
+def _select_score(p: dict, topic: str) -> float:
+    """入选排序分：贴合度 0.55 > 期刊层级 0.25 > 被引 0.12 > 时效 0.08。
+
+    score_bonus 由调用方设置（如 LM 判定 keep 给 +0.12），只加分不改变门槛。
+    """
+    fit = p.get("fit_score")
+    if fit is None:
+        fit = _fit_score(p, topic)
+    tier = p.get("venue_tier")
+    if tier is None:
+        tier = _venue_tier(p.get("venue"), p.get("url"))
+    cites = p.get("cited_by_count", 0) or 0
+    cite_score = _cite_score(cites, int(p.get("year") or 0))
+    try:
+        year = int(p.get("year") or 0)
+    except Exception:
+        year = 0
+    recency = max(0.0, min(1.0, (year - 2010) / 16.0)) if year else 0.3
+    s = 0.55 * fit + 0.25 * tier + 0.12 * cite_score + 0.08 * recency
+    s += float(p.get("score_bonus") or 0)
+    return round(min(1.0, s), 3)
+
+
+def select_by_role(candidates: list[dict], topic: str,
+                   quotas: dict | None = None, max_total: int = 45,
+                   fit_floor: float = 0.20, min_score: float = 0.30,
+                   chosen_ids: list[str] | None = None) -> tuple[list[dict], dict]:
+    """按「角色覆盖 + 质量门槛」精选，**不再凑满固定篇数**。
+
+    规则：
+      1) 贴合度低于 fit_floor 的一律剔除（跑题）；
+      2) 每个角色先取到配额，同角色内按 _select_score 排序；
+      3) 剩余名额只从「分数达 min_score」的候选中补，不达标的宁缺毋滥；
+      4) 标题近重复只留分数最高的一条。
+
+    返回 (chosen, report)。report 如实记录每类数量、缺口与被剔除原因，
+    让「文献不够」这件事可见，而不是靠凑数掩盖。
+    """
+    quotas = dict(quotas or ROLE_QUOTAS)
+    if chosen_ids is not None:  # 使用者手工勾选优先
+        idset = set(chosen_ids)
+        picked = [c for c in candidates if c.get("id") in idset]
+        return picked, {"mode": "manual", "n_selected": len(picked)}
+
+    def _norm_title(t: str) -> str:
+        return re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '', (t or '').lower())[:80]
+
+    # 归一化 + 打分 + 近重复去重
+    seen: dict[str, dict] = {}
+    dropped = {"跑题": 0, "重复": 0, "低于质量线": 0}
+    fits = _fit_scores(candidates, topic)
+    for c in candidates:
+        c.setdefault("venue_tier", _venue_tier(c.get("venue"), c.get("url")))
+        c.setdefault("role", _classify_role(c))
+        c["fit_score"] = fits.get(id(c), _fit_score(c, topic))
+        # 贴合度分档：core=直接可比（≥0.5），adjacent=相邻领域（0.35–0.5）。
+        # 正文据此分组措辞，避免把「收入与健康」这类相邻研究写成「直接可比工作」。
+        c["fit_tier"] = "core" if c["fit_score"] >= 0.5 else "adjacent"
+        c["select_score"] = _select_score(c, topic)
+        if c["fit_score"] < fit_floor:
+            dropped["跑题"] += 1
+            continue
+        key = _norm_title(c.get("title")) or str(c.get("id"))
+        old = seen.get(key)
+        if old is None or c["select_score"] > old["select_score"]:
+            if old is not None:
+                dropped["重复"] += 1
+            seen[key] = c
+        else:
+            dropped["重复"] += 1
+
+    pool = sorted(seen.values(), key=lambda x: x["select_score"], reverse=True)
+    by_role: dict[str, list[dict]] = {}
+    for c in pool:
+        by_role.setdefault(c["role"], []).append(c)
+
+    chosen: list[dict] = []
+    role_stats: dict[str, dict] = {}
+    for role in ["方法", "理论基础", "基准数据集", "综述"] + \
+                [r for r in by_role if r not in quotas]:
+        items = by_role.get(role, [])
+        quota = int(quotas.get(role, 0))
+        take = [x for x in items if x["select_score"] >= min_score][:quota]
+        role_stats[role] = {"available": len(items), "taken": len(take),
+                            "quota": quota, "short": max(0, quota - len(take))}
+        chosen.extend(take)
+
+    # 剩余名额：仍要求达到质量线，不达标的宁缺毋滥
+    remain = max(0, max_total - len(chosen))
+    if remain:
+        taken_ids = {id(x) for x in chosen}
+        extra = [x for x in pool
+                 if id(x) not in taken_ids and x["select_score"] >= min_score]
+        chosen.extend(extra[:remain])
+
+    # 稳定排序：先角色（固定顺序），再分数降序，便于正文按类成段
+    order = {r: i for i, r in enumerate(["方法", "理论基础", "基准数据集", "综述"])}
+    chosen.sort(key=lambda x: (order.get(x["role"], 9), -x["select_score"]))
+
+    report = {
+        "mode": "role_coverage",
+        "n_candidates": len(candidates),
+        "n_selected": len(chosen),
+        "role_stats": role_stats,
+        "dropped": dropped,
+        "quota_total": sum(int(v) for v in quotas.values()),
+        "max_total": max_total,
+        "fit_floor": fit_floor,
+        "min_score": min_score,
+    }
+    return chosen, report
+
+
 def run(query: str, max_results: int = 10, sources: tuple = ("arxiv", "openalex"),
         store: MemoryStore | None = None, out_path: Path | None = None,
         source_tag: str = "", top_n: int = 40,

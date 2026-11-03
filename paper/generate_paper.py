@@ -175,6 +175,10 @@ def build_references(lit) -> list[dict]:
             "year": p.get("year", ""),
             "url": p.get("url", ""),
             "role": p.get("role", "方法"),
+            # 一句话概要（由检索 Agent 生成并缓存）；缺失时正文只给标题+出处，不编造
+            "gist": p.get("gist_cn") or "",
+            # core=直接可比；adjacent=相邻领域（正文措辞需区分，不得混为直接对比）
+            "tier": p.get("fit_tier") or "core",
         })
     return refs
 
@@ -366,8 +370,12 @@ def _proposed_method_block(analysis, main_metric) -> str:
 
 
 def _role_citation_block(refs: list[dict]) -> str:
-    """第2章确定性「按角色归类」引用块：保证所有入选文献均被正文引用（满足 EvalAgent 引用对应硬要求），
-    并以「方法/理论/基准/综述」四维组织，提升综述结构分。"""
+    """第2章「按角色归类」的文献使用块。
+
+    旧实现只输出「已有工作包括 [2]、[3]、…」——文献变成了编号清单，读者不知道
+    任何一篇做了什么，等于引了没用。现在每篇至少给出「标题 + 出处」，有 LM 生成
+    的一句话概要时一并给出，让每条引用都承载信息；仍保证所有入选文献被引用。
+    """
     if not refs:
         return ""
     groups = {}
@@ -376,15 +384,42 @@ def _role_citation_block(refs: list[dict]) -> str:
         groups.setdefault(role, []).append(r)
     role_label = {"方法": "方法路线", "理论基础": "理论基础与框架",
                   "基准数据集": "基准数据集与评测", "综述": "综述与元分析"}
+    role_lead = {
+        "方法": "在方法路线上，与本文直接可比的工作包括：",
+        "理论基础": "在理论基础与框架方面，本文依托的代表性工作包括：",
+        "基准数据集": "在基准数据集与评测协议方面，可对照的工作包括：",
+        "综述": "在综述与元分析方面，可作为领域坐标的工作包括：",
+    }
     lines = ["### 2.x 代表性工作的路线归类", ""]
+    adjacent = [r for r in refs if r.get("tier") == "adjacent"]
     for role in ["方法", "理论基础", "基准数据集", "综述"]:
-        items = groups.get(role)
+        items = [r for r in groups.get(role, []) if r.get("tier") != "adjacent"]
         if not items:
             continue
-        nums = "、".join(f"[{r['num']}]" for r in items)
-        lines.append(f"在{role_label.get(role, role)}方面，已有工作包括 {nums} 等。")
-    lines.append("")
-    lines.append("上述文献从方法设计、理论支撑、基准评测与系统性综述四个角度构成了本研究的方法论上下文；"
+        lines.append(role_lead.get(role, f"在{role_label.get(role, role)}方面："))
+        for r in items:
+            title = (r.get("title") or "未命名文献").strip()
+            venue = (r.get("venue") or "").strip()
+            year = str(r.get("year") or "").strip()
+            src = "，".join([x for x in (venue, year) if x])
+            head = f"- [{r['num']}] 《{title}》"
+            if src:
+                head += f"（{src}）"
+            gist = (r.get("gist") or "").strip()
+            lines.append(f"{head}：{gist}" if gist else head)
+        lines.append("")
+    if adjacent:
+        lines.append("与本文任务相邻但并非直接可比的研究还包括：")
+        for r in adjacent[:20]:
+            title = (r.get("title") or "未命名文献").strip()
+            venue = (r.get("venue") or "").strip()
+            year = str(r.get("year") or "").strip()
+            src = "，".join([x for x in (venue, year) if x])
+            head = f"- [{r['num']}] 《{title}》" + (f"（{src}）" if src else "")
+            gist = (r.get("gist") or "").strip()
+            lines.append(f"{head}：{gist}" if gist else head)
+        lines.append("")
+    lines.append("上述文献分别从方法设计、理论支撑、基准评测与系统性综述四个角度构成了本研究的方法论上下文；"
                  "本文在统一实验协议下重新评估并定位自身结果，与前人工作形成可对照的差异。")
     return "\n".join(lines)
 
