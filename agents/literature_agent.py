@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import ssl
 import sys
@@ -165,6 +166,9 @@ def fetch_openalex(query: str, max_results: int = 10, timeout: int = 30,
         "select": "id,title,abstract_inverted_index,authorships,primary_location,"
                   "publication_year,cited_by_count,doi,relevance_score",
     }
+    _mailto = os.environ.get("LIT_CONTACT_EMAIL", "").strip()
+    if _mailto:
+        params["mailto"] = _mailto  # polite pool：限流阈值显著放宽
     last = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -250,6 +254,115 @@ def fetch_semantic_scholar(query: str, max_results: int = 10, timeout: int = 12,
             if attempt < max_retries:
                 time.sleep(2.0 * attempt)
     raise RuntimeError(f"Semantic Scholar 检索失败：{last!r}")
+
+
+# ── 更多元数据源：Crossref（期刊/会议正式出版）与 Europe PMC（生物医学） ──
+# 为什么加：只有 arXiv+OpenAlex 时，覆盖偏 CS 预印本，且单一源被限流就断粮。
+# 这两个源都免费、无需 Key，元数据质量高（Crossref 以 DOI 为核心，正式出版物最全）。
+CROSSREF = "https://api.crossref.org/works"
+EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+
+
+def _contact_email() -> str:
+    """学术 API 的 polite pool 需要联系邮箱；设置后限流阈值显著放宽。"""
+    return os.environ.get("LIT_CONTACT_EMAIL", "").strip()
+
+
+def fetch_crossref(query: str, max_results: int = 20, timeout: int = 30,
+                   max_retries: int = 2) -> list[dict]:
+    """Crossref：期刊/会议正式出版物最全的 DOI 元数据源（免费、无需 Key）。"""
+    params = {
+        "query.bibliographic": query,
+        "rows": min(100, max(10, int(max_results) * 2)),
+        "select": "DOI,title,author,container-title,issued,is-referenced-by-count,abstract,URL",
+        "sort": "relevance",
+        "order": "desc",
+    }
+    mailto = _contact_email()
+    if mailto:
+        params["mailto"] = mailto
+    last = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            url = CROSSREF + "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": f"AutoResearch/1.3 (mailto:{mailto or 'none'})"})
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+                data = json.loads(r.read().decode("utf-8", "ignore"))
+            out = []
+            for it in (data.get("message") or {}).get("items", []):
+                doi = it.get("DOI") or ""
+                title = (it.get("title") or [""])[0]
+                year = ""
+                try:
+                    year = str((it.get("issued") or {}).get("date-parts", [[None]])[0][0] or "")
+                except Exception:
+                    year = ""
+                venue = (it.get("container-title") or [""])
+                venue = venue[0] if isinstance(venue, list) and venue else (venue or "Crossref")
+                authors = ", ".join(
+                    f"{a.get('given', '')} {a.get('family', '')}".strip()
+                    for a in (it.get("author") or [])[:6] if a.get("family") or a.get("given"))
+                abstract = re.sub(r"<[^>]+>", " ", it.get("abstract") or "")
+                out.append({
+                    "id": ("doi:" + doi) if doi else ("crossref:" + (it.get("URL") or title)[:80]),
+                    "title": title.strip(),
+                    "authors": authors,
+                    "venue": venue.strip() if isinstance(venue, str) else "Crossref",
+                    "year": year,
+                    "url": ("https://doi.org/" + doi) if doi else (it.get("URL") or ""),
+                    "abstract": re.sub(r"\s+", " ", abstract).strip()[:700],
+                    "cited_by_count": it.get("is-referenced-by-count") or 0,
+                    "relevance_score": 0.0,
+                })
+            return [p for p in out if p["title"]]
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt < max_retries:
+                time.sleep(1.5 * attempt)
+    raise RuntimeError(f"Crossref 检索失败：{last!r}")
+
+
+def fetch_europepmc(query: str, max_results: int = 20, timeout: int = 30,
+                    max_retries: int = 2) -> list[dict]:
+    """Europe PMC：生物医学/生命科学文献（免费，含摘要与被引数）。"""
+    params = {
+        "query": query,
+        "format": "json",
+        "pageSize": min(100, max(10, int(max_results) * 2)),
+        "resultType": "core",
+    }
+    last = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            url = EUROPEPMC + "?" + urllib.parse.urlencode(params)
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "AutoResearch/1.3 (literature fetch)"})
+            with urllib.request.urlopen(req, timeout=timeout, context=_ssl_ctx()) as r:
+                data = json.loads(r.read().decode("utf-8", "ignore"))
+            out = []
+            for it in ((data.get("resultList") or {}).get("result") or []):
+                doi = it.get("doi") or ""
+                authors = (it.get("authorString") or "")[:200]
+                out.append({
+                    "id": ("doi:" + doi) if doi else ("epmc:" + str(it.get("id") or "")),
+                    "title": (it.get("title") or "").strip().rstrip("."),
+                    "authors": authors,
+                    "venue": (it.get("journalTitle") or it.get("bookOrReportDetails", {}).get("publisher")
+                              or "Europe PMC"),
+                    "year": str(it.get("pubYear") or ""),
+                    "url": ("https://doi.org/" + doi) if doi else
+                           ("https://europepmc.org/article/" + str(it.get("id") or "")),
+                    "abstract": re.sub(r"<[^>]+>", " ", it.get("abstractText") or "")[:700],
+                    "cited_by_count": it.get("citedByCount") or 0,
+                    "relevance_score": 0.0,
+                })
+            return [p for p in out if p["title"]]
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt < max_retries:
+                time.sleep(1.5 * attempt)
+    raise RuntimeError(f"Europe PMC 检索失败：{last!r}")
 
 
 # ── 质量评分（venue 档次为核心信号） ──
@@ -498,10 +611,28 @@ def _select_score(p: dict, topic: str) -> float:
     return round(min(1.0, s), 3)
 
 
+# 三档召回策略：默认 balanced。担心「限制太死」就切 recall，担心「混进噪声」就切 strict。
+# 通过环境变量 LIT_PROFILE 或函数参数指定，改配置即可，不用改代码。
+SELECT_PROFILES = {
+    "strict":   {"fit_floor": 0.40, "min_score": 0.42, "cap": 25},
+    "balanced": {"fit_floor": 0.25, "min_score": 0.28, "cap": 45},
+    "recall":   {"fit_floor": 0.10, "min_score": 0.10, "cap": 60},
+}
+
+
+def get_profile(name: str | None = None) -> tuple[str, dict]:
+    """取召回策略：优先参数，其次 env LIT_PROFILE，默认 balanced。"""
+    key = (name or os.environ.get("LIT_PROFILE") or "balanced").strip().lower()
+    if key not in SELECT_PROFILES:
+        key = "balanced"
+    return key, dict(SELECT_PROFILES[key])
+
+
 def select_by_role(candidates: list[dict], topic: str,
                    quotas: dict | None = None, max_total: int = 45,
-                   fit_floor: float = 0.20, min_score: float = 0.30,
-                   chosen_ids: list[str] | None = None) -> tuple[list[dict], dict]:
+                   fit_floor: float = 0.25, min_score: float = 0.28,
+                   chosen_ids: list[str] | None = None,
+                   profile: str | None = None) -> tuple[list[dict], dict]:
     """按「角色覆盖 + 质量门槛」精选，**不再凑满固定篇数**。
 
     规则：
@@ -514,6 +645,10 @@ def select_by_role(candidates: list[dict], topic: str,
     让「文献不够」这件事可见，而不是靠凑数掩盖。
     """
     quotas = dict(quotas or ROLE_QUOTAS)
+    _pname, _preset = get_profile(profile)
+    fit_floor = float(_preset["fit_floor"])
+    min_score = float(_preset["min_score"])
+    max_total = min(int(max_total), int(_preset["cap"]))
     if chosen_ids is not None:  # 使用者手工勾选优先
         idset = set(chosen_ids)
         picked = [c for c in candidates if c.get("id") in idset]
@@ -524,7 +659,8 @@ def select_by_role(candidates: list[dict], topic: str,
 
     # 归一化 + 打分 + 近重复去重
     seen: dict[str, dict] = {}
-    dropped = {"跑题": 0, "重复": 0, "低于质量线": 0}
+    dropped = {"低于贴合度门槛": 0, "重复": 0, "低于质量线": 0}
+    near_miss: list[dict] = []
     fits = _fit_scores(candidates, topic)
     for c in candidates:
         c.setdefault("venue_tier", _venue_tier(c.get("venue"), c.get("url")))
@@ -535,7 +671,8 @@ def select_by_role(candidates: list[dict], topic: str,
         c["fit_tier"] = "core" if c["fit_score"] >= 0.5 else "adjacent"
         c["select_score"] = _select_score(c, topic)
         if c["fit_score"] < fit_floor:
-            dropped["跑题"] += 1
+            dropped["低于贴合度门槛"] += 1
+            near_miss.append(c)
             continue
         key = _norm_title(c.get("title")) or str(c.get("id"))
         old = seen.get(key)
@@ -574,8 +711,14 @@ def select_by_role(candidates: list[dict], topic: str,
     order = {r: i for i, r in enumerate(["方法", "理论基础", "基准数据集", "综述"])}
     chosen.sort(key=lambda x: (order.get(x["role"], 9), -x["select_score"]))
 
+    near_miss.sort(key=lambda x: x.get("select_score", 0), reverse=True)
     report = {
         "mode": "role_coverage",
+        "profile": _pname,
+        "near_miss": [{"title": (x.get("title") or "")[:120],
+                       "fit": x.get("fit_score"),
+                       "venue": (x.get("venue") or "")[:60]}
+                      for x in near_miss[:8]],
         "n_candidates": len(candidates),
         "n_selected": len(chosen),
         "role_stats": role_stats,

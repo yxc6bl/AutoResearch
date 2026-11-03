@@ -102,20 +102,44 @@ def _lm_queries(topic: str, task_type: str, method_cn: list[str],
     return uniq[:6]
 
 
-# ── 候选抓取（广撒网） ──────────────────────────────────────────────────
+# ── 候选抓取（广撒网，多源注册表） ──────────────────────────────────────
+# 为什么多源：只有 arXiv（预印本，偏 CS）+ OpenAlex 时，一是学科覆盖窄（商科/医学/人文
+# 的正式出版物在期刊库里），二是单源被限流就断粮。这里做成注册表，按需增删。
+# 默认 arxiv + openalex + crossref；crossref 覆盖期刊/会议正式出版，是 arXiv 的重要补充。
+# 可选：europepmc（生物医学）、s2（Semantic Scholar，需较严限流）。
+_SOURCE_FUNCS = {
+    "arxiv": lambda q, n: lit_mod.fetch_arxiv(q, max_results=n),
+    "openalex": lambda q, n: LA.fetch_openalex(q, max_results=n),
+    "crossref": lambda q, n: LA.fetch_crossref(q, max_results=n),
+    "europepmc": lambda q, n: LA.fetch_europepmc(q, max_results=n),
+    "s2": lambda q, n: LA.fetch_semantic_scholar(q, max_results=n),
+}
+_SOURCE_DEFAULT = "arxiv,openalex,crossref"
+
+
+def enabled_sources() -> list[str]:
+    """可用数据源：env LIT_SOURCES 覆盖，默认 arxiv+openalex+crossref。"""
+    raw = os.environ.get("LIT_SOURCES", _SOURCE_DEFAULT)
+    names = [x.strip().lower() for x in raw.split(",") if x.strip()]
+    return [n for n in names if n in _SOURCE_FUNCS] or ["arxiv"]
+
+
 def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None = None,
                 saturate_rounds: int = 2, saturate_min_new: int = 5) -> list[dict]:
-    """对每条检索式抓 arXiv + OpenAlex，合并去重，返回带评分的候选池。
+    """对每条检索式跑所有启用数据源，合并去重，返回带评分的候选池。
 
-    deadline：墙上时间预算，到点即停（慢接口不应拖死整条流水线）。
-    saturate_*：**饱和度停止**——连续 N 条检索式新增候选都少于阈值，说明该题文献池
-    已接近饱和，再搜只是重复。这是「能抓多少抓多少」的正确停止条件，而不是拍固定篇数。
+    - deadline：墙上时间预算，到点即停。
+    - 饱和度停止：连续 N 条检索式新增都少于阈值，说明该题文献池已接近饱和。
+    - 单源降级：某源 429/持续失败只跳过该源，其余源继续；**失败不被误判为饱和**。
     """
     raw: list[dict] = []
     seen_ids: set[str] = set()
     dry = 0
     fails = 0
-    oa_down = False  # 本次运行内 OpenAlex 触发 429 后直接跳过，不再逐条重试空等
+    down: dict[str, str] = {}
+    sources = enabled_sources()
+    print(f"[GatherAgent] 数据源：{'、'.join(sources)}")
+
     for i, q in enumerate(queries):
         if deadline and time.time() > deadline:
             print(f"[GatherAgent] 已达检索时间预算，跳过剩余 {len(queries) - i} 条检索式"
@@ -123,34 +147,25 @@ def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None 
             break
         _before = len(seen_ids)
         _ok = False
-        # arXiv
-        try:
-            _got = lit_mod.fetch_arxiv(q, max_results=max(8, per_query // 3))
-            raw += _got
-            _ok = _ok or bool(_got)
-        except Exception as e:  # noqa: BLE001
-            print(f"[GatherAgent] arXiv 检索失败（{q[:40]}）：{e}")
-        # OpenAlex（429 后本次运行内不再尝试）
-        if not oa_down:
+        for name in sources:
+            if name in down:
+                continue
+            fn = _SOURCE_FUNCS[name]
+            n = max(8, per_query // 3) if name == "arxiv" else per_query
             try:
-                _got = LA.fetch_openalex(q, max_results=per_query)
+                _got = fn(q, n)
                 raw += _got
                 _ok = _ok or bool(_got)
             except Exception as e:  # noqa: BLE001
-                if "429" in str(e):
-                    oa_down = True
-                    print("[GatherAgent] OpenAlex 触发限流(429)，本次运行内跳过该源")
+                msg = str(e)
+                if "429" in msg or "Too Many" in msg:
+                    down[name] = "429"
+                    print(f"[GatherAgent] {name} 触发限流(429)，本次运行内跳过该源")
+                elif "403" in msg or "401" in msg:
+                    down[name] = "auth"
+                    print(f"[GatherAgent] {name} 拒绝访问，本次运行内跳过该源")
                 else:
-                    print(f"[GatherAgent] OpenAlex 检索失败（{q[:40]}）：{e}")
-        # Semantic Scholar（可选，默认关闭；env AUTORESEARCH_USE_SEMSCHOLAR=1 启用，扩大正式论文覆盖）
-        if os.environ.get("AUTORESEARCH_USE_SEMSCHOLAR"):
-            try:
-                _got = LA.fetch_semantic_scholar(q, max_results=per_query)
-                raw += _got
-                _ok = _ok or bool(_got)
-            except Exception as e:  # noqa: BLE001
-                print(f"[GatherAgent] SemanticScholar 检索失败（{q[:40]}）：{e}")
-        # 全部数据源都失败：记为「抓取失败」，**不能**误判成「文献池饱和」
+                    print(f"[GatherAgent] {name} 检索失败（{q[:36]}）：{e}")
         if not _ok:
             fails += 1
             if fails >= 3:
@@ -158,7 +173,6 @@ def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None 
                 break
             continue
         fails = 0
-        # 饱和度计数：本条检索式带来的新候选数
         for p in raw:
             pid = p.get("id") or p.get("url")
             if pid:
@@ -169,6 +183,7 @@ def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None 
             print(f"[GatherAgent] 文献池已饱和（连续 {dry} 条检索式新增 < {saturate_min_new} 条），"
                   f"提前停止；累计 {len(seen_ids)} 条候选")
             break
+
     # 相关性过滤 + 评分 + 去重
     before = len(raw)
     raw = [p for p in raw if LA._relevance_passes(p, "")]
@@ -177,7 +192,10 @@ def _fetch_pool(queries: list[str], per_query: int = 40, deadline: float | None 
         pid = p.get("id") or p.get("url")
         if not pid or pid in seen:
             continue
-        p["source"] = "arxiv" if "arxiv.org" in str(p.get("url", "")) else "openalex"
+        _u = str(p.get("url", ""))
+        p["source"] = ("arxiv" if "arxiv.org" in _u else
+                       "crossref" if "doi.org" in _u else
+                       "europepmc" if "europepmc" in _u else "openalex")
         p["venue_tier"] = LA._venue_tier(p.get("venue"), p.get("url"))
         p["role"] = LA._classify_role(p)
         p["quality_score"] = LA._quality_score(p)
@@ -382,14 +400,11 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         if (lm_driven and filt.get("keep_ids")) else []
     _cand = _lm_kept if len(_lm_kept) >= 15 else pool
     _cap = top_n if _lm_kept else min(top_n, 30)
-    # 关键词兜底分不清「预测」与「相关研究」，门槛必须更严；LM 语义筛选时可以放宽
-    _floor = 0.20 if _lm_kept else 0.30
-    _min_score = 0.30 if _lm_kept else 0.30
-    chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap,
-                                           fit_floor=_floor, min_score=_min_score)
+    # 门槛由召回策略决定（LIT_PROFILE=strict/balanced/recall），不再在这里写死
+    chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap)
     if not chosen:  # 全部低于质量线时退回放宽一档，保证流水线不空转
         chosen, sel_report = LA.select_by_role(_cand, _fit_topic, max_total=_cap,
-                                               fit_floor=0.0, min_score=0.0)
+                                               profile="recall")
         sel_report["fallback"] = "全部候选低于质量线，已放宽门槛（结果需人工复核）"
     sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
     sel_report["cap"] = _cap
@@ -409,8 +424,7 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             _added = [p for p in _extra if (p.get("id") or p.get("url")) not in _known]
             if _added:
                 pool += _added
-                chosen, sel_report = LA.select_by_role(pool, _fit_topic, max_total=_cap,
-                                                       fit_floor=_floor, min_score=_min_score)
+                chosen, sel_report = LA.select_by_role(pool, _fit_topic, max_total=_cap)
                 sel_report["confidence"] = "lm_semantic" if _lm_kept else "keyword_only"
                 sel_report["cap"] = _cap
                 report["broadened_queries"] = _wide[:3]
@@ -426,7 +440,7 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
     if len(chosen) < _MIN_REFS:
         _ch2, _rep2 = LA.select_by_role(_cand, _fit_topic,
                                         max_total=max(_MIN_REFS, len(chosen)),
-                                        fit_floor=0.10, min_score=0.0)
+                                        profile="recall")
         if len(_ch2) > len(chosen):
             chosen, sel_report = _ch2, _rep2
             sel_report["relaxed"] = "严格门槛下不足 8 篇，已放宽到 0.10"
@@ -441,8 +455,14 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
               "、".join(f"{r}{v['taken']}/{v['quota']}" for r, v in sel_report["role_stats"].items()))
         if _short:
             print(f"[GatherAgent] 覆盖缺口（如实报告，不凑数）：{_short}")
-        print(f"[GatherAgent] 剔除：跑题 {sel_report['dropped']['跑题']}、"
-              f"重复 {sel_report['dropped']['重复']} 篇")
+        _d = sel_report["dropped"]
+        print(f"[GatherAgent] 召回策略 {sel_report.get('profile')}｜剔除："
+              f"低于贴合度门槛 {_d.get('低于贴合度门槛', 0)}、重复 {_d.get('重复', 0)} 篇")
+        _nm = sel_report.get("near_miss") or []
+        if _nm:
+            print("[GatherAgent] 差一点被剔除（可切 LIT_PROFILE=recall 收进来）：")
+            for x in _nm[:3]:
+                print(f"    · fit={x['fit']:.2f} 《{x['title'][:62]}》")
 
     report["n_selected"] = len(chosen)
     # ⑥ 为入选文献补一句话概要（失败则跳过，正文退回标题+出处）
