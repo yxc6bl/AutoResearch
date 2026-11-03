@@ -511,6 +511,68 @@ def cmd_datasets(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    """一条命令自检：模型网关 + 文献数据源是否可用。明天想知道「好了没」就跑它。"""
+    import time
+    from engine import llm_client as LLM
+
+    try:  # 先载入 .env，否则这里读到的是空值
+        LLM._load_dotenv()
+    except Exception:
+        pass
+    base = os.environ.get("OPENAI_BASE_URL", "")
+    model = os.environ.get("OPENAI_MODEL", "")
+    print("=== 模型网关 ===")
+    print(f"  地址：{base or '（未配置）'}")
+    print(f"  模型：{model or '（未配置）'}")
+    t0 = time.time()
+    ok = False
+    try:
+        ok = LLM.available()
+    except Exception as e:  # noqa: BLE001
+        print(f"  探测异常：{e}")
+    print(f"  结果：{'可用' if ok else '不可用（已确认 6 秒内快速失败）'}｜耗时 {time.time() - t0:.1f}s")
+    if not ok:
+        print("  → 论文写作与 LM 读文献会走确定性兜底；不影响实验/排版链路")
+
+    print("\n=== 文献数据源 ===")
+    probes = []
+    try:
+        import literature as lit_mod
+        probes.append(("arxiv", lambda: lit_mod.fetch_arxiv("machine learning", max_results=2)))
+    except Exception as e:  # noqa: BLE001
+        print(f"  arxiv 模块加载失败：{e}")
+    try:
+        from agents import literature_agent as LA
+        probes.append(("crossref", lambda: LA.fetch_crossref("machine learning", max_results=2)))
+        probes.append(("openalex", lambda: LA.fetch_openalex("machine learning", max_results=2)))
+    except Exception as e:  # noqa: BLE001
+        print(f"  文献模块加载失败：{e}")
+
+    usable = []
+    for name, fn in probes:
+        t0 = time.time()
+        try:
+            got = fn()
+            print(f"  {name:9s} 可用｜{len(got)} 条｜{time.time() - t0:.1f}s")
+            if got:
+                usable.append(name)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e).replace("\n", " ")[:80]
+            print(f"  {name:9s} 不可用｜{msg}｜{time.time() - t0:.1f}s")
+
+    print("\n=== 结论 ===")
+    if ok:
+        print("  模型可用：LM 读文献、LLM 写作、评审闭环都能跑。")
+    else:
+        print("  模型不可用：先跑确定性链路（--no-paper 或直接跑，会标 confidence=keyword_only）。")
+    if usable:
+        print(f"  文献源可用：{'、'.join(usable)}")
+    else:
+        print("  文献源全部不可用：检查网络，或过几分钟再看（429 需要冷却）。")
+    return 0
+
+
 def cmd_from_title(args) -> int:
     """题目驱动执行：老师给题目/方向 → 确定性解析 → 匹配数据集 → 出论文。
 
@@ -665,6 +727,9 @@ def main() -> int:
     fp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
     fp.set_defaults(func=cmd_from_title)
+
+    dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
+    dcp.set_defaults(func=cmd_doctor)
 
     dp = sub.add_parser("datasets", help="列出当前可直接跑通的数据集目录（题目匹配用的白名单）")
     dp.add_argument("--json", action="store_true", help="以 JSON 输出，便于脚本消费")
