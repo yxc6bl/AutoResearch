@@ -725,6 +725,10 @@ def select_by_role(candidates: list[dict], topic: str,
                       for x in near_miss[:8]],
         "n_candidates": len(candidates),
         "n_selected": len(chosen),
+        # 篇幅上限是「最多」，不是「目标」：把合格候选数与是否被截断写清楚，
+        # 否则 n_selected=45 看起来像凑数，实际可能是上限卡住了。
+        "n_eligible": sum(1 for x in pool if x["select_score"] >= min_score),
+        "capped_by_cap": len(chosen) >= max_total and len(pool) > max_total,
         "role_stats": role_stats,
         "dropped": dropped,
         "quota_total": sum(int(v) for v in quotas.values()),

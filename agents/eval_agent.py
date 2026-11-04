@@ -711,7 +711,15 @@ def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "gener
         "评分要点：methodology 权重最高，重点看实验是否真实、对比基线/显著性/消融是否齐备；"
         "若论文出现事实清单之外的数字或方法，hallucinations 必须指出；"
         "若选题是忠实复现/对比（事实清单已注明未提新方法），不应因「无新算法」判不及格，"
-        "而应看其对比深度与实证严谨度。verdict 为 revise 当且仅当存在幻觉、严重结构缺失或核心事实矛盾。"
+        "而应看其对比深度与实证严谨度。\n"
+        "判定口径（实测踩过坑，务必遵守）：\n"
+        "1) 老师给的题目点名某方法（如「基于随机森林」）只指定研究对象，不要求它在对比中取得最优；"
+        "实验显示别的方法更优而论文如实报告，不算编造也不算跑题。但论文不得声称点名方法是最优，"
+        "也不得把甲方法的结果写成乙方法的结论。\n"
+        "2) 四舍五入后的数值与事实清单高精度原值一致，不算编造；"
+        "只有方法名、检验名、预处理操作、数据集、结论对象与事实清单矛盾，才算幻觉。\n"
+        "3) 不要把「建议改进」写成幻觉；hallucinations 只放与事实清单明确矛盾的具体处。\n"
+        "verdict 为 revise 当且仅当存在幻觉、严重结构缺失或核心事实矛盾。"
     )
     try:
         out = LLM.chat_json(prompt + "\n\n【论文全文】\n" + md,
@@ -901,11 +909,17 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
     # 10) LLM 评审官（「第二双眼睛」）：像答辩委员一样审，抓幻觉/跑题/夸大。
     #     确定性硬门（一致性/谎言）仍是安全网不可绕过；此处把 LLM 评判作为补充信号，
     #     若存在幻觉或 verdict=revise 则强制不通过（人审也会这么判）。
+    _lj_bad = False
     try:
         _lj = llm_judge(str(paper_path), _aj, len(cands) if cands else 0, mode)
+        # 评审官缺席也必须留痕：以前 available=False 时 verdict 里连字段都没有，
+        # 下游分不清「审过没发现幻觉」和「根本没审」，会把未验证当成通过。
+        verdict["llm_judge"] = _lj if isinstance(_lj, dict) else {
+            "available": False, "reason": "bad_result"}
         if _lj.get("available"):
             verdict["llm_judge"] = _lj
-            if _lj.get("hallucinations"):
+            _lj_bad = bool(_lj.get("hallucinations"))
+            if _lj_bad:
                 verdict["issues"].insert(0, "LLM评审官发现疑似幻觉：" + "；".join(_lj["hallucinations"][:5]))
                 verdict["suggestions"].insert(0, "按 LLM 评审官意见回滚改写，消除虚构数字/事实")
                 verdict["gate"] = "hard_fail"
@@ -913,6 +927,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             elif _lj.get("verdict") == "revise":
                 verdict["suggestions"].append("LLM评审官建议修订：" + "；".join(_lj.get("suggestions", [])[:3]))
     except Exception as e:  # noqa: BLE001
+        verdict["llm_judge"] = {"available": False, "reason": f"exception:{e}"}
         print(f"[EvalAgent] LLM 评审官调用失败（不影响规则评分）：{e}")
 
     # 综合与门控
@@ -925,11 +940,15 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             grade = name
             break
     verdict["grade"] = grade
-    hard_ok = consistency == 100 and not hard
+    # 幻觉拦截必须参与最终裁决。此前这里只用确定性一致性重算 hard_ok，
+    # 把上面第 10 步刚设的 gate=hard_fail / passed=False 又覆盖回 hard_pass，
+    # 导致「评审官查出幻觉、评分门却给 99 分优秀并通过」——实测已复现。
+    hard_ok = consistency == 100 and not hard and not _lj_bad
+    verdict["llm_hallucination_gate"] = bool(_lj_bad)
     verdict["gate"] = "hard_pass" if hard_ok else "hard_fail"
     verdict["passed"] = hard_ok and overall >= 60
     if not hard_ok:
-        verdict["suggestions"].insert(0, "硬门未通过（一致性/谎言），必须修正后重做")
+        verdict["suggestions"].insert(0, "硬门未通过（一致性/谎言/评审官幻觉），必须修正后重做")
     elif overall < 60:
         verdict["suggestions"].insert(0, f"综合分 {overall} 低于及格线 60，需重做")
     if out_path:

@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -306,6 +307,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     #    一个人写、另一个人审：LLM 评审官审不过（verdict=revise）就把意见写成 04_review.json，
     #    写作端下一轮带意见重写，最多 _MAX_ROUNDS 轮，取 LLM 评审分最高的一版。网关不可用时
     #    LLM 评审官不可用，自动退化为单轮规则评分（旧行为），不阻塞主流程。
+    _llm_written = None
     if make_paper:
         try:
             wa = _load_module(ROOT / "agents" / "writing_agent.py", "writing_agent")
@@ -330,6 +332,8 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
             _MAX_ROUNDS = 2
             _verdict = None
             _best = None
+            _rounds = []
+            _last_round = 0
             for _rnd in range(_MAX_ROUNDS):
                 # 写作步对网关限流敏感：瞬时 429 导致子进程非零退出时，退避后重试一次
                 _wres = None
@@ -345,25 +349,53 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                     break
                 paper = out_dir / "06_paper" / "paper_full.docx"
                 result["paper"] = str(paper) if paper.exists() else None
+                # 写作端 stdout 里带 llm_written，必须透传给交付判定：
+                # 以前 run_task 调 mark_delivery(out_dir) 不传，DELIVERY_STATUS 里
+                # 这个字段永远是 null，严格模式只能把它判成「未验证」。
+                if _wres.get("llm_written") is not None:
+                    _llm_written = _wres.get("llm_written")
                 if not _md.exists():
                     break
+                _last_round = _rnd + 1
+                # 每轮留稿 + 留评审结论：此前「取最优」只记了分数，文件早被下一轮覆盖，
+                # 所谓回滚闭环根本拿不回最优那一版。
+                _snap = out_dir / "06_paper" / f"paper_full_round{_rnd + 1}.md"
+                _vpath = out_dir / "06_paper" / f"07_eval_verdict_round{_rnd + 1}.json"
+                try:
+                    shutil.copy2(_md, _snap)
+                except Exception:
+                    _snap = None
                 # LLM 评审官（含确定性硬门）打分
                 _verdict = ea.run(str(_md), lit_candidates=_cands, mode=mode,
-                                 out_path=out_dir / "06_paper" / "07_eval_verdict.json")
+                                 out_path=_vpath)
+                try:
+                    shutil.copy2(_vpath, out_dir / "06_paper" / "07_eval_verdict.json")
+                except Exception:
+                    pass
                 result["eval"] = _verdict
                 _lj = _verdict.get("llm_judge")
                 _ok = "[通过]" if _verdict["passed"] else "[未通过(建议重做)]"
                 _ljs = (f" | LLM评审 {_lj['overall']}" if (_lj and _lj.get("available")) else "")
                 print(f"[EvalAgent] 质量评分门：{_ok} | 综合 {_verdict['overall']} | "
                       f"硬门 {_verdict['gate']} | 文献 {_verdict.get('literature_grade')}{_ljs}")
-                # 记录最优（优先 LLM 评审分，无 LLM 时用规则综合分）
+                # 记录最优（优先 LLM 评审分，无 LLM 时用规则综合分；同分时幻觉少者优先）
                 _score = (_lj.get("overall") if (_lj and _lj.get("available")) else _verdict["overall"])
-                if _best is None or _score > _best["score"]:
-                    _best = {"score": _score, "round": _rnd + 1}
+                _n_hall = (len(_lj.get("hallucinations") or [])
+                           if (_lj and _lj.get("available")) else 0)
+                _key = (_score, -_n_hall)
+                _rounds.append({"round": _rnd + 1, "score": _score,
+                                "hallucinations": _n_hall, "passed": bool(_verdict["passed"]),
+                                "snapshot": _snap.name if _snap else ""})
+                if _best is None or _key > _best["key"]:
+                    _best = {"score": _score, "round": _rnd + 1, "key": _key,
+                             "snapshot": str(_snap) if _snap else ""}
                 # 评审官要求修订且还有轮次 → 写回滚简报，下一轮带意见重写
                 if (_rnd < _MAX_ROUNDS - 1 and _lj and _lj.get("available")
                         and _lj.get("verdict") == "revise"):
                     _review_brief.write_text(json.dumps({
+                        # 幻觉清单必须交给写作端：它是逐条对照实验事实抓出的矛盾，
+                        # 只给 suggestions/unsupported_claims 会让下一轮重写漏掉真问题。
+                        "hallucinations": _lj.get("hallucinations", []),
                         "unsupported_claims": _lj.get("unsupported_claims", []),
                         "suggestions": _lj.get("suggestions", []),
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -383,15 +415,35 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         print(f"[反馈台账] 已记录 {_n} 条评审意见 → memory/feedback.jsonl")
                 except Exception as e:  # noqa: BLE001
                     print(f"[反馈台账] 记录跳过：{e}")
+            if _rounds:
+                try:
+                    (out_dir / "06_paper" / "REVIEW_ROUNDS.json").write_text(json.dumps({
+                        "rounds": _rounds, "best": _best, "last_round": _last_round,
+                        "note": "paper_full.docx 由最后一轮写作生成；若最优不是最后一轮，"
+                                "paper_full.md 与 07_eval_verdict.json 已回滚到最优轮，"
+                                "需重跑 step write 才能同步 docx。",
+                    }, ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
             if _best is not None:
                 print(f"[EvalAgent] 评审闭环完成：最优为第 {_best['round']} 轮（评分 {_best['score']}）")
+                if _best["round"] != _last_round and _best.get("snapshot"):
+                    try:
+                        shutil.copy2(_best["snapshot"], _md)
+                        _vb = out_dir / "06_paper" / f"07_eval_verdict_round{_best['round']}.json"
+                        if _vb.exists():
+                            shutil.copy2(_vb, out_dir / "06_paper" / "07_eval_verdict.json")
+                        print(f"[EvalAgent] 已回滚到最优第 {_best['round']} 轮稿件与对应评审结论"
+                              f"（docx 仍为第 {_last_round} 轮，需重转换）")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[EvalAgent] 回滚失败（保留最后一轮稿件）：{e}")
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"generate_paper 异常: {e}")
 
         # 交付状态：模型没参与写作就明确标「不可交付」，防止半成品被当成品
         _deliv = True
         try:
-            _dstat = mark_delivery(out_dir)
+            _dstat = mark_delivery(out_dir, _llm_written)
             _deliv = bool(_dstat.get("deliverable", True))
         except Exception as e:  # noqa: BLE001
             print(f"[交付状态] 判定跳过：{e}")
@@ -433,6 +485,8 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
         trace.record(out_dir, "gates", 0.0, status="ok",
                      detail=("deliverable" if _gr["decision"]["deliverable"] else "blocked"))
         G.refresh(out_dir, strict=True)
+        # 交付状态与闸门裁决必须一致：mark_delivery 只看字数与模型参与，不看评审幻觉。
+        G.sync_delivery(out_dir, _gr)
     except Exception as e:  # noqa: BLE001
         print(f"[闸门台账] 刷新失败（不影响主流程）：{e}")
 
@@ -765,9 +819,22 @@ def cmd_step(args) -> int:
             print(f"[step eval] 缺少 {md}，先跑 step --name write")
             return 1
         ea = _load_module(ROOT / "agents" / "eval_agent.py", "eval_agent")
-        v = ea.run(str(md), out_path=out / "06_paper" / "07_eval_verdict.json")
+        # 与主流水线同口径：把 01_literature.json 的精选文献喂进去，
+        # 否则单独跑 step eval 时文献维度会按「无文献」打分，与主流程的分数对不上。
+        _cands = None
+        _litp = out / "01_literature.json"
+        if _litp.exists():
+            try:
+                _d = json.loads(_litp.read_text(encoding="utf-8"))
+                _cands = _d if isinstance(_d, list) else (_d.get("papers") or [])
+            except Exception:
+                _cands = None
+        v = ea.run(str(md), lit_candidates=_cands,
+                   out_path=out / "06_paper" / "07_eval_verdict.json")
+        _lj = v.get("llm_judge") or {}
         print(f"[step eval] 综合 {v.get('overall')}｜硬门 {v.get('gate')}｜"
-              f"通过={v.get('passed')}")
+              f"通过={v.get('passed')}｜LLM评审官="
+              f"{'已介入' if _lj.get('available') else '未介入(' + str(_lj.get('reason') or '—') + ')'}")
         try:  # 自动采集：评审问题进反馈台账，供后续写作规避
             from engine import feedback as FB
             spec_p = out / "task_spec.json"

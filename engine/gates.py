@@ -46,7 +46,7 @@ CATALOG = [
      "action": "确定性降级稿仅用于自测/定位链路", "authority": "系统拒绝；人工放行需书面确认"},
     {"id": "G04", "level": "P0", "stage": "eval", "name": "零编造硬门",
      "artifact": "06_paper/07_eval_verdict.json",
-     "rule": "gate=hard_pass、consistency=100，且 LLM 评审官未发现幻觉",
+     "rule": "LLM 评审官已介入且未发现幻觉；gate=hard_pass、consistency=100",
      "action": "结论与裁决表矛盾/编造数字，必须回滚改写", "authority": "系统拒绝，不接受放行"},
     {"id": "G05", "level": "P1", "stage": "eval", "name": "质量评分门通过",
      "artifact": "06_paper/07_eval_verdict.json", "rule": "passed=true 且 overall ≥ 60",
@@ -148,7 +148,16 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
         if gid == "G04":
             hall = lj.get("hallucinations") or []
             consistency = d.get("scores", {}).get("consistency")
-            if d.get("gate") != "hard_pass" or consistency == 0 or hall:
+            # 双保险：既看评审官原始幻觉清单，也看评分门最终有没有把幻觉纳入硬门。
+            # 老版本 eval_agent 会覆盖 gate（实测 bug），只靠 gate 会漏判。
+            lj_bad = bool(d.get("llm_hallucination_gate")) or bool(hall)
+            # 评审官缺席 ≠ 没有幻觉。语义编造只有它抓得到，缺席时记「未验证」，
+            # 严格模式下同样阻塞；否则网关一挂，幻觉稿就会被当成零编造合格稿。
+            if not lj.get("available") and not hall:
+                return unknown("LLM 评审官未介入（" +
+                               str(lj.get("reason") or "verdict 无记录") +
+                               "）：语义幻觉未验证，不能判零编造硬门通过")
+            if d.get("gate") != "hard_pass" or consistency == 0 or lj_bad:
                 _h = "；".join(str(x)[:80] for x in hall[:2])
                 return fail(f"gate={d.get('gate')}，consistency={consistency}，"
                             f"幻觉 {len(hall)} 处" + (f"：{_h}" if _h else ""),
@@ -163,7 +172,7 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
             return pass_(f"LLM 评审介入，评分 {lj.get('overall')}，结论 {lj.get('verdict')}",
                          "model", "medium")
         return fail("llm_judge.available≠true（" + str(lj.get("reason") or "未介入") +
-                    "）：本轮只有规则评分，评审覆盖面不足")
+                    "）：本轮只有规则评分，G04 因此记为未验证而非通过")
 
     if gid == "G06":
         d, exists = _json(out, meta["artifact"])
@@ -181,13 +190,21 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
         papers = (d or {}).get("papers") or [] if isinstance(d, dict) else []
         if not papers:
             return unknown("无文献，覆盖率无法计算")
-        n_read = sum(1 for p in papers if p.get("llm_what") or p.get("llm_fit") is not None)
+        n_read = sum(1 for p in papers if p.get("confidence") == "lm_read"
+                     or p.get("llm_what") or p.get("llm_fit") is not None)
+        n_use = sum(1 for p in papers if p.get("llm_usable_in")
+                    and p.get("llm_usable_in") != "无")
+        tiers: dict[str, int] = {}
+        for p in papers:
+            k = p.get("confidence") or "未标注"
+            tiers[k] = tiers.get(k, 0) + 1
+        detail = "、".join(f"{k}={v}" for k, v in sorted(tiers.items()))
         pct = round(100 * n_read / len(papers), 1)
         if n_read == 0:
             return fail(f"0/{len(papers)} 篇带 LM 阅读判断：本轮纯关键词兜底，"
                         f"未做「读摘要判断能不能用」，文献质量只能算低可信")
-        return pass_(f"{n_read}/{len(papers)} 篇带 LM 阅读判断（{pct}%）；"
-                     f"其余为关键词兜底，已在报告中如实标注")
+        return pass_(f"{n_read}/{len(papers)} 篇带 LM 阅读判断（{pct}%），"
+                     f"其中 {n_use} 篇标明用在哪节；可信度分布：{detail}")
 
     if gid == "G08":
         d, exists = _json(out, meta["artifact"])
@@ -305,6 +322,40 @@ def report(out, strict: bool = True, write: bool = True) -> dict:
         except Exception:
             pass
     return rep
+
+
+def sync_delivery(out, rep: dict | None = None) -> dict | None:
+    """让 DELIVERY_STATUS.json 与闸门裁决一致，消除「可交付 / 不可交付」两种结论。
+
+    mark_delivery 只看字数与模型参与，看不到评审幻觉；闸门层裁决后要把结论回写。
+    也可以对历史产物直接调用一次重算（rep 不传就现场生成）。
+    """
+    out = Path(out)
+    p = out / "06_paper" / "DELIVERY_STATUS.json"
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    rep = rep or report(out, strict=True, write=False)
+    dec = rep["decision"]
+    d["gate_decision"] = {
+        "deliverable": dec["deliverable"],
+        "blocking": rep["blocking"], "unverified": rep["unverified"],
+        "report": str(out / REPORT_FILE),
+    }
+    if not dec["deliverable"] and d.get("deliverable"):
+        d["deliverable"] = False
+        why = rep["blocking"] or rep["unverified"]
+        d["reasons"] = (d.get("reasons") or []) + [
+            "P0 闸门未通过/未验证：" + "、".join(why)]
+        d["hint"] = "不可交付：以 07_gate_report.json 的 P0 裁决为准"
+    try:
+        p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    return d
 
 
 def refresh(out, strict: bool = True) -> dict:

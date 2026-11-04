@@ -307,15 +307,25 @@ def _lm_read_screen(topic: str, pool: list[dict], out_dir: Path,
 
 
 def _apply_screen(pool: list[dict], screen: dict) -> int:
-    """把阅读结论写回候选：relation/usable_in/what → fit_score / role / gist。"""
+    """把阅读结论写回候选：relation/usable_in/what → fit_score / role / gist。
+
+    两个字段必须留在产物里，不能只留在 0x_screen_cache.json：
+      llm_usable_in —— 读者判的「能用在论文哪一节」，审评与第 2 章分组都要用；
+      confidence    —— 这篇的判断到底来自逐篇阅读、LM 语义筛选，还是关键词兜底。
+    以前 usable_in 只被用来推导 role 就丢掉了，等于「AI 读了却说不清用在哪」。
+    """
     n = 0
     for p in pool:
         v = screen.get(p.get("id"))
         if not v:
+            # 未被逐篇阅读的：先标关键词级；后面若被 LM 语义筛选认可，再升级为 lm_semantic
+            p.setdefault("confidence", "keyword_only")
             continue
         p["llm_relation"] = v["relation"]
         p["llm_what"] = v["what"]
         p["llm_why"] = v["why"]
+        p["llm_usable_in"] = v.get("usable_in") or "无"
+        p["confidence"] = "lm_read"
         p["llm_fit"] = _REL_SCORE.get(v["relation"], 0.3)
         p["role"] = _ROLE_FROM_USE.get(v.get("usable_in"), p.get("role") or "方法")
         if v.get("what"):
@@ -501,6 +511,9 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         for p in pool:
             if p.get("id") in filt["keep_ids"]:
                 p["score_bonus"] = 0.12          # LM 认可：排序加分
+                # 没逐篇读过、但被 LM 语义筛选认可：可信度介于两者之间
+                if p.get("confidence") == "keyword_only":
+                    p["confidence"] = "lm_semantic"
                 r = filt["role_map"].get(p.get("id"))
                 if r:
                     p["role"] = r

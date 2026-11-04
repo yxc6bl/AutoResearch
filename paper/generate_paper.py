@@ -187,6 +187,9 @@ def build_references(lit) -> list[dict]:
             "gist": p.get("gist_cn") or "",
             # core=直接可比；adjacent=相邻领域（正文措辞需区分，不得混为直接对比）
             "tier": p.get("fit_tier") or "core",
+            # 逐篇阅读时判的「能用在论文哪一节」：正文引用块据此写明用途，
+            # 而不是只把文献堆成编号清单。没有该判断时留空，绝不编造。
+            "usable_in": p.get("llm_usable_in") or "",
         })
     return refs
 
@@ -377,6 +380,16 @@ def _proposed_method_block(analysis, main_metric) -> str:
     return "\n".join(parts)
 
 
+def _cite_tail(r: dict) -> str:
+    """把逐篇阅读的「做了什么」与「用在哪节」拼成引用说明；缺的部分不编造。"""
+    gist = (r.get("gist") or "").strip()
+    use = (r.get("usable_in") or "").strip()
+    tail = f"：{gist}" if gist else ""
+    if use and use != "无":
+        tail += f"（用于：{use}）"
+    return tail
+
+
 def _role_citation_block(refs: list[dict]) -> str:
     """第2章「按角色归类」的文献使用块。
 
@@ -413,8 +426,7 @@ def _role_citation_block(refs: list[dict]) -> str:
             head = f"- [{r['num']}] 《{title}》"
             if src:
                 head += f"（{src}）"
-            gist = (r.get("gist") or "").strip()
-            lines.append(f"{head}：{gist}" if gist else head)
+            lines.append(head + _cite_tail(r))
         lines.append("")
     if adjacent:
         lines.append("与本文任务相邻但并非直接可比的研究还包括：")
@@ -424,8 +436,7 @@ def _role_citation_block(refs: list[dict]) -> str:
             year = str(r.get("year") or "").strip()
             src = "，".join([x for x in (venue, year) if x])
             head = f"- [{r['num']}] 《{title}》" + (f"（{src}）" if src else "")
-            gist = (r.get("gist") or "").strip()
-            lines.append(f"{head}：{gist}" if gist else head)
+            lines.append(head + _cite_tail(r))
         lines.append("")
     lines.append("上述文献分别从方法设计、理论支撑、基准评测与系统性综述四个角度构成了本研究的方法论上下文；"
                  "本文在统一实验协议下重新评估并定位自身结果，与前人工作形成可对照的差异。")
@@ -1089,13 +1100,16 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     out.update({k: v for k, v in r2.items() if v})
 
     # 第三批：讨论 + 结论 + 局限性补充
-    unsupported = (review or {}).get("unsupported_claims") or []
+    # 幻觉清单优先级最高：那是评审官逐条对照实验事实抓出的矛盾，
+    # 上一版只把 unsupported_claims 交给写作端，等于「查出问题却没告诉写的人」。
+    unsupported = ((review or {}).get("hallucinations") or []) + \
+                  ((review or {}).get("unsupported_claims") or [])
     ev = exp.get("sub_hypothesis_evidence") or {}
     ev_str = "\n".join(f"{hid}: 裁决={e.get('verdict','')} — {e.get('conclusion','')[:200]}"
                       for hid, e in ev.items()) if ev else "（无，本文未生成子假设证据）"
     p3 = f"""{facts}
 
-评审意见中指出的问题：{unsupported if unsupported else '（无）'}
+评审意见指出与实验事实矛盾或缺乏支撑之处（重写时必须逐条消除，不得复述）：{unsupported if unsupported else '（无）'}
 
 子假设已裁定结果（讨论与结论必须与之完全一致，不得矛盾、不得反向编造）：
 {ev_str}
@@ -1443,7 +1457,7 @@ def main() -> int:
             _segs = [re.sub(r"^\s*\d{1,2}\.\s*", "", _raw).strip()]
         for _s in _segs:
             lim.append(_s)
-    if (review or {}).get("unsupported_claims"):
+    if (review or {}).get("unsupported_claims") or (review or {}).get("hallucinations"):
         lim.append("正如同行评审所指出的，当前证据链仍有待加强，需要在后续工作中补强。")
     limitations_block = "\n".join(f"{i+1}. {t}" for i, t in enumerate(lim))
 
