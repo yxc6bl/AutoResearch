@@ -157,8 +157,50 @@ def export_cases() -> dict:
     return {"n_cases": len(cases), "path": str(CASES)}
 
 
+def record_literature_review(review: dict, run_dir: str, topic: str = "") -> int:
+    """把文献审评的「缺口/弱相关」落进台账，带上来源与把握程度。
+
+    此前只有评分门的 issue 会入账，文献审评的覆盖缺口每次都随 04 文件一起丢掉。
+    模型判断标 model/medium，规则兜底标 rule/medium，人工批注由 --provenance 指定。
+    """
+    pv = review.get("provenance") if review.get("provenance") in ("rule", "model", "human") else "rule"
+    cf = review.get("confidence") if review.get("confidence") in ("high", "medium", "low") else "medium"
+    score = review.get("coverage_score")
+    n = 0
+    for gap in (review.get("missing_themes") or [])[:8]:
+        add(str(gap), type="文献不足", severity="P1", stage="literature_review",
+            run_dir=run_dir, topic=topic, source="literature_review",
+            evidence=f"coverage_score={score}/10；来源={review.get('provenance','?')}",
+            action="写入下轮检索式或按该主题补抓文献",
+            provenance=pv, confidence=cf)
+        n += 1
+    weak = review.get("weak_ids") or []
+    if weak:
+        add(f"审评判定 {len(weak)} 篇相关性弱：{', '.join(map(str, weak[:8]))}",
+            type="文献不足", severity="P2", stage="literature_review",
+            run_dir=run_dir, topic=topic, source="literature_review",
+            evidence=f"coverage_score={score}/10", action="下轮检索降权或剔除",
+            provenance=pv, confidence=cf)
+        n += 1
+    try:
+        if score is not None and float(score) < 6:
+            add(f"文献覆盖度偏低（{score}/10）：{str(review.get('assessment') or '')[:120]}",
+                type="文献不足", severity="P1", stage="literature_review",
+                run_dir=run_dir, topic=topic, source="literature_review",
+                evidence="04_literature_review.json", action="优先补覆盖而非堆篇数",
+                provenance=pv, confidence=cf)
+            n += 1
+    except (TypeError, ValueError):
+        pass
+    return n
+
+
 def record_eval_verdict(verdict: dict, run_dir: str, topic: str = "") -> int:
-    """把一次评审结论落进台账：每条 issue 记为一条 P1/P2 反馈（自动采集）。"""
+    """把一次评审结论落进台账：每条 issue 记为一条 P1/P2 反馈（自动采集）。
+
+    来源区分：规则评分门产出的 issue 是 rule/high，LLM 评审官的意见是 model/medium
+    ——模型可能误判，权重低于硬规则，也低于人工批注（lessons 里按 human>model>rule 排）。
+    """
     n = 0
     for issue in (verdict.get("issues") or [])[:10]:
         t = "其他"
@@ -171,12 +213,24 @@ def record_eval_verdict(verdict: dict, run_dir: str, topic: str = "") -> int:
             t = "内容矛盾"
         elif any(k in s for k in ("套话", "单句", "段落", "术语")):
             t = "写作风格"
+        is_model = s.startswith("LLM评审官") or "幻觉" in s[:20]
         add(s, type=t, severity="P1", stage="eval", run_dir=run_dir,
-            topic=topic, source="eval", provenance="rule", confidence="high")
+            topic=topic, source="eval",
+            evidence="07_eval_verdict.json",
+            provenance=("model" if is_model else "rule"),
+            confidence=("medium" if is_model else "high"))
         n += 1
-    for h in (verdict.get("llm_judge", {}) or {}).get("hallucinations", [])[:10]:
+    lj = verdict.get("llm_judge", {}) or {}
+    for h in lj.get("hallucinations", [])[:10]:
         add(str(h), type="内容矛盾", severity="P0", stage="eval",
             run_dir=run_dir, topic=topic, source="eval",
+            evidence="llm_judge.hallucinations", action="回滚改写，消除虚构数字/事实",
+            provenance="model", confidence="medium")
+        n += 1
+    for c in lj.get("unsupported_claims", [])[:8]:
+        add(str(c), type="内容矛盾", severity="P1", stage="eval",
+            run_dir=run_dir, topic=topic, source="eval",
+            evidence="llm_judge.unsupported_claims", action="写作端下一轮按此改写或删除该断言",
             provenance="model", confidence="medium")
         n += 1
     return n

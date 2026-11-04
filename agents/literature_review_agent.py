@@ -81,6 +81,9 @@ def _rules_review(topic: str, papers: list[dict]) -> dict:
         "recommended_add_queries": [],
         "keep_ratio": 1.0,
         "lm_driven": False,
+        # 溯源：这是规则兜底，不是模型读过文献后的判断，写进台账时权重应低于人工批注。
+        "provenance": "rule",
+        "confidence": "medium",
     }
 
 
@@ -89,7 +92,8 @@ def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) ->
     if not papers:
         return {"coverage_score": 0, "assessment": "无文献可审评",
                 "redundant_ids": [], "weak_ids": [], "missing_themes": ["未抓到任何文献"],
-                "recommended_add_queries": [], "keep_ratio": 0.0, "lm_driven": False}
+                "recommended_add_queries": [], "keep_ratio": 0.0, "lm_driven": False,
+                "provenance": "rule", "confidence": "high"}
     if not LLM.available():
         return _rules_review(topic, papers)
 
@@ -128,6 +132,10 @@ def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) ->
     if not isinstance(out, dict) or "coverage_score" not in out:
         return _rules_review(topic, papers)
     out["lm_driven"] = True
+    # 模型判断：覆盖度/缺口是读出来的意见，不是硬事实，可信度标中等，
+    # 后续若与人工批注冲突，台账里按 human > model > rule 排序。
+    out["provenance"] = "model"
+    out["confidence"] = "medium"
     # 类型兜底
     out["redundant_ids"] = out.get("redundant_ids") or []
     out["weak_ids"] = out.get("weak_ids") or []

@@ -23,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-from engine import trace  # noqa: E402
+from engine import gates, trace  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 ANALYSIS_ENGINE = ROOT / "engine" / "analysis_engine.py"
@@ -256,6 +256,13 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                 print(f"[ReviewAgent] 文献覆盖评分 {_lrev.get('coverage_score')}/10"
                       f"（{'LM' if _lrev.get('lm_driven') else '规则'}）；"
                       f"缺口：{_lrev.get('missing_themes') or '无'}")
+                try:
+                    from engine import feedback as FB
+                    _nfb = FB.record_literature_review(_lrev, str(out_dir), _topic)
+                    if _nfb:
+                        print(f"[ReviewAgent] 已记录 {_nfb} 条覆盖缺口 → memory/feedback.jsonl")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[ReviewAgent] 缺口入账跳过：{e}")
             except Exception as e:  # noqa: BLE001
                 print(f"[ReviewAgent] 文献审评失败（不影响主流程）：{e}")
         except Exception as e:  # noqa: BLE001
@@ -365,6 +372,17 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                 break
             if _verdict is not None and not _verdict["passed"]:
                 print(f"[EvalAgent] 主要问题：{'; '.join(_verdict['issues'][:5])}")
+            # 主流水线此前只有 step eval 会入账，run/from_title 的评审意见全丢了。
+            # 这里按最终 verdict 记一次（含 LLM 评审官的幻觉与无支撑断言，带来源）。
+            if _verdict is not None:
+                try:
+                    from engine import feedback as FB
+                    _topic0 = str(spec.get("title") or spec.get("topic") or "")
+                    _n = FB.record_eval_verdict(_verdict, str(out_dir), _topic0)
+                    if _n:
+                        print(f"[反馈台账] 已记录 {_n} 条评审意见 → memory/feedback.jsonl")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[反馈台账] 记录跳过：{e}")
             if _best is not None:
                 print(f"[EvalAgent] 评审闭环完成：最优为第 {_best['round']} 轮（评分 {_best['score']}）")
         except Exception as e:  # noqa: BLE001
@@ -401,7 +419,56 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
         except Exception as e:  # noqa: BLE001
             print(f"[Literature] 使用反馈记录失败（不影响主流程）：{e}")
 
+    # 7) 闸门台账：把散落的检查点收成一张表。只记录与裁决，不改变各阶段原有行为。
+    #    刷新两次：先拿裁决写进 trace 的 detail，再让 G11 把这一步也算进轨迹。
+    try:
+        from engine import gates as G
+        _gr = G.refresh(out_dir, strict=True)
+        result["gates"] = {
+            "deliverable": _gr["decision"]["deliverable"],
+            "blocking": _gr["blocking"],
+            "unverified": _gr["unverified"],
+            "report": str(out_dir / G.REPORT_FILE),
+        }
+        trace.record(out_dir, "gates", 0.0, status="ok",
+                     detail=("deliverable" if _gr["decision"]["deliverable"] else "blocked"))
+        G.refresh(out_dir, strict=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[闸门台账] 刷新失败（不影响主流程）：{e}")
+
     return result
+
+
+def _strict_gate_exit(res: dict, allow_degraded: bool, make_paper: bool):
+    """严格模式的收尾裁决：返回需要提前退出的码；None 表示继续。
+
+    两个入口（run / from_title）共用，避免「入口查了网关、中途写挂却照样返回 0」。
+    这里只认明确的 fail；P0 的 unknown 是「本轮没跑到那一步」，只提示不误杀
+    （--no-paper 时本来就不会有正文/评审）。
+    """
+    if allow_degraded or not make_paper:
+        return None
+    out = Path(res["out_dir"])
+    st = out / "06_paper" / "DELIVERY_STATUS.json"
+    if st.exists():
+        try:
+            _d = json.loads(st.read_text(encoding="utf-8"))
+        except Exception:
+            _d = {}
+        if _d.get("deliverable") is False:
+            print("\n[未产出可交付论文] " + "；".join(_d.get("reasons") or []))
+            print(f"  半成品与中间产物保留在 {out}（已标【不可交付】），可直接续跑。")
+            return 3
+    g = res.get("gates") or {}
+    blocking = g.get("blocking") or []
+    unverified = g.get("unverified") or []
+    if blocking:
+        print("\n[未产出可交付论文] P0 闸门未通过：" + "、".join(blocking))
+        print(f"  逐项证据见 {g.get('report') or (out / gates.REPORT_FILE)}")
+        return 3
+    if unverified:
+        print("[提示] 以下 P0 项未验证（本轮没跑到对应步骤）：" + "、".join(unverified))
+    return None
 
 
 def cmd_run(args) -> int:
@@ -409,19 +476,12 @@ def cmd_run(args) -> int:
     res = run_task(spec, args.out, make_paper=not args.no_paper, mode=args.mode)
     # 中途断网的情形：开跑时模型可用，跑到写作时挂了 → 产物已生成但不可交付。
     # 严格模式下这里必须失败退出，避免「悄悄给你一份半成品」。
-    if not getattr(args, "allow_degraded", False):
-        _st = out_dir / "06_paper" / "DELIVERY_STATUS.json"
-        if _st.exists():
-            try:
-                _d = json.loads(_st.read_text(encoding="utf-8"))
-            except Exception:
-                _d = {}
-            if _d.get("deliverable") is False:
-                print("\n[未产出可交付论文] " + "；".join(_d.get("reasons") or []))
-                print(f"  半成品与中间产物保留在 {out_dir}（已标【不可交付】），可直接续跑。")
-                return 3
+    _exit = _strict_gate_exit(res, getattr(args, "allow_degraded", False),
+                              not args.no_paper)
+    if _exit is not None:
+        return _exit
 
-    a = res["analysis"]
+    a = res["analysis"] or {}
     summary = {
         "out_dir": res["out_dir"],
         "paper": res["paper"],
@@ -689,6 +749,10 @@ def cmd_step(args) -> int:
         trace.record(out, "write", time.time() - _t0,
                      status=("ok" if r["returncode"] == 0 else "error"),
                      detail=("deliverable" if _d.get("deliverable") else "degraded"))
+        try:
+            gates.refresh(out)
+        except Exception:
+            pass
         if r["returncode"] != 0:
             print(r["stderr"][-800:])
             return 1
@@ -715,6 +779,10 @@ def cmd_step(args) -> int:
                 print(f"[step eval] 已记录 {n} 条反馈 → memory/feedback.jsonl")
         except Exception as e:  # noqa: BLE001
             print(f"[step eval] 反馈记录跳过：{e}")
+        try:
+            gates.refresh(out)
+        except Exception:
+            pass
         return 0
 
     if name == "polish":
@@ -749,6 +817,25 @@ def cmd_trace(args) -> int:
         print(f"  {r['ts'][11:]}  {r['stage']:14s} {r['duration_s']:8.2f}s  {r['detail']}{flag}")
     if sm["failed"]:
         print(f"失败阶段：{'、'.join(sm['failed'])}")
+    return 0
+
+
+def cmd_gates(args) -> int:
+    """闸门台账：查看分级检查与交付裁决，或留痕人工放行。"""
+    from engine import gates as G
+
+    out = Path(args.out)
+    if args.approve:
+        if not args.who or not args.why:
+            print("[闸门] 人工放行必须同时给 --who 和 --why（不放空口放行）")
+            return 1
+        r = G.approve(out, [x.strip() for x in args.approve.split(",") if x.strip()],
+                      args.who, args.why)
+        print("[闸门] 人工放行：" + json.dumps(r, ensure_ascii=False))
+    rep = G.report(out, strict=not args.no_strict)
+    print(json.dumps(rep, ensure_ascii=False, indent=2) if args.json else G.render(rep))
+    if args.exit_code and not rep["decision"]["deliverable"]:
+        return 3
     return 0
 
 
@@ -935,7 +1022,7 @@ def cmd_from_title(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     res = run_task(spec, out_dir, make_paper=not args.no_paper, mode=args.mode,
                    force=getattr(args, "force", False))
-    a = res["analysis"]
+    a = res["analysis"] or {}
     summary = {
         "out_dir": res["out_dir"],
         "paper": res["paper"],
@@ -943,6 +1030,7 @@ def cmd_from_title(args) -> int:
         "best_value": a.get("best_value"),
         "plots": [p.get("file") for p in a.get("plots", [])],
         "errors": res["errors"],
+        "gates": res.get("gates"),
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if a.get("error"):
@@ -951,6 +1039,11 @@ def cmd_from_title(args) -> int:
     if a.get("task_type") != "multi_dataset" and (not a.get("metrics") or a.get("best_method") is None):
         print("分析未产生有效结果。")
         return 1
+    # 入口只查了网关；中途写挂/评审发现幻觉，这里必须同样失败退出。
+    _exit = _strict_gate_exit(res, getattr(args, "allow_degraded", False),
+                              not args.no_paper)
+    if _exit is not None:
+        return _exit
     return 0
 
 
@@ -1037,6 +1130,16 @@ def main() -> int:
     tp = sub.add_parser("trace", help="查看某次运行的执行轨迹（各阶段耗时/状态）")
     tp.add_argument("--out", required=True, help="产物目录")
     tp.set_defaults(func=cmd_trace)
+
+    gp = sub.add_parser("gates", help="闸门台账：P0/P1/P2 分级检查、交付裁决、人工放行留痕")
+    gp.add_argument("--out", required=True, help="产物目录")
+    gp.add_argument("--json", action="store_true", help="输出完整 JSON 报告")
+    gp.add_argument("--no-strict", action="store_true", help="仅查看：P0 未验证不阻塞交付")
+    gp.add_argument("--exit-code", action="store_true", help="不可交付时返回退出码 3（供脚本/CI 用）")
+    gp.add_argument("--approve", default="", help="人工放行的闸门 id，逗号分隔（如 G03,G05）")
+    gp.add_argument("--who", default="", help="放行人")
+    gp.add_argument("--why", default="", help="放行理由")
+    gp.set_defaults(func=cmd_gates)
 
     fbp = sub.add_parser("feedback", help="反馈台账：统计/教训/补记/标记修复/导出回归用例")
     fbp.add_argument("--stats", action="store_true", help="按类型统计问题分布")
