@@ -105,20 +105,28 @@ def _lm_queries(topic: str, task_type: str, method_cn: list[str],
 # ── 候选抓取（广撒网，多源注册表） ──────────────────────────────────────
 # 为什么多源：只有 arXiv（预印本，偏 CS）+ OpenAlex 时，一是学科覆盖窄（商科/医学/人文
 # 的正式出版物在期刊库里），二是单源被限流就断粮。这里做成注册表，按需增删。
-# 默认 arxiv + openalex + crossref；crossref 覆盖期刊/会议正式出版，是 arXiv 的重要补充。
-# 可选：europepmc（生物医学）、s2（Semantic Scholar，需较严限流）。
+# 各源定位（别混）：
+#   crossref —— DOI 元数据注册，期刊最全；部分会议录有 DOI，但 CS 顶会/预印本远不全覆盖。
+#   arxiv    —— 预印本，CS/AI 新工作最快。
+#   s2       —— Semantic Scholar，含 venue/被引，无 Key 时 429 较频繁。
+#   openalex —— 覆盖面最广的开放书目，未配 mailto 时容易 429。
+#   europepmc—— 生物医学专用。
+#   local    —— corpus/imports/ 导入题录，不联网，唯一不会被限流的源。
+# 按稳定性排序：crossref 是当前最稳的一路，放首位；易限流的放后面，
+# 任一源 429/503 由 _fetch_pool 自动降权，其余源继续。
 _SOURCE_FUNCS = {
-    "arxiv": lambda q, n: lit_mod.fetch_arxiv(q, max_results=n),
-    "openalex": lambda q, n: LA.fetch_openalex(q, max_results=n),
     "crossref": lambda q, n: LA.fetch_crossref(q, max_results=n),
-    "europepmc": lambda q, n: LA.fetch_europepmc(q, max_results=n),
+    "arxiv": lambda q, n: lit_mod.fetch_arxiv(q, max_results=n),
     "s2": lambda q, n: LA.fetch_semantic_scholar(q, max_results=n),
+    "openalex": lambda q, n: LA.fetch_openalex(q, max_results=n),
+    "europepmc": lambda q, n: LA.fetch_europepmc(q, max_results=n),
+    "local": lambda q, n: LA.fetch_imported(q, max_results=n),
 }
-_SOURCE_DEFAULT = "arxiv,openalex,crossref"
+_SOURCE_DEFAULT = "crossref,arxiv,s2,openalex,europepmc,local"
 
 
 def enabled_sources() -> list[str]:
-    """可用数据源：env LIT_SOURCES 覆盖，默认 arxiv+openalex+crossref。"""
+    """可用数据源：env LIT_SOURCES 覆盖；默认六源全开，单源挂了自动降权。"""
     raw = os.environ.get("LIT_SOURCES", _SOURCE_DEFAULT)
     names = [x.strip().lower() for x in raw.split(",") if x.strip()]
     return [n for n in names if n in _SOURCE_FUNCS] or ["arxiv"]

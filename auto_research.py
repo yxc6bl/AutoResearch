@@ -978,16 +978,20 @@ def cmd_doctor(args) -> int:
         print("  → 论文写作与 LM 读文献会走确定性兜底；不影响实验/排版链路")
 
     print("\n=== 文献数据源 ===")
+    _mailto = os.environ.get("LIT_CONTACT_EMAIL", "").strip()
+    print(f"  礼貌池邮箱：{_mailto or '未配置（OpenAlex 不带 mailto 时更容易 429）'}")
     probes = []
     try:
         import literature as lit_mod
-        probes.append(("arxiv", lambda: lit_mod.fetch_arxiv("machine learning", max_results=2)))
-    except Exception as e:  # noqa: BLE001
-        print(f"  arxiv 模块加载失败：{e}")
-    try:
         from agents import literature_agent as LA
-        probes.append(("crossref", lambda: LA.fetch_crossref("machine learning", max_results=2)))
-        probes.append(("openalex", lambda: LA.fetch_openalex("machine learning", max_results=2)))
+        probes += [
+            ("crossref", lambda: LA.fetch_crossref("machine learning", max_results=2)),
+            ("arxiv", lambda: lit_mod.fetch_arxiv("machine learning", max_results=2)),
+            ("s2", lambda: LA.fetch_semantic_scholar("machine learning", max_results=2)),
+            ("openalex", lambda: LA.fetch_openalex("machine learning", max_results=2)),
+            ("europepmc", lambda: LA.fetch_europepmc("machine learning", max_results=2)),
+            ("local", lambda: LA.fetch_imported("machine learning", max_results=2)),
+        ]
     except Exception as e:  # noqa: BLE001
         print(f"  文献模块加载失败：{e}")
 
@@ -996,8 +1000,13 @@ def cmd_doctor(args) -> int:
         t0 = time.time()
         try:
             got = fn()
-            print(f"  {name:9s} 可用｜{len(got)} 条｜{time.time() - t0:.1f}s")
-            if got:
+            if name == "local":
+                print(f"  {name:9s} 本地题录 {len(got)} 条"
+                      + ("（corpus/imports/ 为空，可从知网/Scholar 导出 .bib 放入）"
+                         if not got else "（不联网，永不限流）"))
+            else:
+                print(f"  {name:9s} 可用｜{len(got)} 条｜{time.time() - t0:.1f}s")
+            if got or name == "local":
                 usable.append(name)
         except Exception as e:  # noqa: BLE001
             msg = str(e).replace("\n", " ")[:80]

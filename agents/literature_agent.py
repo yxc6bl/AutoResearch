@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import math
 import os
@@ -266,6 +268,121 @@ EUROPEPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 def _contact_email() -> str:
     """学术 API 的 polite pool 需要联系邮箱；设置后限流阈值显著放宽。"""
     return os.environ.get("LIT_CONTACT_EMAIL", "").strip()
+
+
+IMPORT_DIR = ROOT / "corpus" / "imports"
+
+
+def _parse_bib(text: str) -> list[dict]:
+    """宽松解析 BibTeX：只取题录字段，不做 LaTeX 宏展开。"""
+    out = []
+    for block in re.split(r"(?=@\w+\s*\{)", text):
+        if not block.strip().startswith("@"):
+            continue
+
+        def field(name: str) -> str:
+            m = re.search(rf"\b{name}\s*=\s*\{{(.*?)\}}", block, re.I | re.S)
+            if not m:
+                m = re.search(rf'\b{name}\s*=\s*"(.*?)"', block, re.I | re.S)
+            return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+
+        title = field("title")
+        if not title:
+            continue
+        doi = field("doi")
+        out.append({
+            "id": ("doi:" + doi) if doi else "local:" + str(abs(hash(title)))[:12],
+            "title": title, "authors": field("author"),
+            "venue": field("journal") or field("booktitle") or "本地导入",
+            "year": re.sub(r"\D", "", field("year"))[:4],
+            "url": ("https://doi.org/" + doi) if doi else field("url"),
+            "abstract": field("abstract")[:700],
+            "cited_by_count": 0, "relevance_score": 0.0,
+        })
+    return out
+
+
+def _import_row(r: dict) -> dict | None:
+    title = str(r.get("title") or r.get("题名") or "").strip()
+    if not title:
+        return None
+    doi = str(r.get("doi") or r.get("DOI") or "").strip()
+    return {
+        "id": ("doi:" + doi) if doi else "local:" + str(abs(hash(title)))[:12],
+        "title": title,
+        "authors": str(r.get("authors") or r.get("author") or r.get("作者") or ""),
+        "venue": str(r.get("venue") or r.get("journal") or r.get("期刊") or "本地导入"),
+        "year": re.sub(r"\D", "", str(r.get("year") or r.get("年份") or ""))[:4],
+        "url": ("https://doi.org/" + doi) if doi else str(r.get("url") or ""),
+        "abstract": str(r.get("abstract") or r.get("摘要") or "")[:700],
+        "cited_by_count": int(r.get("cited_by_count") or 0) if str(
+            r.get("cited_by_count") or "0").isdigit() else 0,
+        "relevance_score": 0.0,
+    }
+
+
+def fetch_imported(query: str, max_results: int = 20, timeout: int = 5) -> list[dict]:
+    """本地题录导入：唯一不依赖外部 API 的文献源。
+
+    把知网 / Google Scholar / Semantic Scholar 导出的 .bib / .json / .csv 放进
+    corpus/imports/ 即可。免费学术 API 会限流会反爬，这条通道永远不会挂，
+    导师指定的必引文献、中文文献、付费库里查到的题录都从这里进。
+    """
+    if not IMPORT_DIR.exists():
+        return []
+    items: list[dict] = []
+    for p in sorted(IMPORT_DIR.iterdir()):
+        suf = p.suffix.lower()
+        if suf not in (".bib", ".json", ".csv", ".ris", ".txt"):
+            continue
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        try:
+            if suf == ".bib":
+                items += _parse_bib(text)
+            elif suf == ".json":
+                d = json.loads(text)
+                rows = d if isinstance(d, list) else (
+                    d.get("papers") or d.get("items") or [])
+                items += [x for x in (_import_row(r) for r in rows
+                                      if isinstance(r, dict)) if x]
+            elif suf == ".csv":
+                items += [x for x in (_import_row(r) for r in
+                                      csv.DictReader(io.StringIO(text))) if x]
+            else:  # RIS / 纯文本：TI/T1、AU、PY、JO、AB、DO
+                cur: dict = {}
+                for line in text.splitlines():
+                    m = re.match(r"^([A-Z][A-Z0-9])\s+-\s+(.*)$", line.strip())
+                    if not m:
+                        continue
+                    tag, val = m.group(1), m.group(2)
+                    if tag in ("TI", "T1"):
+                        if cur.get("title"):
+                            x = _import_row(cur)
+                            if x:
+                                items.append(x)
+                        cur = {"title": val}
+                    cur[{"AU": "authors", "PY": "year", "JO": "venue",
+                         "AB": "abstract", "DO": "doi"}.get(tag, "_")] = val
+                x = _import_row(cur)
+                if x:
+                    items.append(x)
+        except Exception:
+            continue
+
+    seen, uniq = set(), []
+    for it in items:
+        if it["id"] not in seen:
+            seen.add(it["id"])
+            uniq.append(it)
+    qw = [w for w in re.findall(r"[a-z0-9\u4e00-\u9fff]+", (query or "").lower())
+          if len(w) > 2]
+    uniq.sort(key=lambda x: (-sum(1 for w in qw if w in (
+        (x.get("title") or "") + " " + (x.get("abstract") or "")).lower()),
+        -int(x.get("year") or 0)))
+    return uniq[:max(20, max_results * 3)]
 
 
 def fetch_crossref(query: str, max_results: int = 20, timeout: int = 30,
