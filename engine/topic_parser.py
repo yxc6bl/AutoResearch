@@ -337,6 +337,41 @@ DATASET_CATALOG = [
         "desc_cn": "蘑菇可食性判别",
         "target_cn": "可食/有毒类别",
     },
+    {
+        "key": "ts_daily_temp",
+        "label": "每日最低气温时序（公开数据 1981-1990，3650 天）",
+        "source": "timeseries",
+        "path": "data/ts_daily_min_temperatures.csv",
+        "url": "https://raw.githubusercontent.com/jbrownlee/Datasets/master/daily-min-temperatures.csv",
+        "time_col": "Date", "value_col": "Temp", "lags": 7,
+        "task": "regression", "modality": "timeseries",
+        # 只靠「时序建模语义」匹配，不靠领域词碰巧相同：交通流题配气温序列
+        # 是能力基准，不是真做了交通流，必须标 proxy 明说。
+        "domain_kw": ["时序", "时间序列", "短时", "流量预测", "趋势预测",
+                      "time series", "forecast", "forecasting"],
+        "proxy": True,
+        "proxy_note": "建模能力基准：公开每日气温序列，非真实交通/客流数据；领域数据需用户自传",
+        "lit_query": "time series forecasting lag features machine learning regression",
+        "desc_cn": "按日观测序列做下一时刻值预测（滑动窗口滞后特征 + 季节编码）",
+        "target_cn": "下一日观测值",
+        "n": 3650, "feat": 10,
+    },
+    {
+        "key": "iris_cluster",
+        "label": "鸢尾花无监督聚类数据集（真实标签仅用于 ARI 评估）",
+        "source": "sklearn", "name": "iris",
+        "task": "clustering", "modality": "tabular",
+        # 不放「无监督」「簇」这类泛词：否则北大「域迁移与场景重建」也会被
+        # 误判成可执行的聚类题，制造假覆盖。
+        "domain_kw": ["聚类", "分群", "用户分群", "客户分群",
+                      "cluster", "kmeans", "k-means"],
+        "proxy": True,
+        "proxy_note": "建模能力基准：鸢尾花特征无监督分群，非真实业务用户数据",
+        "lit_query": "clustering analysis kmeans silhouette adjusted rand index",
+        "desc_cn": "无监督样本分群",
+        "target_cn": "簇划分（真实品种标签仅用于外部评估）",
+        "n": 150, "feat": 4,
+    },
 ]
 
 
@@ -388,7 +423,9 @@ def detect_task_type(title: str, direction: str = "", matched_task: str = None) 
         return "clustering"
     # 回归指示词（连续量）
     if any(k in t for k in ["回归", "估计", "预测值", "强度", "温度", "噪声", "浓度",
-                            "负荷", "房价", "气压", "应变", "含量", "预测（连续）", "regression"]):
+                            "负荷", "房价", "气压", "应变", "含量", "预测（连续）", "regression",
+                            "时序", "时间序列", "短时", "客流", "交通流", "车流",
+                            "流量预测", "趋势预测", "forecast"]):
         return "regression"
     # 分类指示词（类别）
     if any(k in t for k in ["分类", "识别", "诊断", "检测", "判别", "故障", "欺诈", "信用",
@@ -487,6 +524,10 @@ def _data_binding(ds: dict) -> dict:
     if ds["source"] == "openml":
         return {"source": "openml", "dataset_id": ds["dataset_id"],
                 "version": ds.get("version"), **meta}
+    if ds["source"] == "timeseries":
+        return {"source": "timeseries", "path": ds["path"], "url": ds.get("url"),
+                "time_col": ds.get("time_col"), "value_col": ds.get("value_col"),
+                "lags": ds.get("lags", 7), **meta}
     raise ValueError(f"未知数据源：{ds['source']}")
 
 

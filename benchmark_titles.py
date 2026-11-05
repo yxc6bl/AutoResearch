@@ -8,7 +8,7 @@
 """
 import sys, json
 sys.path.insert(0, ".")
-from engine.topic_parser import parse_title
+from engine.topic_parser import parse_title, match_dataset
 
 # (来源, 题目) —— 均来自本次联网搜到的真实高校毕设题
 TITLES = [
@@ -52,7 +52,7 @@ TITLES = [
     ("自测", "葡萄酒品种鉴别的机器学习方法对比"),
 ]
 
-OK, MISS, WRONG = [], [], []
+OK, MISS, WRONG, PROXY = [], [], [], []
 
 # 不可执行题目的归因：区分「能力缺口」与「题目本身不适合本引擎」
 _REASONS = [
@@ -63,7 +63,7 @@ _REASONS = [
     ("图/网络结构", ["图神经网络", "社交网络", "图结构", "过平滑"],
      "需图数据与 GNN 后端，表格流水线无法表达节点-边结构"),
     ("时序/时空预测", ["时空", "客流", "车流", "交通流", "短时"],
-     "需时序建模（滑窗、序列模型）；当前按独立样本建模，无法刻画时间依赖"),
+     "已有滑动窗口回归后端（滞后特征+季节编码），但公开基准是气温序列；真实交通/客流数据需用户自传"),
     ("领域数据缺失", ["复合材料", "弹性", "入侵检测", "模态检测", "流失", "游戏"],
      "属真实领域数据题，需引入对应公开数据集（如 NSL-KDD、游戏流失数据）"),
     ("非机器学习题", ["牛顿法", "数值方法", "复杂度分析", "定理证明"],
@@ -102,15 +102,22 @@ for i, (src, t) in enumerate(TITLES, 1):
             verdict = "误匹配(应文本)"
             WRONG.append(t)
         else:
-            verdict = "可执行"
+            _raw = match_dataset(t)
+            _proxy = bool(_raw and _raw.get("proxy"))
+            verdict = "可执行(代理)" if _proxy else "可执行"
             OK.append(t)
+            if _proxy:
+                PROXY.append(t)
+                print(f"     注意：{(_raw or {}).get('proxy_note', '')}")
     print(f"{i:2d} [{src:6s}] {verdict:10s} | {task:12s} | mod:{str(modality):6s} | {str(ds):30s} | 方法:{hints:18s} | 不支持:{unsup}")
     print(f"     题目：{t}")
     if verdict != "可执行":
         print(f"     归因：{reason} —— {tip}")
 
 print("\n================ 汇总 ================")
-print(f"可执行(MATCH): {len(OK)}/{len(TITLES)}")
+print(f"可执行(MATCH): {len(OK)}/{len(TITLES)}，其中代理数据 {len(PROXY)} 道"
+      f"（建模能力到位但领域数据不同，不算真正接住）")
+print(f"同领域真实数据可执行: {len(OK) - len(PROXY)}/{len(TITLES)}")
 print(f"误匹配(语义错): {len(WRONG)}/{len(TITLES)}  -> {WRONG}")
 print(f"不可执行(无数据集): {len(MISS)}/{len(TITLES)}")
 print(f"可接住率: {round(100*len(OK)/len(TITLES),1)}%")

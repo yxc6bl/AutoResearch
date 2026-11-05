@@ -536,6 +536,18 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             known = {p.get("id") for p in pool}
             added = [p for p in extra if p.get("id") not in known]
             if added:
+                # 回填来的文献同样要逐篇读：此前这里只做 LM keep 判定，
+                # 结果实测 45 篇里只有 28 篇带 llm_what，剩下全是关键词兜底。
+                if lm_driven:
+                    try:
+                        _sc2 = _lm_read_screen(topic, added, out_dir,
+                                               deadline=_deadline, max_calls=2)
+                        if _sc2:
+                            _screen.update(_sc2)
+                            _n2 = _apply_screen(added, _sc2)
+                            print(f"[GatherAgent] 缺口回填补读 {_n2} 篇")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[GatherAgent] 缺口回填补读跳过：{e}")
                 ef = _lm_filter(topic, added)
                 for p in added:
                     if ef.get("keep_ids") is None or p.get("id") in ef["keep_ids"]:
@@ -587,6 +599,15 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             _known = {p.get("id") or p.get("url") for p in pool}
             _added = [p for p in _extra if (p.get("id") or p.get("url")) not in _known]
             if _added:
+                if lm_driven:
+                    try:
+                        _sc3 = _lm_read_screen(topic, _added, out_dir,
+                                               deadline=_deadline, max_calls=2)
+                        if _sc3:
+                            _screen.update(_sc3)
+                            _apply_screen(_added, _sc3)
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[GatherAgent] 扩面候选补读跳过：{e}")
                 pool += _added
                 chosen, sel_report = LA.select_by_role(pool, _fit_topic, max_total=_cap)
                 sel_report["confidence"] = ("lm_read" if _screen else
@@ -611,6 +632,23 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             sel_report["relaxed"] = "严格门槛下不足 8 篇，已放宽到 0.10"
         sel_report["confidence"] = "low"
         sel_report["needs_review"] = True
+
+    # ⑤-d 入选补读：最终写进正文的文献，尽量每一篇都经过逐篇阅读。
+    # 「读了候选 28 篇、精选 45 篇」会留下 17 篇关键词兜底混进正文——实测吃过这个亏。
+    # 补读只针对最终入选且尚未读过的，目标明确、数量可控，不浪费在几百条候选上。
+    if lm_driven and chosen:
+        _todo = [p for p in chosen if not (p.get("llm_what") or p.get("llm_fit") is not None)]
+        if _todo:
+            try:
+                _sc4 = _lm_read_screen(topic, _todo[:24], out_dir,
+                                       deadline=_deadline + 60,
+                                       max_papers=24, batch=12, max_calls=2)
+                if _sc4:
+                    _screen.update(_sc4)
+                    _n4 = _apply_screen(_todo[:24], _sc4)
+                    print(f"[GatherAgent] 入选补读 {_n4}/{len(_todo)} 篇（此前为关键词兜底）")
+            except Exception as e:  # noqa: BLE001
+                print(f"[GatherAgent] 入选补读跳过：{e}")
 
     report["selection"] = sel_report
 

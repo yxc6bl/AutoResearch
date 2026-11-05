@@ -346,6 +346,61 @@ def describe_preprocessing(X, roles: dict):
     return report
 
 
+TS_CACHE = Path(__file__).resolve().parents[1] / "data" / "ts_daily_min_temperatures.csv"
+
+
+def _load_timeseries(d: dict):
+    """真实时间序列 → 滑动窗口监督学习表格（回归）。
+
+    默认数据是公开 CSV：澳大利亚墨尔本 1981-1990 每日最低气温（Date / Temp，3650 行），
+    本地缓存优先；缓存缺失才按 d['url'] 下载，下载失败明确抛错——不造数据、不降级。
+    构造：前 lags 步观测值 + 季节正余弦 + 月份 → 预测下一时刻值。
+    """
+    import math
+    import ssl
+    import urllib.request
+    import pandas as pd
+
+    p = Path(d.get("path") or TS_CACHE)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parents[1] / p
+    if not p.exists():
+        url = d.get("url")
+        if not url:
+            raise ValueError(f"时序数据缺失且未给下载 URL：{p}")
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=25, context=ctx) as r:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(r.read())
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"公开时序数据下载失败（不造数据、不降级）：{e}") from e
+
+    df = pd.read_csv(p)
+    tcol = d.get("time_col") or df.columns[0]
+    vcol = d.get("value_col") or df.columns[1]
+    if tcol not in df.columns or vcol not in df.columns:
+        raise ValueError(f"时序 CSV 缺列：需要 {tcol}/{vcol}，实际 {list(df.columns)}")
+    df[tcol] = pd.to_datetime(df[tcol], errors="coerce")
+    df = df.dropna(subset=[tcol]).sort_values(tcol).reset_index(drop=True)
+    series = pd.to_numeric(df[vcol], errors="coerce").interpolate().bfill().ffill()
+    lags = max(1, min(30, int(d.get("lags") or 7)))
+    rows, targets = [], []
+    for i in range(lags, len(series) - 1):
+        vals = [float(series.iloc[i - j]) for j in range(1, lags + 1)]
+        doy = int(df[tcol].iloc[i].dayofyear)
+        rows.append(vals + [math.sin(2 * math.pi * doy / 365.25),
+                            math.cos(2 * math.pi * doy / 365.25),
+                            float(df[tcol].iloc[i].month)])
+        targets.append(float(series.iloc[i + 1]))
+    feat = [f"lag_{j}" for j in range(1, lags + 1)] + ["season_sin", "season_cos", "month"]
+    return (np.asarray(rows, dtype=float), np.asarray(targets, dtype=float),
+            feat, "regression")
+
+
 def _load_text(d: dict):
     """加载文本数据集。
 
@@ -416,6 +471,8 @@ def _load_dataset_inner(spec: dict):
         file_data = dict(d)
         file_data["task_type"] = spec.get("task_type") or d.get("task_type")
         return _load_url(file_data)
+    if src == "timeseries":
+        return _load_timeseries(d)
     if src == "text":
         return _load_text(d)
     if src in DATASETS:  # 兜底：source 直接写内置名
@@ -1044,7 +1101,12 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
         if method_specs[m].get("__proposed__"):
             # 提议方法由引擎在种子循环内动态构建集成，预检跳过
             continue
-        if declared_task == "clustering" and any(n in m.lower() for n in cluster_names):
+        # 聚类方法的 key 是中文名（K均值 / 层次聚类），只看 key 会漏掉豁免，
+        # 导致它们被 build_estimator 判为「无法构建」全部跳过。必须同时看 estimator。
+        _est = (method_specs[m].get("estimator")
+                if isinstance(method_specs[m], dict) else "")
+        if declared_task == "clustering" and (
+                any(n in m.lower() for n in cluster_names) or _est in cluster_names):
             continue
         try:
             if build_estimator(method_specs[m], 42) is None:

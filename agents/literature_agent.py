@@ -730,10 +730,13 @@ def _select_score(p: dict, topic: str) -> float:
 
 # 三档召回策略：默认 balanced。担心「限制太死」就切 recall，担心「混进噪声」就切 strict。
 # 通过环境变量 LIT_PROFILE 或函数参数指定，改配置即可，不用改代码。
+# cap 是「最多」不是「目标」：实测一个普通题目能召回 309 篇合格候选，
+# 旧 cap=45 会把它们硬截断。放宽后由角色配额与质量线决定实际篇数，
+# 报告里的 n_eligible / capped_by_cap 会让「是否被上限卡住」始终可见。
 SELECT_PROFILES = {
-    "strict":   {"fit_floor": 0.40, "min_score": 0.42, "cap": 25},
-    "balanced": {"fit_floor": 0.25, "min_score": 0.28, "cap": 45},
-    "recall":   {"fit_floor": 0.10, "min_score": 0.10, "cap": 60},
+    "strict":   {"fit_floor": 0.40, "min_score": 0.42, "cap": 35},
+    "balanced": {"fit_floor": 0.25, "min_score": 0.28, "cap": 60},
+    "recall":   {"fit_floor": 0.10, "min_score": 0.10, "cap": 80},
 }
 
 

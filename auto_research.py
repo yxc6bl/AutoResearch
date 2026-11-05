@@ -119,6 +119,18 @@ def wait_for_llm(max_wait: int = 0, interval: int = 60) -> bool:
     return False
 
 
+def _lit_top_n() -> int:
+    """文献精选上限（可配 LIT_TOP_N，默认 60）。
+
+    是「最多」不是「目标」：实际篇数由角色配额与质量线决定，
+    select_by_role 报告里的 n_eligible / capped_by_cap 会显示是否被上限截断。
+    """
+    try:
+        return max(10, int(os.environ.get("LIT_TOP_N", "60")))
+    except ValueError:
+        return 60
+
+
 def _existing_artifacts(out_dir: Path) -> list[str]:
     """列出目录里已有的产物，用于失败时告诉用户「哪些东西保住了」。"""
     names = ["task_spec.json", "01_literature.json", "02_hypotheses.json",
@@ -244,7 +256,7 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         if isinstance(m, dict)]
             _dq = spec.get("literature_query") or ""
             _gres = ga.run(_topic, task_type=spec.get("task_type", "classification"),
-                           method_cn=_methods, dataset_query=_dq, out_dir=out_dir, top_n=45)
+                           method_cn=_methods, dataset_query=_dq, out_dir=out_dir, top_n=_lit_top_n())
             print(f"[GatherAgent] {'LM驱动' if _gres['lm_driven'] else '规则兜底'}检索，"
                   f"精选 {len(_gres['papers'])} 篇文献")
             # 第二双眼睛：文献审评 Agent，独立判断覆盖度/冗余/缺口
@@ -264,6 +276,19 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         print(f"[ReviewAgent] 已记录 {_nfb} 条覆盖缺口 → memory/feedback.jsonl")
                 except Exception as e:  # noqa: BLE001
                     print(f"[ReviewAgent] 缺口入账跳过：{e}")
+                # 审评 → 补抓闭环：缺口不再只写进 04 文件就结束，
+                # 而是转成检索式再抓一轮，新增文献同样逐篇读，最后覆盖 01_literature.json。
+                # 想省时间可设 LIT_REFETCH=0 关闭。
+                if os.environ.get("LIT_REFETCH", "1") != "0":
+                    try:
+                        from agents import literature_refetch_agent as LRA
+                        _rr = LRA.run(_topic, out_dir, _lrev, _gres["papers"],
+                                      budget_sec=60, top_n=_lit_top_n())
+                        if _rr.get("status") == "ok":
+                            print(f"[RefetchAgent] 文献集已更新为 {_rr['n_after']} 篇"
+                                  f"（LM 阅读覆盖 {_rr['read_coverage_after']:.0%}）")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[RefetchAgent] 补抓跳过（不影响主流程）：{e}")
             except Exception as e:  # noqa: BLE001
                 print(f"[ReviewAgent] 文献审评失败（不影响主流程）：{e}")
         except Exception as e:  # noqa: BLE001
@@ -605,7 +630,7 @@ def cmd_plan(args) -> int:
                 spec.get("literature_query") or args.topic,
                 task_type=spec.get("task_type", "classification"),
                 method_cn=_methods, dataset_query=spec.get("literature_query") or "",
-                out_dir=out_dir, top_n=45)
+                out_dir=out_dir, top_n=_lit_top_n())
             print(f"[GatherAgent] {'LM驱动' if gres['lm_driven'] else '规则兜底'}检索，"
                   f"精选 {len(gres['papers'])} 篇文献")
         except Exception as e:  # noqa: BLE001
@@ -684,7 +709,7 @@ def cmd_iterate(args) -> int:
                     prev_spec.get("literature_query") or args.topic,
                     task_type=prev_spec.get("task_type", "classification"),
                     method_cn=_methods, dataset_query=prev_spec.get("literature_query") or "",
-                    out_dir=out_dir, top_n=45)
+                    out_dir=out_dir, top_n=_lit_top_n())
             except Exception as e:  # noqa: BLE001
                 print(f"[literature] 检索失败（不影响主流程）：{e}")
         res = run_task(prev_spec, out_dir, make_paper=not args.no_paper, mode=args.mode)
