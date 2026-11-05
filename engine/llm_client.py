@@ -5,6 +5,8 @@
 
 - 自动从项目根目录 .env 注入网关环境变量（OPENAI_BASE_URL / OPENAI_API_KEY /
   OPENAI_MODEL / LLM_EXTRA_BODY）；已存在的进程环境变量优先（网页注入的用户 Key 优先）。
+- 支持备用通道（OPENAI_BASE_URL_2 / OPENAI_API_KEY_2 / OPENAI_MODEL_2 / LLM_EXTRA_BODY_2）：
+  主通道连续限流/过载达阈值时自动切换，不必等人来救，也绝不因此降低产出质量。
 - available() 返回网关是否真可用（Key 合法 + 至少一次握手成功），调用方据此决定
   走「LM 智能路径」还是「确定性兜底路径」——本系统所有 LM 调用都应有兜底，不能因
   网关挂掉而崩。
@@ -63,26 +65,52 @@ def _real_key(key: str) -> bool:
     return True
 
 
-def _client_or_none():
-    """返回 (client, model, extra) 或 None。不抛异常。"""
+_ACTIVE_IDX = [0]
+_FAILOVER_AFTER = int(os.environ.get("LLM_FAILOVER_AFTER", "3") or 3)
+
+
+def channels() -> list[dict]:
+    """列出已配置的通道：主通道 + 可选 _2 / _3 备用。不返回密钥明文供打印。"""
     _load_dotenv()
-    base = os.environ.get("OPENAI_BASE_URL")
-    key = os.environ.get("OPENAI_API_KEY")
-    if not base or not _real_key(key or ""):
+    default_model = os.environ.get("OPENAI_MODEL", "deepseek-v4-pro")
+    out = []
+    for suffix in ("", "_2", "_3"):
+        base = os.environ.get("OPENAI_BASE_URL" + suffix)
+        key = os.environ.get("OPENAI_API_KEY" + suffix)
+        if not base or not _real_key(key or ""):
+            continue
+        try:
+            extra = json.loads(os.environ.get("LLM_EXTRA_BODY" + suffix, "{}"))
+        except Exception:
+            extra = {}
+        out.append({
+            "base": base, "key": key,
+            "model": os.environ.get("OPENAI_MODEL" + suffix) or default_model,
+            "extra": extra,
+            "label": ("主通道" if not suffix else "备用通道" + suffix),
+        })
+    return out
+
+
+def current_channel() -> int:
+    chs = channels()
+    return (_ACTIVE_IDX[0] % len(chs)) if chs else -1
+
+
+def _client_or_none():
+    """返回 (client, model, extra) 或 None。不抛异常。走当前激活的通道。"""
+    chs = channels()
+    if not chs:
         return None
     try:
         from openai import OpenAI  # noqa: F401
     except ImportError:
         return None
-    model = os.environ.get("OPENAI_MODEL", "deepseek-v4-pro")
-    try:
-        extra = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))
-    except Exception:
-        extra = {}
+    ch = chs[_ACTIVE_IDX[0] % len(chs)]
     # max_retries=0：SDK 默认重试 2 次，会和本模块的退避重试叠乘（一次探测变 6 次请求），
     # 网关回 502 时会表现为「卡住 60 秒以上」。重试策略统一由 _raw_chat 控制。
-    client = OpenAI(base_url=base, api_key=key, max_retries=0)
-    return (client, model, extra)
+    client = OpenAI(base_url=ch["base"], api_key=ch["key"], max_retries=0)
+    return (client, ch["model"], ch["extra"])
 
 
 _CACHE_AVAIL: bool | None = None
@@ -131,6 +159,19 @@ def _cb_trip_or_reset(failed: bool) -> None:
             if _CB_OPEN[0]:
                 _CB_OPEN[0] = False
                 print("[LLM] 熔断器复位：网关恢复")
+
+
+def switch_channel() -> bool:
+    """切到下一条通道并复位熔断计数；只有一条通道时返回 False（不假装切了）。"""
+    chs = channels()
+    if len(chs) < 2:
+        return False
+    _ACTIVE_IDX[0] = (_ACTIVE_IDX[0] + 1) % len(chs)
+    _CB_FAILS[0] = 0
+    _CB_OPEN[0] = False
+    ch = chs[_ACTIVE_IDX[0]]
+    print(f"[LLM] 已切到{ch['label']}：{ch['base']} / {ch['model']}")
+    return True
 
 
 def set_min_interval(sec: float) -> None:
@@ -241,6 +282,16 @@ def _raw_chat(client, model, extra, messages, *, max_tokens, timeout,
             if not _is_retryable(e):
                 raise
             _cb_trip_or_reset(True)  # 可重试失败 → 累计熔断计数
+            # 主通道连续限流/过载时换备用通道立刻重试，不在同一条上空熬退避。
+            # 换通道不换产出标准：仍然是同一个模型调用链，绝不因此降级交付。
+            if (attempt < max_attempts - 1 and _FAILOVER_AFTER
+                    and _CB_FAILS[0] >= _FAILOVER_AFTER
+                    and len(channels()) > 1 and switch_channel()):
+                c = _client_or_none()
+                if c:
+                    client, model, extra = c
+                    print(f"[LLM] 备用通道接管第 {attempt + 2} 次调用…")
+                    continue
             if attempt >= max_attempts - 1:
                 break
             delay = min(backoff_base * (2 ** attempt), cap) + random.uniform(0, 1.5)

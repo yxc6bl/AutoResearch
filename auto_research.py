@@ -954,6 +954,19 @@ def cmd_doctor(args) -> int:
     print("=== 模型网关 ===")
     print(f"  地址：{base or '（未配置）'}")
     print(f"  模型：{model or '（未配置）'}")
+    try:
+        chs = LLM.channels()
+        cur = LLM.current_channel()
+        print(f"  通道：已配置 {len(chs)} 条｜当前第 {cur + 1} 条｜"
+              f"连续失败 {LLM._FAILOVER_AFTER} 次自动切备用｜调用最小间隔 {LLM._RL_MIN_INTERVAL}s")
+        for i, ch in enumerate(chs, 1):
+            print(f"    {i}) {ch['label']}：{ch['base']} / {ch['model']}"
+                  + ("  ← 当前" if i - 1 == cur else ""))
+        if len(chs) < 2:
+            print("    备用通道未配置：.env 里加 OPENAI_BASE_URL_2 / OPENAI_API_KEY_2 / "
+                  "OPENAI_MODEL_2 即可，挂了会自动切")
+    except Exception as e:  # noqa: BLE001
+        print(f"  通道信息读取失败：{e}")
     t0 = time.time()
     ok = False
     try:
