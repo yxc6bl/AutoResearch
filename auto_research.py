@@ -931,6 +931,34 @@ def cmd_gates(args) -> int:
     return 0
 
 
+def cmd_backends(args) -> int:
+    """领域后端：列出接线点、已装依赖、缺口优先级，并校验 ANALYSIS_JSON 契约。"""
+    from engine import backend_contract as BC
+
+    print("=== 四个接线点 ===")
+    for k, v in BC.WIRING.items():
+        print(f"  {k:5s} {v}")
+    print("\n=== 已接线后端 ===")
+    for s in BC.specs():
+        print(f"  {s.name:12s} source={','.join(s.sources)}｜依赖={BC.check_deps(s.deps)}")
+        print(f"      {s.note}")
+    print("\n=== 缺口（按性价比） ===")
+    for g in BC.gaps():
+        print(f"  P{g['priority']} {g['name']}｜依赖就绪={g['deps_ready']}"
+              f"｜需新评估分支={g['new_branch']}")
+        print(f"      {g['how']}")
+        print(f"      依赖状态 {g['dep_status']}；{g['extra']}")
+    if args.check:
+        ok, issues = BC.validate_file(args.check)
+        print(f"\n=== 契约校验 {args.check}：{'通过' if ok else '未通过'} ===")
+        for i in issues:
+            print("  -", i)
+        if not ok:
+            return 1
+    print("\n操作手册：docs/BACKENDS.md")
+    return 0
+
+
 def cmd_feedback(args) -> int:
     """反馈台账：查看统计/教训、手工补记、标记修复、导出回归用例。"""
     from engine import feedback as FB
@@ -1276,6 +1304,10 @@ def main() -> int:
 
     dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
     dcp.set_defaults(func=cmd_doctor)
+
+    bp = sub.add_parser("backends", help="领域后端：接线点、依赖状态、缺口优先级与产物契约自检")
+    bp.add_argument("--check", default="", help="校验某个 03_experiment.json 是否满足事实契约")
+    bp.set_defaults(func=cmd_backends)
 
     dp = sub.add_parser("datasets", help="列出当前可直接跑通的数据集目录（题目匹配用的白名单）")
     dp.add_argument("--json", action="store_true", help="以 JSON 输出，便于脚本消费")
