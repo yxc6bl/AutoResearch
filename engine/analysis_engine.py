@@ -480,6 +480,476 @@ def _load_dataset_inner(spec: dict):
     raise ValueError(f"不支持的数据源：{src}")
 
 
+# ── 关联规则挖掘（Apriori，纯 Python，无额外依赖） ──────────────────────────
+
+def _load_transactions(path: str) -> list[list[str]]:
+    """读取交易数据：支持单列 'items'（逗号分隔）或多列（每行各单元格为一项）。"""
+    import pandas as pd
+    df = pd.read_csv(path)
+    if "items" in df.columns:
+        txns = [str(v).replace("，", ",").split(",") for v in df["items"] if pd.notna(v)]
+    else:
+        txns = [[str(c) for c in row if pd.notna(c) and str(c).strip()]
+                for row in df.itertuples(index=False)]
+    return [[i.strip() for i in t if i and i.strip()] for t in txns]
+
+
+def _apriori(txns: list, min_support: float) -> dict:
+    """逐层搜索频繁项集，返回 {frozenset(项): 支持度}。"""
+    from collections import Counter
+    n = len(txns)
+    cnt = Counter()
+    for t in txns:
+        for it in set(t):
+            cnt[frozenset([it])] += 1
+    freq = {k: v / n for k, v in cnt.items() if v / n >= min_support}
+    itemsets = dict(freq)
+    k = 2
+    while True:
+        prev = [s for s in itemsets if len(s) == k - 1]
+        if not prev:
+            break
+        cand = set()
+        for i in range(len(prev)):
+            for j in range(i + 1, len(prev)):
+                u = prev[i] | prev[j]
+                if len(u) == k:
+                    cand.add(u)
+        # 先验剪枝：所有 k-1 子集必须频繁
+        freqk = {}
+        for c in cand:
+            if all((c - frozenset([x])) in itemsets for x in c):
+                sup = sum(1 for t in txns if c.issubset(set(t))) / n
+                if sup >= min_support:
+                    freqk[c] = sup
+        if not freqk:
+            break
+        itemsets.update(freqk)
+        k += 1
+    return itemsets
+
+
+def _gen_rules(itemsets: dict, txns: list, n: int, min_confidence: float,
+               max_ante: int = 1, max_cons: int = 1) -> list[dict]:
+    """由频繁项集生成关联规则，计算支持度/置信度/提升度，过滤低置信度。
+
+    max_ante/max_cons 限制前件/后件规模，默认 1→1（单条商品→单条商品），
+    保证规则可解释、统计稳健（避免极低支持度下 lift 被放大的噪声规则）。
+    """
+    from itertools import combinations
+    rules = []
+    for itemset, sup in itemsets.items():
+        if len(itemset) < 2 or len(itemset) > max_ante + max_cons:
+            continue
+        for i in range(1, min(len(itemset), max_ante) + 1):
+            for ante in combinations(itemset, i):
+                ante = frozenset(ante)
+                cons = itemset - ante
+                if len(cons) > max_cons:
+                    continue
+                if not cons:
+                    continue
+                conf = sup / itemsets[ante]
+                if conf < min_confidence:
+                    continue
+                lift = conf / itemsets[cons]
+                rules.append({
+                    "antecedent": "、".join(sorted(ante)),
+                    "consequent": "、".join(sorted(cons)),
+                    "support": sup,
+                    "confidence": conf,
+                    "lift": lift,
+                })
+    return rules
+
+
+# ── 图节点分类（source=graph）─────────────────────────────────────────────
+# 为什么单独一个分支：图节点不是独立同分布样本。划分必须按节点做，
+# 而且「一跳邻居均值」这类拓扑特征如果在划分前用全图算出来，就把测试折的
+# 特征泄漏进了训练折。这里同时跑三种协议，把泄漏的影响量化出来，而不是
+# 悄悄用一个有泄漏的漂亮数字交差。
+_GRAPH_PROTOCOLS = (
+    ("self", "仅节点词袋特征", "不使用拓扑；节点级分层交叉验证，无传导泄漏"),
+    ("neighbor_full", "全图邻居均值（传导设定）",
+     "划分前用全图邻接与全部节点特征计算邻居均值；存在传导泄漏，数字会偏乐观"),
+    ("neighbor_fold", "折内邻居均值（无泄漏）",
+     "每折只用训练折节点特征计算邻居均值，测试折特征不参与任何特征构造"),
+)
+
+
+def _load_graph(d: dict) -> dict:
+    """读图节点与边，返回节点特征、标签、归一化邻接与类别表。
+
+    支持两种格式：
+      - format=linqs：Planetoid 的 .content（id + 特征 + label）与 .cites（src,dst），tab 分隔
+      - format=csv  ：nodes.csv（node_id, 特征..., label）与 edges.csv（src,dst）
+    """
+    import pandas as pd
+
+    fmt = str(d.get("format") or "linqs").lower()
+    if fmt == "linqs":
+        rows = [l.split("\t") for l in
+                Path(d["nodes"]).read_text(encoding="utf-8").splitlines() if l.strip()]
+        ids = [r[0] for r in rows]
+        X = np.asarray([[float(v) for v in r[1:-1]] for r in rows], dtype=np.float32)
+        labels = [r[-1] for r in rows]
+        edges = [tuple(l.split("\t")[:2]) for l in
+                 Path(d["edges"]).read_text(encoding="utf-8").splitlines() if l.strip()]
+        feat_names = [f"word_{i}" for i in range(X.shape[1])]
+    else:
+        nodes = pd.read_csv(d["nodes"])
+        edf = pd.read_csv(d["edges"])
+        id_col = d.get("node_id", "node_id")
+        label_col = d.get("target", "label")
+        ids = nodes[id_col].astype(str).tolist()
+        labels = nodes[label_col].astype(str).tolist()
+        feat_names = [c for c in nodes.columns if c not in (id_col, label_col)]
+        X = nodes[feat_names].to_numpy(dtype=np.float32)
+        edges = [(str(a), str(b)) for a, b in
+                 edf[["src", "dst"]].itertuples(index=False)]
+
+    classes = sorted(set(labels))
+    y = np.asarray([classes.index(l) for l in labels], dtype=np.int64)
+    idx = {n: i for i, n in enumerate(ids)}
+    n = len(ids)
+    A = np.zeros((n, n), dtype=np.float32)
+    missing = 0
+    for a, b in edges:
+        if a not in idx or b not in idx:
+            missing += 1
+            continue
+        i, j = idx[a], idx[b]
+        # 引文方向对「邻居共现」语义按无向处理；论文第 3 章要写明这个简化
+        A[i, j] = 1.0
+        A[j, i] = 1.0
+        A[i, i] = 0.0
+        A[j, j] = 0.0
+    deg = A.sum(1, keepdims=True)
+    deg[deg == 0] = 1.0
+    return {
+        "ids": ids, "X": X, "y": y, "A": A, "A_norm": A / deg,
+        "feat_names": feat_names, "classes": classes,
+        "n_edges": len(edges), "missing_edges": missing,
+        "avg_degree": float(A.sum() / max(n, 1)),
+    }
+
+
+def _graph_features(g: dict, protocol: str, train_idx) -> np.ndarray:
+    """按协议构造节点特征矩阵。折内协议依赖 train_idx，必须逐折重算。"""
+    X = g["X"]
+    if protocol == "self":
+        return X
+    if protocol == "neighbor_full":
+        return np.hstack([X, g["A_norm"] @ X]).astype(np.float32)
+    masked = np.zeros_like(X)
+    masked[train_idx] = X[train_idx]
+    return np.hstack([X, g["A_norm"] @ masked]).astype(np.float32)
+
+
+def _run_graph(spec: dict, out_path: Path) -> dict:
+    """图节点分类：节点级分层 K 折 × 三种特征协议 × 候选分类器。
+
+    产物严格对齐 ANALYSIS_JSON 契约；`graph` 字段给事实清单提供可核对的
+    真实数值，并明确写出哪种协议有传导泄漏。
+    """
+    from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+    from sklearn.model_selection import StratifiedKFold
+    from scipy import stats
+
+    d = spec.get("data") or {}
+    try:
+        g = _load_graph(d)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"无法加载图数据：{e}"}
+    if g["X"].shape[0] < 20:
+        return {"error": "图节点数过少，无法做分层交叉验证"}
+
+    n_splits = int(d.get("n_splits", 5) or 5)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    folds = list(skf.split(np.zeros(len(g["y"])), g["y"]))
+    methods = _normalize_methods(spec.get("candidate_methods"))
+    if not methods:
+        return {"error": "图节点分类缺少候选方法"}
+
+    results: dict[str, dict] = {}
+    skipped = []
+    for proto_key, proto_label, _note in _GRAPH_PROTOCOLS:
+        for name, mspec in methods:
+            est_spec = mspec if isinstance(mspec, dict) else {"estimator": name}
+            # 折无关协议只需算一次特征；折内协议逐折重算
+            X_static = (_graph_features(g, proto_key, folds[0][0])
+                        if proto_key != "neighbor_fold" else None)
+            accs, f1s, fold_preds = [], [], []
+            for fi, (tr, te) in enumerate(folds):
+                Xp = X_static if X_static is not None else _graph_features(g, proto_key, tr)
+                try:
+                    est = build_estimator(est_spec, 42 + fi)
+                except Exception:
+                    est = None
+                if est is None:
+                    break
+                try:
+                    est.fit(Xp[tr], g["y"][tr])
+                    pred = est.predict(Xp[te])
+                except Exception:
+                    break
+                accs.append(float(accuracy_score(g["y"][te], pred)))
+                f1s.append(float(f1_score(g["y"][te], pred, average="macro")))
+                fold_preds.append((te, pred))
+            if len(accs) < len(folds):
+                skipped.append(f"{name}｜{proto_label}")
+                continue
+            key = f"{name}｜{proto_label}"
+            results[key] = {
+                "method": name, "protocol": proto_key, "protocol_label": proto_label,
+                "accuracy": round(float(np.mean(accs)), 4),
+                "f1_macro": round(float(np.mean(f1s)), 4),
+                "std": round(float(np.std(accs)), 4),
+                "fold_accuracy": [round(a, 4) for a in accs],
+                "fold_preds": fold_preds,
+            }
+    if not results:
+        return {"error": "所有图节点分类实验均失败", "skipped_methods": skipped}
+
+    # 核心结论只从不带传导泄漏的协议里选。全图协议的数字可能更高，
+    # 但它是「划分前看过测试折特征」换来的，不能当论文 headline。
+    # 系统宁可报一个略低的数，也不把一个偏乐观的数写成最优结果。
+    clean_keys = [k for k, r in results.items() if r["protocol"] != "neighbor_full"]
+    best_key = max(clean_keys or list(results), key=lambda k: results[k]["accuracy"])
+    best = results[best_key]
+    leaky = [r for r in results.values() if r["protocol"] == "neighbor_full"]
+    leaky_best = max(leaky, key=lambda r: r["accuracy"]) if leaky else None
+    y_pred = np.zeros_like(g["y"])
+    for te, pred in best["fold_preds"]:
+        y_pred[te] = pred
+    cm = confusion_matrix(g["y"], y_pred).tolist()
+    rep = classification_report(g["y"], y_pred, output_dict=True, zero_division=0)
+    per_class = {}
+    for ci, cname in enumerate(g["classes"]):
+        r = rep.get(str(ci), {})
+        per_class[f"class_{ci}_precision"] = round(float(r.get("precision", 0)), 4)
+        per_class[f"class_{ci}_recall"] = round(float(r.get("recall", 0)), 4)
+        per_class[f"class_{ci}_f1"] = round(float(r.get("f1-score", 0)), 4)
+
+    # 配对 t 检验：同一折划分，比较「折内邻居」与「仅节点特征」；
+    # 再比较「全图邻居」与「折内邻居」，量化泄漏带来的虚高。
+    tests = {}
+    for name, _ in methods:
+        a = next((r for r in results.values()
+                  if r["method"] == name and r["protocol"] == "self"), None)
+        b = next((r for r in results.values()
+                  if r["method"] == name and r["protocol"] == "neighbor_fold"), None)
+        c = next((r for r in results.values()
+                  if r["method"] == name and r["protocol"] == "neighbor_full"), None)
+        if a and b:
+            t, p = stats.ttest_rel(b["fold_accuracy"], a["fold_accuracy"])
+            tests[f"{name}｜折内邻居 vs 仅节点特征"] = {
+                "diff": round(float(np.mean(np.array(b["fold_accuracy"])
+                                            - np.array(a["fold_accuracy"]))), 4),
+                "p": round(float(p), 6), "t": round(float(t), 4)}
+        if b and c:
+            t, p = stats.ttest_rel(c["fold_accuracy"], b["fold_accuracy"])
+            tests[f"{name}｜全图邻居 vs 折内邻居（泄漏幅度）"] = {
+                "diff": round(float(np.mean(np.array(c["fold_accuracy"])
+                                            - np.array(b["fold_accuracy"]))), 4),
+                "p": round(float(p), 6), "t": round(float(t), 4)}
+
+    metrics = []
+    for key, r in results.items():
+        metrics.append({
+            "name": key,
+            "value": r["accuracy"],
+            "setting": f"节点级{n_splits}折；macro-F1={r['f1_macro']:.4f}；折间标准差={r['std']:.4f}",
+        })
+    seed_variance = {
+        f"{k}_accuracy": {"mean": r["accuracy"], "std": r["std"],
+                          "seeds": r["fold_accuracy"], "unit": "折"}
+        for k, r in results.items()
+    }
+
+    # 图：每个方法三种协议的准确率分组柱状图
+    plots_dir = out_path.parent / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    plot_ok = False
+    try:
+        import matplotlib.pyplot as _plt
+        names = list(dict.fromkeys(r["method"] for r in results.values()))
+        x = np.arange(len(names))
+        w = 0.26
+        colors = ["#64748b", "#f59e0b", "#2563eb"]
+        fig, ax = _plt.subplots(figsize=(10, 5))
+        for i, (pk, plabel, _n) in enumerate(_GRAPH_PROTOCOLS):
+            vals = [next((r["accuracy"] for r in results.values()
+                          if r["method"] == nm and r["protocol"] == pk), 0.0)
+                    for nm in names]
+            ax.bar(x + (i - 1) * w, vals, w, label=plabel, color=colors[i])
+        ax.set_xticks(x)
+        ax.set_xticklabels(names, fontsize=9)
+        ax.set_ylabel("节点分类准确率")
+        ax.set_title("图节点分类：三种特征协议对比（节点级分层交叉验证）")
+        ax.legend(fontsize=8)
+        ax.set_ylim(0, 1.0)
+        fig.savefig(str(plots_dir / "graph_protocol.png"), dpi=120, bbox_inches="tight")
+        _plt.close(fig)
+        plot_ok = True
+    except Exception:
+        pass
+
+    best_fold = results.get(best_key, {})
+    leak = [t["diff"] for k, t in tests.items() if "泄漏幅度" in k]
+    leak_txt = (f"全图协议相对折内协议的平均准确率虚高 {np.mean(leak):.4f}"
+                if leak else "未能量化泄漏幅度")
+    leaky_note = (f"全图协议最高为 {leaky_best['method']} 的 {leaky_best['accuracy']:.4f}，"
+                  f"因存在传导泄漏被排除在核心结论之外，仅作为上界对照"
+                  if leaky_best else "")
+    sig_txt = ("配对 t 检验（同一组节点级折划分，逐折配对）：" +
+               "；".join(f"{k} 差值={v['diff']:.4f}, p={v['p']:.4f}"
+                         for k, v in list(tests.items())[:6]))
+
+    return {
+        "task_type": "classification",
+        "best_method": best_key,
+        "best_value": best["accuracy"],
+        "best_metric": "accuracy",
+        "metrics": metrics,
+        "per_class": {best_key: per_class},
+        "confusion_matrix": {best_key: cm},
+        "significance": sig_txt,
+        "seed_variance": seed_variance,
+        "paired_tests": tests,
+        "plots": ([{"title": "图节点分类：三种特征协议对比", "file": "graph_protocol.png"}]
+                  if plot_ok else []),
+        "skipped_methods": skipped,
+        "preprocessing": {
+            "n_samples": int(g["X"].shape[0]),
+            "n_raw_features": int(g["X"].shape[1]),
+            "n_edges": g["n_edges"],
+            "avg_degree": round(g["avg_degree"], 4),
+            "note": "图节点级分层 K 折；不做列级标准化；拓扑压成一跳邻居均值特征。",
+        },
+        "graph": {
+            "dataset": (spec.get("data") or {}).get("label"),
+            "n_nodes": int(g["X"].shape[0]),
+            "n_edges": g["n_edges"],
+            "n_features": int(g["X"].shape[1]),
+            "n_classes": len(g["classes"]),
+            "classes": g["classes"],
+            "avg_degree": round(g["avg_degree"], 4),
+            "n_splits": n_splits,
+            "protocols": [{"key": k, "label": l, "note": n}
+                          for k, l, n in _GRAPH_PROTOCOLS],
+            "results": {k: {kk: vv for kk, vv in r.items() if kk != "fold_preds"}
+                        for k, r in results.items()},
+            "best": {"key": best_key, "accuracy": best["accuracy"],
+                     "f1_macro": best["f1_macro"], "std": best["std"]},
+            "leaky_best": ({"key": f"{leaky_best['method']}｜全图邻居均值（传导设定）",
+                            "accuracy": leaky_best["accuracy"]}
+                           if leaky_best else None),
+            "best_selection_note": ("核心结论只从无传导泄漏的协议中择优；"
+                                    "全图协议结果仅作上界对照，不作为最优方法。"),
+            "leakage_note": leak_txt + ("；" + leaky_note if leaky_note else ""),
+            "protocol_note": ("图节点不独立同分布：不做样本级随机 train_test_split，"
+                              "改用节点级分层 K 折；拓扑特征区分全图（含传导泄漏）与"
+                              "折内（无泄漏）两种构造方式。"),
+        },
+        "findings": (f"Cora 引文网络共 {g['X'].shape[0]} 个节点、{g['n_edges']} 条引用边、"
+                     f"{g['X'].shape[1]} 维词袋特征、{len(g['classes'])} 类；"
+                     f"在 {n_splits} 折节点级分层交叉验证下，最高准确率为 "
+                     f"{best_key} 的 {best['accuracy']:.4f}（macro-F1={best['f1_macro']:.4f}），"
+                     f"该结论取自无传导泄漏的协议。{leak_txt}。{leaky_note}"),
+        "adaptations": [],  # 图协议说明放在 graph.protocol_note / findings，避免被当成估算器替换
+    }
+
+
+def _run_association(spec: dict, out_path: Path) -> dict:
+    """关联规则挖掘主流程：Apriori 频繁项集 → 规则生成 → 按 lift 排序 → 出图。
+
+    返回符合 ANALYSIS_JSON 契约的 dict（task_type/best_method/best_value/metrics/plots），
+    使论文写作端与 LLM 评审官无需感知具体领域即可消费。
+    """
+    d = spec.get("data") or {}
+    path = d.get("path") or d.get("association_file")
+    if not path:
+        return {"error": "关联规则任务需要交易数据（data.path 指向交易 CSV）"}
+    min_support = float(d.get("min_support", spec.get("min_support", 0.02)))
+    min_confidence = float(d.get("min_confidence", spec.get("min_confidence", 0.3)))
+    try:
+        txns = _load_transactions(path)
+    except Exception as e:
+        return {"error": f"无法加载交易数据：{e}"}
+    n = len(txns)
+    if n == 0:
+        return {"error": "交易数据为空"}
+    all_items = set()
+    for t in txns:
+        all_items.update(t)
+    itemsets = _apriori(txns, min_support)
+    rules = _gen_rules(itemsets, txns, n, min_confidence)
+    if not rules:
+        return {"error": f"未生成任何规则（min_support={min_support}、min_confidence={min_confidence} 可能过高）",
+                "skipped_methods": []}
+    rules.sort(key=lambda r: r["lift"], reverse=True)
+    top = rules[:12]
+    best = top[0]
+    metrics = []
+    for r in top:
+        metrics.append({
+            "name": f"{r['antecedent']}→{r['consequent']}",
+            "value": round(r["lift"], 4),
+            "setting": f"支持度={r['support']:.4f}, 置信度={r['confidence']:.4f}",
+        })
+    plots_dir = out_path.parent / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        labels = [f"{r['antecedent']}→{r['consequent']}" for r in top[:10]]
+        vals = [r["lift"] for r in top[:10]]
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ypos = list(range(len(vals)))
+        ax.barh(ypos, vals, color="#2563eb")
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(labels, fontsize=9)
+        ax.invert_yaxis()
+        ax.set_xlabel("提升度 lift")
+        ax.set_title("Top 关联规则（按 lift 排序）")
+        fig.savefig(str(plots_dir / "assoc_rules.png"), dpi=120, bbox_inches="tight")
+        plt.close(fig)
+    except Exception:
+        pass
+    return {
+        "task_type": "association",
+        "best_method": f"{best['antecedent']}→{best['consequent']}",
+        "best_value": round(best["lift"], 4),
+        "best_metric": "lift",
+        "metrics": metrics,
+        "per_class": {},
+        "single_fit_scores": {
+            "n_rules_total": len(rules),
+            "rules": [{"rule": f"{r['antecedent']}→{r['consequent']}",
+                       "support": round(r["support"], 4),
+                       "confidence": round(r["confidence"], 4),
+                       "lift": round(r["lift"], 4)} for r in rules[:30]],
+        },
+        "significance": "关联规则不做配对显著性检验（非监督、非假设检验任务）",
+        "plots": [{"title": "Top 关联规则（按 lift 排序）", "file": "assoc_rules.png"}],
+        "sub_hypothesis_evidence": {},
+        "skipped_methods": [],
+        "preprocessing": {
+            "n_samples": n,
+            "n_raw_features": len(all_items),
+            "note": "交易级数据，无列级预处理；以最小支持度/置信度约束挖掘",
+        },
+        "n_transactions": n,
+        "n_items": len(all_items),
+        "min_support": min_support,
+        "min_confidence": min_confidence,
+        "findings": (
+            f"共 {n} 笔交易、{len(all_items)} 种商品；"
+            f"在 support≥{min_support}、confidence≥{min_confidence} 下挖掘出 {len(rules)} 条规则；"
+            f"提升度最高规则为 {best['antecedent']}→{best['consequent']}（lift={best['lift']:.3f}）。"
+        ),
+    }
+
+
 def _fit_prep(X_tr):
     """在训练折上拟合混合类型预处理器并返回（供 .transform 复用）。
 
@@ -1067,6 +1537,15 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
 
     数据集与方法全部从 spec 解析，引擎对具体数据集/方法零硬编码。
     """
+    # 关联规则挖掘：独立分支（非监督、非候选方法对比），直接走专用流水线，
+    # 不进入下面的候选方法/预处理/主循环逻辑。
+    _decl_task = spec.get("task_type") or (spec.get("data") or {}).get("task_type")
+    if _decl_task == "association":
+        return _run_association(spec, out_path)
+    # 图节点分类靠 data.source 分派（它仍是分类任务，但划分与泄漏语义完全不同）
+    if (spec.get("data") or {}).get("source") == "graph":
+        return _run_graph(spec, out_path)
+
     norm = _normalize_methods(spec.get("candidate_methods"))
     methods = [k for k, _ in norm]
     method_specs = {k: s for k, s in norm}

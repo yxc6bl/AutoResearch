@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -144,6 +145,53 @@ def mark(index: int, status: str) -> bool:
     LEDGER.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
                       encoding="utf-8")
     return True
+
+
+def _norm_topic(t: str) -> str:
+    """题目归一化：去空白、去标点差异、统一大小写，避免同一道题因空格不同而漏配。"""
+    s = re.sub(r"[\s　]+", "", (t or ""))
+    s = re.sub(r"[，。、；：·（）()\[\]【】]", "", s)
+    return s.lower()
+
+
+def close_for_topic(topic: str, run_dir: str = "", reason: str = "",
+                    types: tuple[str, ...] = ()) -> int:
+    """同题后续运行过了硬门，就把该题此前的未修复记录销账。
+
+    为什么需要它：`lessons()` 只读 open 记录，而旧实现没有任何路径把 open 变成
+    fixed —— 113 条记录、修复率恒为 0，同一批旧账每次写作前都被重新念一遍，
+    台账退化成日志。销账条件是「同题 + 后续运行 + 硬门通过」，不是「时间过去了」，
+    所以它记录的是真实修复，而不是自动过期。
+
+    只销**别的**运行留下的记录（run_dir 不同），本轮刚记录的问题不会被自己销掉。
+    """
+    rows = load()
+    key = _norm_topic(topic)
+    if not key:
+        return 0
+    here = str(Path(run_dir).resolve()) if run_dir else ""
+    now = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    n = 0
+    for r in rows:
+        if r.get("status") in ("fixed", "wontfix"):
+            continue
+        if _norm_topic(r.get("topic")) != key:
+            continue
+        if types and r.get("type") not in types:
+            continue
+        prev = str(Path(r.get("run_dir")).resolve()) if r.get("run_dir") else ""
+        if here and prev == here:
+            continue
+        r["status"] = "fixed"
+        r["closed_ts"] = now
+        r["closed_by_run"] = here or str(run_dir or "")
+        r["close_reason"] = (reason or "同题后续运行通过硬门")[:200]
+        n += 1
+    if n:
+        LEDGER.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+                          encoding="utf-8")
+    return n
+
 
 
 def export_cases() -> dict:

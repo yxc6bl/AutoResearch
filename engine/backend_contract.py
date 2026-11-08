@@ -70,6 +70,15 @@ register(BackendSpec("timeseries", "timeseries", ("timeseries",),
 register(BackendSpec("clustering", "tabular", ("sklearn",),
                      deps=("sklearn",),
                      note="独立分支：不做 train/test 划分，全量拟合，ARI/NMI/silhouette 评估"))
+register(BackendSpec("association", "transactions", ("association",),
+                     deps=(),
+                     note="独立分支 _run_association()：Apriori 频繁项集 + 规则生成"
+                          "（支持度/置信度/提升度），纯 Python 无新依赖；source=association 交易 CSV"))
+register(BackendSpec("graph", "graph", ("graph",),
+                     deps=("numpy", "pandas", "sklearn"),
+                     note="独立分支 _run_graph()：节点级分层 K 折 × 三种特征协议；"
+                          "显式区分全图（含传导泄漏）与折内（无泄漏）邻居均值，"
+                          "核心结论只从无泄漏协议中择优；source=graph 指 nodes+edges 两个文件"))
 
 # ── 尚未接线、按性价比排序的缺口 ────────────────────────────────────────
 GAPS = [
@@ -77,21 +86,23 @@ GAPS = [
         "name": "领域数据缺失", "priority": 1, "new_branch": False,
         "topics": ["基于XGBoost的网络游戏流失玩家预测算法研究",
                    "基于机器学习的复合材料等效弹性性能研究"],
-        "deps": ("pandas",), "extra": "本地 _concrete.data 是老式 .xls，需 xlrd 或 python-calamine（当前都没装）",
+        "deps": ("pandas",), "extra": "本地 _concrete.data 是老式 .xls，读它要 xlrd 或 python-calamine；依赖状态看 dep_status，装没装以 --probe 为准",
         "how": "找公开 CSV → 放 data/ → DATASET_CATALOG 加一条 → 跑 benchmark。评估协议不变，不动 analysis_engine。",
     },
     {
-        "name": "图/网络结构", "priority": 2, "new_branch": True,
+        "name": "图/网络结构（已接线，代理数据）", "priority": 2, "new_branch": True,
         "topics": ["基于社交网络结构的社会推荐算法研究", "图神经网络过平滑问题的研究"],
-        "deps": ("numpy",), "extra": "networkx 可选（当前没装）；纯 numpy 邻接矩阵也能做",
-        "how": "新增 source=graph，load 返回节点特征 + 邻接矩阵 + 标签；新增节点分类分支（不能套独立样本随机划分，要用节点级划分）；指标用 accuracy/Macro-F1。",
+        "deps": ("numpy",), "extra": "networkx 可选（装了更好读边表，不装纯 numpy 邻接矩阵也能做）；"
+                              "2026-11-05 已接 Cora 真实引文网络，但这两道题仍是代理数据、且后端非真 GNN",
+        "how": "已实现 source=graph（linqs/csv 两种格式）、_load_graph() 与 _run_graph()；"
+               "剩余缺口是社交网络/推荐领域的同领域真实数据，以及真 GNN 的层数消融。",
     },
     {
         "name": "视觉/视频", "priority": 3, "new_branch": True,
         "topics": ["基于深度学习的车辆识别系统", "基于深度学习的智能无人收银系统",
                    "基于深度学习的交通标志检测系统", "基于深度神经网络的智能视频计算",
                    "基于迁移学习的模态检测方法", "基于机器学习的入侵检测方法"],
-        "deps": ("torch", "torchvision"), "extra": "两者当前都没装；还需预训练权重与 CPU/GPU 预算",
+        "deps": ("torch", "torchvision"), "extra": "依赖之外还需要预训练权重与 CPU/GPU 预算；装没装以 --probe 的真导入为准，find_spec 不算数",
         "how": "新增 source=image，load 返回张量；run_analysis 增图像分支（跳过 build_tabular_preprocessor，它对张量不适用）；评估用 top-1/mAP；事实清单必须给真实 epoch/权重来源。",
     },
     {
@@ -109,6 +120,47 @@ def specs() -> list[BackendSpec]:
 
 def check_deps(deps) -> dict:
     return {d: bool(importlib.util.find_spec(d)) for d in deps}
+
+
+def probe(deps, timeout: float = 180.0) -> dict:
+    """真导入一遍依赖，返回可用性、版本与耗时。
+
+    `find_spec` 只能证明「文件在」，证明不了「import 得动」——torch 这类包
+    会因为 DLL、ABI、Python 版本不匹配而装上却用不了。这里用子进程隔离，
+    导入崩溃不会带崩 CLI，也能给出真实的冷启动耗时（写进论文的「环境」一节）。
+    """
+    import subprocess
+    import sys
+    import time
+
+    out = {}
+    for d in deps:
+        t0 = time.time()
+        code = (f"import json, {d} as m; "
+                f"print(json.dumps({{'v': str(getattr(m, '__version__', 'unknown'))}}))")
+        try:
+            p = subprocess.run([sys.executable, "-c", code],
+                               capture_output=True, text=True, timeout=timeout)
+            dt = round(time.time() - t0, 2)
+            if p.returncode == 0:
+                tail = (p.stdout or "").strip().splitlines()
+                ver = ""
+                if tail:
+                    try:
+                        ver = json.loads(tail[-1]).get("v", "")
+                    except Exception:
+                        ver = tail[-1][:40]
+                out[d] = {"ok": True, "s": dt, "version": ver}
+            else:
+                err = ((p.stderr or "").strip().splitlines() or ["import 失败"])[-1]
+                out[d] = {"ok": False, "s": dt, "error": err[:160]}
+        except subprocess.TimeoutExpired:
+            out[d] = {"ok": False, "s": round(time.time() - t0, 1),
+                      "error": f"导入超时（>{timeout:.0f}s）"}
+        except Exception as e:  # noqa: BLE001
+            out[d] = {"ok": False, "s": round(time.time() - t0, 1), "error": str(e)[:160]}
+    return out
+
 
 
 def gaps() -> list[dict]:

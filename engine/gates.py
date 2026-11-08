@@ -134,6 +134,19 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
         if d.get("llm_written") is False:
             return fail("llm_written=False（走了确定性模板骨架）")
         if d.get("llm_written") is None:
+            # 兼容旧目录：DELIVERY_STATUS 可能没记 llm_written，但生成器会单独写
+            # 06_paper/WRITE_STATUS.json（含 llm_sections），以该文件为准。
+            ws = out / "06_paper" / "WRITE_STATUS.json"
+            if ws.exists():
+                try:
+                    w = json.loads(ws.read_text(encoding="utf-8"))
+                except Exception:
+                    w = None
+                if isinstance(w, dict) and w.get("llm_written") is not None:
+                    if w.get("llm_written") is False:
+                        return fail("WRITE_STATUS.llm_written=False（走了确定性模板骨架）")
+                    return pass_(f"WRITE_STATUS 记录模型参与写作，"
+                                 f"llm_sections={len(w.get('llm_sections') or [])} 节")
             return unknown("DELIVERY_STATUS 未记录 llm_written，模型参与情况未验证")
         return pass_(f"deliverable=true，llm_written={d.get('llm_written')}，"
                      f"汉字 {d.get('chinese_chars')}")

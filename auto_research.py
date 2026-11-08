@@ -146,6 +146,16 @@ def mark_delivery(out_dir, llm_written=None) -> dict:
     """
     out_dir = Path(out_dir)
     md = out_dir / "06_paper" / "paper_full.md"
+    # 生成器单独落盘的写作参与证据（比 stdout 反解可靠）；调用方没显式传值时就地补读。
+    _wstat: dict = {}
+    _ws_path = out_dir / "06_paper" / "WRITE_STATUS.json"
+    if _ws_path.exists():
+        try:
+            _wstat = json.loads(_ws_path.read_text(encoding="utf-8"))
+        except Exception:
+            _wstat = {}
+    if llm_written is None and _wstat.get("llm_written") is not None:
+        llm_written = _wstat.get("llm_written")
     n_chars = 0
     if md.exists():
         n_chars = len(re.findall(r"[\u4e00-\u9fff]", md.read_text(encoding="utf-8")))
@@ -160,6 +170,8 @@ def mark_delivery(out_dir, llm_written=None) -> dict:
     status = {
         "deliverable": not degraded,
         "llm_written": llm_written,
+        "llm_sections": _wstat.get("llm_sections") or [],
+        "write_model": _wstat.get("model") or "",
         "chinese_chars": n_chars,
         "reasons": reasons,
         "hint": ("可交付" if not degraded else
@@ -438,15 +450,23 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                     _n = FB.record_eval_verdict(_verdict, str(out_dir), _topic0)
                     if _n:
                         print(f"[反馈台账] 已记录 {_n} 条评审意见 → memory/feedback.jsonl")
+                    # 销账：同题以前留下的问题，在这一轮过了硬门且零幻觉之后才算真修好。
+                    _lj0 = _verdict.get("llm_judge") or {}
+                    if (_verdict.get("gate") == "hard_pass"
+                            and not (_lj0.get("hallucinations") or [])):
+                        _closed = FB.close_for_topic(
+                            _topic0, str(out_dir),
+                            reason="同题后续运行 hard_pass 且幻觉为 0")
+                        if _closed:
+                            print(f"[反馈台账] 同题历史问题已销账 {_closed} 条")
                 except Exception as e:  # noqa: BLE001
                     print(f"[反馈台账] 记录跳过：{e}")
             if _rounds:
                 try:
                     (out_dir / "06_paper" / "REVIEW_ROUNDS.json").write_text(json.dumps({
-                        "rounds": _rounds, "best": _best, "last_round": _last_round,
-                        "note": "paper_full.docx 由最后一轮写作生成；若最优不是最后一轮，"
-                                "paper_full.md 与 07_eval_verdict.json 已回滚到最优轮，"
-                                "需重跑 step write 才能同步 docx。",
+                        "rounds": _rounds,                         "best": _best, "last_round": _last_round,
+                        "note": "若最优不是最后一轮，paper_full.md、07_eval_verdict.json 与 "
+                                "paper_full.docx 均已回滚并重转到最优轮，三者同源。",
                     }, ensure_ascii=False, indent=2), encoding="utf-8")
                 except Exception:
                     pass
@@ -458,8 +478,16 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         _vb = out_dir / "06_paper" / f"07_eval_verdict_round{_best['round']}.json"
                         if _vb.exists():
                             shutil.copy2(_vb, out_dir / "06_paper" / "07_eval_verdict.json")
-                        print(f"[EvalAgent] 已回滚到最优第 {_best['round']} 轮稿件与对应评审结论"
-                              f"（docx 仍为第 {_last_round} 轮，需重转换）")
+                        print(f"[EvalAgent] 已回滚到最优第 {_best['round']} 轮稿件与对应评审结论")
+                        # Word 必须与回滚后的正文同源：此前只回滚 md，用户下载到的
+                        # docx 仍是较差那一轮，等于「正文 80 分、附件 76 分」。
+                        try:
+                            from paper.generate_paper import md_to_docx as _rebuild
+                            _rebuild(_md.read_text(encoding="utf-8"),
+                                     out_dir / "06_paper" / "paper_full.docx", out_dir)
+                            print("[EvalAgent] 已按最优轮正文重转 paper_full.docx")
+                        except Exception as _de:  # noqa: BLE001
+                            print(f"[EvalAgent] docx 重转失败（正文已回滚）：{_de}")
                     except Exception as e:  # noqa: BLE001
                         print(f"[EvalAgent] 回滚失败（保留最后一轮稿件）：{e}")
         except Exception as e:  # noqa: BLE001
@@ -604,14 +632,50 @@ def cmd_plan(args) -> int:
             data_override["na_values"] = args.na_values
     elif args.dataset:
         data_override = {"source": "sklearn", "name": args.dataset}
+    elif getattr(args, "catalog_key", ""):
+        try:
+            from engine.topic_parser import DATASET_CATALOG, _data_binding as _bind
+            _ds = next((x for x in DATASET_CATALOG
+                        if x.get("key") == args.catalog_key), None)
+        except Exception as e:  # noqa: BLE001
+            print(f"[error] 无法读取数据集目录：{e}")
+            return 1
+        if _ds is None:
+            print(f"[error] 数据集目录里没有 key={args.catalog_key}")
+            return 1
+        data_override = _bind(_ds)
+        print(f"[catalog] 绑定本地数据集：{_ds['label']}（source={_ds['source']}）")
 
-    # 2) Planner 出 spec
+    # 2) Planner 出 spec（题目匹配到本地数据集目录时，走确定性快路径，可复现且
+    #    能正确识别分类/回归/聚类/关联规则等任务类型，不依赖 LLM Planner 猜测）
     client, model, extra = planner.llm_client()
     if client is None:
         print("[warn] 未检测到 API Key（.env 中 OPENAI_API_KEY），使用模板 spec 降级运行。")
-    dataset_meta = _dataset_meta(data_override)
-    pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
-    spec = pa.run(args.topic, client, model, extra, data_override, dataset_meta=dataset_meta)
+    spec = None
+    if data_override is None:
+        try:
+            from engine.topic_parser import match_dataset as _match_ds, assemble_title_spec as _ats
+            if _match_ds(args.topic) is not None:
+                spec = _ats(args.topic)
+                print("[plan·确定性] 题目匹配本地数据集目录，使用可复现 spec（无需 LLM Planner）")
+        except Exception:
+            spec = None
+    if spec is None and data_override is not None:
+        # 用户自带数据时，若题目点名关联规则等新类型，仍用确定性解析确定任务类型；
+        # 图 / 时序等非表格源同样必须走确定性路径，否则 LLM Planner 会把它们
+        # 当成普通 sklearn 数据集，绑定出来的 spec 根本加载不了。
+        try:
+            from engine.topic_parser import detect_task_type as _dtt, assemble_title_spec as _ats
+            if (_dtt(args.topic) == "association"
+                    or data_override.get("source") in ("graph", "timeseries", "association")):
+                spec = _ats(args.topic, data_override=data_override)
+                print("[plan·确定性] 自带/目录数据 + 非表格任务，使用可复现 spec")
+        except Exception:
+            spec = None
+    if spec is None:
+        dataset_meta = _dataset_meta(data_override)
+        pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
+        spec = pa.run(args.topic, client, model, extra, data_override, dataset_meta=dataset_meta)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task_spec.json").write_text(
@@ -948,6 +1012,15 @@ def cmd_backends(args) -> int:
               f"｜需新评估分支={g['new_branch']}")
         print(f"      {g['how']}")
         print(f"      依赖状态 {g['dep_status']}；{g['extra']}")
+    if args.probe:
+        deps = sorted({d for s in BC.specs() for d in s.deps}
+                      | {d for g in BC.GAPS for d in g["deps"]})
+        print("\n=== 依赖真导入（子进程，含冷启动耗时） ===")
+        for name, r in BC.probe(deps).items():
+            if r.get("ok"):
+                print(f"  {name:14s} ok   {r['s']:6.2f}s  version={r.get('version') or '?'}")
+            else:
+                print(f"  {name:14s} FAIL {r['s']:6.2f}s  {r.get('error')}")
     if args.check:
         ok, issues = BC.validate_file(args.check)
         print(f"\n=== 契约校验 {args.check}：{'通过' if ok else '未通过'} ===")
@@ -1207,6 +1280,8 @@ def main() -> int:
     pp.add_argument("--topic", required=True, help="自然语言研究主题")
     pp.add_argument("--out", default="out_plan", help="产物输出目录")
     pp.add_argument("--dataset", default="", help="指定内置 sklearn 数据集名（覆盖 Planner 选择）")
+    pp.add_argument("--catalog-key", default="",
+                    help="按 DATASET_CATALOG 的 key 绑定本地数据集（图/时序/关联规则等非 sklearn 源用这个）")
     pp.add_argument("--data", default="", help="自带 CSV 路径（与 --target 配合）")
     pp.add_argument("--url", default="", help="公开数据集网址（CSV/XLSX，与 --target 配合）")
     pp.add_argument("--target", default="", help="CSV 中目标列名或列索引")
@@ -1307,6 +1382,8 @@ def main() -> int:
 
     bp = sub.add_parser("backends", help="领域后端：接线点、依赖状态、缺口优先级与产物契约自检")
     bp.add_argument("--check", default="", help="校验某个 03_experiment.json 是否满足事实契约")
+    bp.add_argument("--probe", action="store_true",
+                    help="真导入一遍依赖并计时（find_spec 只查得到文件，查不到能不能用）")
     bp.set_defaults(func=cmd_backends)
 
     dp = sub.add_parser("datasets", help="列出当前可直接跑通的数据集目录（题目匹配用的白名单）")

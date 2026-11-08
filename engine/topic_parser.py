@@ -134,6 +134,10 @@ _DEFAULT_METHODS = {
     "classification": ["rf", "mlp", "lr", "svm", "knn", "gb"],
     "regression": ["rf", "mlp", "lr", "svm", "knn", "gb"],
     "clustering": ["kmeans", "agglomerative"],
+    "association": ["apriori"],
+    # 图节点特征高达 1433 维且稀疏，只放在本数据上跑得动、语义也合适的方法：
+    # 线性模型 / 朴素贝叶斯 / 决策树 / KNN。SVC-RBF 在这里是 O(n²)，不做。
+    "graph": ["lr", "nb", "dt", "knn"],
 }
 
 
@@ -167,6 +171,47 @@ DATASET_CATALOG = [
         "desc_cn": "翼型气动噪声预测",
         "target_cn": "声压级（分贝）",
         "n": 1503, "feat": 5,
+    },
+    {
+        "key": "concrete",
+        "label": "UCI 混凝土抗压强度数据集",
+        "source": "csv",
+        "path": str(DATA_DIR / "concrete_strength.csv"),
+        "target": "strength_mpa",
+        "task": "regression",
+        "domain_kw": ["混凝土", "抗压", "水泥", "复合材料", "concrete", "compressive",
+                      "配合比", "粉煤灰", "矿渣"],
+        "lit_query": "concrete compressive strength prediction machine learning mixture design regression",
+        "desc_cn": "混凝土抗压强度预测",
+        "target_cn": "28 天抗压强度（MPa）",
+        "n": 1030, "feat": 8,
+        # 复合材料题要的是「等效弹性性能」，这里是抗压强度：同属复合材料力学性能，
+        # 但不是同一个目标量，必须标 proxy，不许冒充同领域数据。
+        "proxy": True,
+        "proxy_note": "建模能力基准：UCI 混凝土抗压强度（1030 组配合比），不是等效弹性模量；"
+                      "真正的复合材料弹性数据需用户自传",
+    },
+    {
+        "key": "cora",
+        "label": "Cora 引文网络数据集（LINQS / Planetoid）",
+        "source": "graph",
+        "format": "linqs",
+        "nodes": str(DATA_DIR / "cora.content"),
+        "edges": str(DATA_DIR / "cora.cites"),
+        "target": "label",
+        "task": "classification",
+        "modality": "graph",
+        "methods": ["lr", "nb", "dt", "knn"],
+        "n_splits": 5,
+        "domain_kw": ["引文", "文献引用", "论文分类", "图结构", "节点分类", "社交网络",
+                      "过平滑", "图神经", "网络结构", "cora", "graph", "gnn", "citation"],
+        "lit_query": "graph node classification citation network Cora neighbor features transductive leakage",
+        "desc_cn": "引文网络论文主题节点分类",
+        "target_cn": "论文所属研究领域（7 类）",
+        "n": 2708, "feat": 1433,
+        "proxy": True,
+        "proxy_note": "Cora 是真实引文网络，但题目若指向社交网络推荐或 GNN 过平滑，"
+                      "它是代理数据；且本后端是一跳邻居特征加表格分类器，不是图神经网络",
     },
     {
         "key": "iris",
@@ -372,6 +417,23 @@ DATASET_CATALOG = [
         "target_cn": "簇划分（真实品种标签仅用于外部评估）",
         "n": 150, "feat": 4,
     },
+    {
+        "key": "market_basket",
+        "label": "超市购物篮交易数据集（关联规则挖掘）",
+        "source": "association",
+        "path": str(DATA_DIR / "market_basket.csv"),
+        "target": None,
+        "task": "association",
+        "modality": "transactions",
+        "domain_kw": ["购物篮", "超市", "零售", "卖场", "便利店", "关联规则", "商品",
+                      "共现", "篮", "market basket", "apriori", "关联分析"],
+        "min_support": 0.02,
+        "min_confidence": 0.3,
+        "lit_query": "association rule mining market basket analysis apriori frequent itemsets retail",
+        "desc_cn": "超市购物篮商品共现分析",
+        "target_cn": "商品购买共现关系",
+        "n": None, "feat": None,
+    },
 ]
 
 
@@ -418,6 +480,11 @@ def detect_task_type(title: str, direction: str = "", matched_task: str = None) 
     if matched_task:
         return matched_task
     t = _norm(title + " " + direction)
+    # 关联规则优先（最特异，避免被分类/回归误吞）
+    if any(k in t for k in ["关联规则", "关联分析", "关联挖掘", "购物篮", "篮分析",
+                            "apriori", "频繁项集", "共现", "共现分析", "共现规则",
+                            "market basket", "association rule", "购物篮分析"]):
+        return "association"
     # 聚类优先（最特异）
     if any(k in t for k in ["聚类", "分群", "簇", "无监督", "k-means", "kmeans", "cluster"]):
         return "clustering"
@@ -477,23 +544,37 @@ def match_dataset(title: str, direction: str = "", task_type: str = None) -> dic
     return best if best_score > 0 else None
 
 
-def build_candidate_methods(task_type: str, method_hints: list[str]) -> list[dict]:
+def build_candidate_methods(task_type: str, method_hints: list[str],
+                            method_keys: list[str] | None = None) -> list[dict]:
     """把方法 key 列表转成 run_task 兼容的 candidate_methods（含中文名/估算器/超参）。
 
     规则：题目指定的方法作为主方法排在最前；始终补齐基线方法，形成 ≥4 个的
     可对比模型集合（统一基准对比 + 融合集成方法贡献都依赖「多个候选方法」）。
     聚类走单独的内置方法名（引擎聚类分支直接识别 kmeans/agglomerative）。
+
+    method_keys：数据集目录指定的方法白名单（如图节点分类的高维稀疏特征
+    只适合 lr/nb/dt/knn）。题目点名的方法只有在白名单里才会保留，避免
+    「题目写了 SVM，引擎却要跑一个 O(n²) 的核」这种错配。
     """
     if task_type == "clustering":
         return [{"name": "K均值", "estimator": "kmeans"},
                 {"name": "层次聚类", "estimator": "agglomerative"}]
-    keys: list[str] = list(method_hints) if method_hints else []
-    # 补齐基线，封顶 6 个，保证有对照且能构造融合集成
-    for k in _DEFAULT_METHODS.get(task_type, []):
-        if len(keys) >= 6:
-            break
-        if k not in keys:
-            keys.append(k)
+    if task_type == "association":
+        return [{"name": "Apriori 关联规则", "estimator": "apriori",
+                 "params": {"min_support": 0.02, "min_confidence": 0.3}}]
+    if method_keys is None:
+        keys: list[str] = list(method_hints) if method_hints else []
+        # 补齐基线，封顶 6 个，保证有对照且能构造融合集成
+        for k in _DEFAULT_METHODS.get(task_type, []):
+            if len(keys) >= 6:
+                break
+            if k not in keys:
+                keys.append(k)
+    else:
+        keys = [k for k in (method_hints or []) if k in method_keys]
+        for k in method_keys:
+            if k not in keys:
+                keys.append(k)
     out = []
     seen_est: set[str] = set()
     is_reg = (task_type == "regression")
@@ -515,6 +596,11 @@ def _data_binding(ds: dict) -> dict:
     # 避免新数据源在正文里退化成「指定数据集」这类占位词。
     meta = {"label": ds.get("label"), "desc_cn": ds.get("desc_cn"),
             "target_cn": ds.get("target_cn"), "modality": ds.get("modality", "tabular")}
+    # 代理数据必须把「不是题目所指的领域数据」这个事实带进 spec，
+    # 否则论文正文会拿抗压强度冒充弹性模量，评审官也无从判断。
+    if ds.get("proxy"):
+        meta["proxy"] = True
+        meta["proxy_note"] = ds.get("proxy_note", "")
     if ds["source"] == "csv":
         return {"source": "csv", "path": ds["path"], "target": ds["target"], **meta}
     if ds["source"] == "sklearn":
@@ -528,6 +614,15 @@ def _data_binding(ds: dict) -> dict:
         return {"source": "timeseries", "path": ds["path"], "url": ds.get("url"),
                 "time_col": ds.get("time_col"), "value_col": ds.get("value_col"),
                 "lags": ds.get("lags", 7), **meta}
+    if ds["source"] == "association":
+        return {"source": "association", "path": ds["path"],
+                "min_support": ds.get("min_support", 0.02),
+                "min_confidence": ds.get("min_confidence", 0.3), **meta}
+    if ds["source"] == "graph":
+        return {"source": "graph", "nodes": ds["nodes"], "edges": ds["edges"],
+                "format": ds.get("format", "linqs"), "target": ds.get("target", "label"),
+                "methods": list(ds.get("methods") or []),
+                "n_splits": int(ds.get("n_splits", 5)), **meta}
     raise ValueError(f"未知数据源：{ds['source']}")
 
 
@@ -554,14 +649,34 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
     hints, unsupported = extract_method_hints(title, direction)
     if method_hints:  # 显式覆盖
         hints = [h for h in method_hints if h in _METHOD_DEFS]
-    candidate_methods = build_candidate_methods(task_type, hints)
+    _is_graph = (bool(matched and matched.get("source") == "graph")
+                 or (data_override or {}).get("source") == "graph")
+    _graph_keys = ((matched.get("methods") if _is_graph and matched else None)
+                   or ((data_override or {}).get("methods") if _is_graph else None))
+    candidate_methods = build_candidate_methods(
+        task_type, hints, method_keys=_graph_keys)
 
     # 3) 数据集绑定
     if data_override:
         data = data_override
+        # 与自动匹配走同一条「代理标记按题目纠正」逻辑，避免自带数据被
+        # 无条件写成「代理数据」。
+        if _is_graph and any(k in (title + " " + direction).lower()
+                             for k in ("引文", "citation", "论文分类", "cora", "节点分类")):
+            data = dict(data)
+            data.pop("proxy", None)
+            data.pop("proxy_note", None)
         match_note = "使用用户自带/指定数据集"
     elif matched:
         data = _data_binding(matched)
+        # 代理标记按题目判定：Cora 对「社交网络推荐 / GNN 过平滑」是代理数据，
+        # 但对「引文网络节点分类」就是题目所指的真实数据。目录里的 proxy 是
+        # 给题库验收用的保守默认，成文时必须按具体题目纠正，否则正文会
+        # 对着真实数据写「这是代理数据」，反而变成一句假话。
+        if _is_graph and any(k in (title + " " + direction).lower()
+                             for k in ("引文", "citation", "论文分类", "cora", "节点分类")):
+            data.pop("proxy", None)
+            data.pop("proxy_note", None)
         _n, _f = matched.get("n"), matched.get("feat")
         _scale = (f"{_n}样本/{_f}特征" if (_n and _f)
                   else f"OpenML data_id={matched.get('dataset_id')}" if matched.get("source") == "openml"
@@ -572,7 +687,8 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         match_note = "未匹配到本地数据集，请用 --data/--dataset 指定，或扩充 DATASET_CATALOG"
 
     # 4) 指标与优化方向
-    metric_map = {"classification": "accuracy", "regression": "r2", "clustering": "ari"}
+    metric_map = {"classification": "accuracy", "regression": "r2", "clustering": "ari",
+                  "association": "lift"}
     metric = metric_map.get(task_type, "accuracy")
     objective = "maximize"
 
@@ -589,6 +705,28 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         f"假设：集成类方法（如随机森林、梯度提升树）能通过降低方差提升预测稳定性，"
         f"其表现优于单一线性或核方法，且该结论在多种子评估下保持稳健。"
     )
+    if task_type == "association":
+        research_question = (
+            f"在{desc}中，哪些商品（项）之间存在显著的共现购买关系？"
+            f"基于支持度、置信度与提升度（lift）的关联规则，能否识别出可解释、"
+            f"可落地的的高价值商品组合，为商品陈列与捆绑促销提供依据？"
+        )
+        hypothesis_statement = (
+            f"假设：部分商品对之间存在强共现（提升度 lift>1），"
+            f"且 Apriori 算法在最小支持度/置信度约束下挖掘出的高提升度规则，"
+            f"能够稳定揭示真实的商品关联结构。"
+        )
+    if _is_graph:
+        research_question = (
+            f"在{desc}任务中，把引用拓扑压缩为「一跳邻居特征均值」能否提升节点分类准确率？"
+            f"这种增益在多大程度上来自真实的结构信息，在多大程度上来自"
+            f"「划分前使用全图特征」带来的传导泄漏？"
+        )
+        hypothesis_statement = (
+            f"假设：包含一跳邻居均值的特征协议在节点级分层交叉验证下优于仅用节点自身"
+            f"词袋特征的协议；但全图协议与折内协议之间的差距可度量传导泄漏的影响，"
+            f"因此只有折内协议的性能增益能作为结构信息有效的可靠证据。"
+        )
 
     lit_query = (ds_for_meta["lit_query"] if ds_for_meta
                  else (direction or title))
@@ -608,7 +746,9 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         "_unsupported_methods": unsupported,
         # 忠实选题：是否需要方法贡献。由题目语义决定，run_task 据此决定是否注入融合集成。
         # True=需要（题目要改进/融合/提出）；False=忠实复现（题目基于某方法做研究/对比）。
-        "_needs_contribution": detect_contribution_intent(title, direction),
+        # 图节点分类走独立评估分支，不构造融合集成，否则正文会声称一个根本没跑过的方法。
+        "_needs_contribution": (False if _is_graph
+                                else detect_contribution_intent(title, direction)),
     }
     return spec
 

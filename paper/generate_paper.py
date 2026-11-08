@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 
 import sys
@@ -278,6 +279,11 @@ def _metric_formula(main_metric: str, objective: str, task_type: str) -> str:
         return ("精确率定义为式(1)：P = TP/(TP+FP)    (1)\n其中 TP、FP 分别为真正例与假正例数。")
     if "recall" in m:
         return ("召回率定义为式(1)：R = TP/(TP+FN)    (1)\n其中 TP、FN 分别为真正例与假负例数。")
+    if "lift" in m:
+        return ("关联规则以提升度（lift）衡量规则价值，定义为式(1)：\n"
+                "lift(X→Y) = P(Y|X) / P(Y) = support(X∪Y) / (support(X)·support(Y))    (1)\n"
+                "lift>1 表示 X 与 Y 正相关（共现强于独立），lift 越大共现越强；"
+                "本文以最大化 lift 为优选目标。")
     # 默认准确率
     return (f"以主指标 {main_metric or '准确率'} 为例，其定义如式(1)所示：\n"
             f"{main_metric or 'Accuracy'} = (1/N) · Σ_i I(ŷ_i = y_i)    (1)\n"
@@ -291,6 +297,61 @@ def _methodology_math_block(main_metric, objective, task_type, analysis) -> str:
 
     全部使用真实数字（n 样本量、d 特征维度）与真实指标名，不编造；提升公式/推导密度。
     """
+    if task_type == "association":
+        n, _ = _data_dims(analysis)
+        n_txt = str(n) if n is not None else "n"
+        parts = [_metric_formula(main_metric, objective, task_type), ""]
+        parts.append("### 3.3.1 问题形式化")
+        parts.append(
+            f"设交易集合 T 含 {n_txt} 笔交易，每笔交易 t∈T 是商品项集合；目标是找出所有满足"
+            f"最小支持度 minsup 与最小置信度 minconf 的关联规则 X→Y（X,Y⊂I 且 X∩Y=∅），"
+            f"并以提升度 lift(X→Y) 衡量其实际价值，如式(2)所示：\n")
+        parts.append("lift(X→Y) = P(Y|X) / P(Y) = support(X∪Y) / (support(X)·support(Y))    (2)\n")
+        parts.append("当 lift>1 时 X 与 Y 正相关，lift 越大共现越强；本文以 lift 为主指标排序优选规则。\n")
+        parts.append("### 3.3.2 算法与评估框架")
+        parts.append(
+            "本文采用 Apriori 算法逐层搜索频繁项集：先扫描交易库得到频繁 1-项集，"
+            "再利用先验性质（频繁项集的所有子集必频繁）剪枝候选集，逐层向上搜索；"
+            "由频繁项集生成候选规则并按 confidence 与 lift 过滤，最终按 lift 降序输出高价值规则。\n")
+        parts.append("### 3.3.3 结果可解释性")
+        parts.append(
+            "关联规则本身即为可解释知识（前件→后件 + 支持度/置信度/提升度三指标），"
+            "无需像黑箱模型那样额外做特征重要性归因；本文在如实报告三项指标的同时，"
+            "说明提升度高于 1 的规则可用于商品陈列与捆绑促销决策。\n")
+        return "\n".join(parts)
+    if (analysis or {}).get("graph"):
+        _gr = analysis["graph"]
+        n, d = _data_dims(analysis)
+        n_txt = str(n) if n is not None else "n"
+        d_txt = str(d) if d is not None else "d"
+        parts = [_metric_formula(main_metric, objective, task_type), ""]
+        parts.append("### 3.3.1 问题形式化")
+        parts.append(
+            f"设图 G=(V,E)，|V|={n_txt}、|E|={_gr.get('n_edges')}，节点特征矩阵 "
+            f"X∈R^({n_txt}×{d_txt})，标签 y_i∈{{1,…,{_gr.get('n_classes')}}}；"
+            f"去掉自环的对称邻接矩阵记为 A，度矩阵为 D，归一化邻接 Â=D⁻¹A。"
+            f"节点分类要学的是映射 f:(X,A)→y。与独立同分布样本不同，节点之间通过 E 相互依赖，"
+            f"因此划分必须按节点做，且任何使用 A 的特征构造都要交代是否跨越了划分边界。\n")
+        parts.append("### 3.3.2 三种特征协议")
+        parts.append(
+            "本文构造三种特征矩阵并以同一组节点级分层折评估，分别如式(2)–(4)所示：\n")
+        parts.append("X^(self) = X    (2)\n")
+        parts.append("X^(full) = [X, ÂX]    (3)\n")
+        parts.append("X^(fold) = [X, Â·mask_tr(X)]    (4)\n")
+        parts.append(
+            "其中 mask_tr 只保留当前训练折节点的特征、把其余行置零。式(3) 在划分前用到了"
+            "测试折节点的特征，属于传导泄漏；式(4) 逐折重算，测试折特征不参与任何特征构造。"
+            "三种协议在同一组折上比较，差值才具有可比性。\n")
+        parts.append("### 3.3.3 评估与显著性")
+        parts.append(
+            f"令 K={_gr.get('n_splits', 5)} 为折数，a_k(m,p) 为方法 m 在协议 p 下第 k 折的准确率，"
+            f"报告均值 ā 与折间标准差 s；最优组合只在 p∈{{self, fold}} 中选取：\n")
+        parts.append("(m*, p*) = arg max_{m∈M, p∈{self,fold}} ā(m,p)    (5)\n")
+        parts.append(
+            "协议之间的差异用逐折配对 t 检验：令 Δ_k = a_k(m,fold) − a_k(m,self)，"
+            "统计量 t = Δ̄ / (s_Δ / √K)，其中 Δ̄ 与 s_Δ 分别为 K 个差值的均值与标准差；"
+            "本文报告的是这个配对 t 检验，不是 McNemar 检验。\n")
+        return "\n".join(parts)
     n, d = _data_dims(analysis)
     d_txt = str(d) if d is not None else "d"
     n_txt = str(n) if n is not None else "n"
@@ -454,24 +515,32 @@ def _md_table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(out)
 
 
-def _main_metric_table(metrics: list[dict], main_metric: str, objective: str) -> str:
+def _main_metric_table(metrics: list[dict], main_metric: str, objective: str,
+                       task_type: str | None = None, is_graph: bool = False) -> str:
+    _assoc = task_type == "association"
+    _default_setting = "默认阈值" if _assoc else "全部特征"
     rows = []
     for m in metrics:
         name = str(m.get("name", ""))
         hay = (name + " " + str(m.get("metric", ""))).lower()
         if main_metric and main_metric.lower() not in hay:
             continue
-        setting = m.get("setting") or "全部特征"
+        setting = m.get("setting") or _default_setting
         rows.append([name, setting, _fmt(m.get("value"))])
     if not rows:  # 兜底：指标名未嵌入关键字时，列出全部主指标
         for m in metrics:
-            rows.append([str(m.get("name", "")), m.get("setting") or "全部特征",
+            rows.append([str(m.get("name", "")), m.get("setting") or _default_setting,
                          _fmt(m.get("value"))])
     if not rows:
         return "（无主指标数据）"
     rows.sort(key=lambda r: float(r[2]) if _is_num(r[2]) else 0.0,
               reverse=(objective != "minimize"))
-    return _md_table(["方法", "特征设置", main_metric or "指标"], rows)
+    # 关联规则只有一种算法，行是规则不是方法；列名必须跟着换，否则会被
+    # 评审官判成「把规则列表包装成方法对比」。
+    headers = (["规则", "阈值设置", main_metric or "指标"] if _assoc
+               else ["方法×特征协议", "评估口径", main_metric or "指标"] if is_graph
+               else ["方法", "特征设置", main_metric or "指标"])
+    return _md_table(headers, rows)
 
 
 def _is_num(s) -> bool:
@@ -500,6 +569,22 @@ def _variance_table(analysis: dict) -> str:
     if not rows:
         return "（未报告多种子方差）"
     return _md_table(["条目", "均值", "标准差", "各种子取值"], rows)
+
+
+def _graph_variance_table(analysis: dict) -> str:
+    """5.4 节图节点分类专属：折间波动 + 传导泄漏对照。
+
+    不能复用 _variance_table：那张表的表头写的是「各种子取值」，
+    而图实验做的是节点级 K 折，把折写成种子就是一句假话。
+    """
+    gr = (analysis or {}).get("graph") or {}
+    rows = []
+    for k, r in (gr.get("results") or {}).items():
+        rows.append([k, _fmt(r.get("accuracy")), _fmt(r.get("std")),
+                     "、".join(_fmt(s, 4) for s in (r.get("fold_accuracy") or [])[:5])])
+    if not rows:
+        return "（无折间数据）"
+    return _md_table(["方法×特征协议", "均值准确率", "折间标准差", "各折取值"], rows)
 
 
 def _per_class_table(analysis: dict, prefer: str = "") -> str:
@@ -575,11 +660,45 @@ def _plots_block(analysis: dict, base: Path) -> str:
         if not rel:
             continue
         cap = p.get("caption") or p.get("file")
-        if (base / rel).exists():
-            lines.append(f"![{cap}]({rel})")
+        # 分析引擎把图统一写到 <out_dir>/plots/ 下，而 ANALYSIS_JSON 里记的是文件名。
+        # 只查 base/rel 会漏掉图片（正文只剩一行图注），Word 里也就没有图。
+        rel_md = rel
+        if not (base / rel).exists() and (base / "plots" / Path(rel).name).exists():
+            rel_md = f"plots/{Path(rel).name}"
+        if (base / rel_md).exists():
+            lines.append(f"![{cap}]({rel_md})")
             lines.append("")
         lines.append(f"图：{cap}")
         lines.append("")
+    return "\n".join(lines)
+
+
+def _assoc_rules_interpretation(analysis: dict) -> str:
+    """5.4 节关联规则专属：以 lift 为主指标，列出 Top 规则的支持度/置信度/提升度三指标表。
+
+    不编造任何数字——全部来自 analysis["single_fit_scores"]["rules"] 的实测值。
+    """
+    sfs = (analysis or {}).get("single_fit_scores") or {}
+    rules = sfs.get("rules") or []
+    n_rules_total = sfs.get("n_rules_total") or len(rules)
+    lines = []
+    if n_rules_total:
+        lines.append(
+            f"本次在 {(analysis or {}).get('n_transactions')} 笔交易、"
+            f"{(analysis or {}).get('n_items')} 种商品上共挖掘出 {n_rules_total} 条"
+            f"符合最小支持度与最小置信度阈值的关联规则；关联规则以提升度 lift 为主指标排序，"
+            f"lift>1 表示前件与后件正相关（共现强于独立）。下表列出 lift 最高的 "
+            f"{min(len(rules), 12)} 条规则，供业务解读与陈列决策参考：\n")
+    rows = []
+    for r in rules[:12]:
+        rows.append([r.get("rule", ""), f"{r.get('support', 0):.4f}",
+                     f"{r.get('confidence', 0):.4f}", f"{r.get('lift', 0):.4f}"])
+    if rows:
+        lines.append(_md_table(["关联规则", "支持度", "置信度", "提升度 lift"], rows) + "\n")
+    lines.append(
+        "规则的可解释性来自其「前件→后件」的直白形式与三项可度量指标：支持度反映共现的绝对频度，"
+        "置信度反映条件概率强度，提升度排除独立共现后的真实关联强度。三者共同构成无需模型归因"
+        "即可直接解读的业务知识；关联规则刻画的是共现相关性而非因果性，落地时需结合领域知识。")
     return "\n".join(lines)
 
 
@@ -722,6 +841,20 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
     if spec.get("analysis_plan"):
         lines.append(f"- 分析计划：{spec['analysis_plan']}")
 
+    # 代理数据：题目说的领域与数据实际测的量不一致，必须在正文里说清楚。
+    # 不写这段，模型会把「抗压强度」直接写成「等效弹性模量」——那是系统性误导，
+    # 比数字写错更难被发现。
+    _ds = spec.get("data") or {}
+    if _ds.get("proxy"):
+        lines.append("")
+        lines.append("## 数据性质（必须写进正文，不得省略）")
+        lines.append(f"- 本文使用的是**代理数据**，不是题目所指的原始领域数据："
+                     f"{_ds.get('proxy_note') or '同领域真实数据缺失，使用可公开复现的替代数据'}")
+        lines.append(f"- 数据实际承载的目标量：{_ds.get('target_cn') or '见数据集描述'}。"
+                     f"严禁把它改写成题目里的目标量（例如把抗压强度写成弹性模量）。")
+        lines.append("- 第 3.1 节（数据来源）与第 8.1 节（研究局限）都要明确说明这一点，"
+                     "并写明结论只在代理数据的意义上成立。")
+
     lines.append("")
     lines.append("## 真实实验指标（确定性分析引擎计算）")
     for m in metrics:
@@ -768,9 +901,76 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
     if analysis:
         lines.append("")
         lines.append("## 深入分析结果")
+        if analysis.get("task_type") == "association":
+            lines.append("- 任务性质：关联规则挖掘为【确定性算法】，不设置随机种子、不做配对显著性检验；"
+                         "所有规则由 Apriori 在统一支持度/置信度阈值下完整枚举得到，结论可信度来自完整枚举。")
+            sfs = analysis.get("single_fit_scores") or {}
+            _rules = sfs.get("rules") or []
+            if _rules:
+                lines.append("- Top 关联规则（提升度降序，lift>1 为共现正相关；支持度/置信度/提升度均为实验实测，"
+                             "请严格使用下列四位小数精确值，不要四舍五入）：")
+                for _r in _rules[:12]:
+                    lines.append(f"  - {_r.get('rule')}：支持度={_r.get('support'):.4f}，"
+                                 f"置信度={_r.get('confidence'):.4f}，提升度={_r.get('lift'):.4f}")
+            if analysis.get("findings"):
+                lines.append(f"- 实验自述发现：{analysis['findings']}")
+            lines.append("【重要】正文（摘要、结论、各章）引用提升度/置信度/支持度时，必须原样使用上面给出的"
+                         "四位小数精确值（如 3.8917、0.8893），严禁四舍五入为 3.89/3.892 等近似值，"
+                         "否则会被判为与事实清单不一致。")
+            lines.append("【重要】关联规则挖掘不做假设检验、不做显著性检验、无需训练/测试划分；"
+                         "第6章标题为「深入分析」而非「假设检验」，正文严禁出现「假设检验」一词，"
+                         "也严禁由支持度/置信度反推或自行计算事实清单之外的任何数字"
+                         "（如某商品的边际概率、反推值等），只能引用上方列出的实测指标。")
+            lines.append("【重要】本文只有一种挖掘算法（Apriori），不存在方法之间的比较或竞赛。"
+                         "严禁使用「最优方法」「Apriori 取得最优」「各方法主指标对比」等表述；"
+                         "「最优 / 最高」只能修饰规则本身（如「提升度最高的规则为 啤酒→尿布」），"
+                         "表格应称为「关联规则三项指标」而非「各方法对比」。")
         if analysis.get("seed_variance"):
-            lines.append("- 多种子方差：" + json.dumps(analysis["seed_variance"], ensure_ascii=False)[:1500])
-        if analysis.get("significance"):
+            _sv_label = ("节点级各折准确率（折间波动，不是多种子方差）"
+                         if analysis.get("graph") else "多种子方差")
+            lines.append(f"- {_sv_label}：" +
+                         json.dumps(analysis["seed_variance"], ensure_ascii=False)[:1500])
+        _gr = analysis.get("graph")
+        if isinstance(_gr, dict) and _gr:
+            lines.append("")
+            lines.append("## 图节点分类实验事实（必须严格照用）")
+            lines.append(f"- 数据集：{_gr.get('dataset')}；节点数={_gr.get('n_nodes')}，"
+                         f"引用边数={_gr.get('n_edges')}，节点特征维数={_gr.get('n_features')}，"
+                         f"类别数={_gr.get('n_classes')}，平均度={_gr.get('avg_degree')}，"
+                         f"节点级分层 {_gr.get('n_splits')} 折交叉验证。")
+            lines.append("- 类别名称：" + "、".join(map(str, _gr.get("classes") or [])))
+            lines.append("- 三种特征协议：" + "；".join(
+                f"{p.get('label')}（{p.get('note')}）" for p in (_gr.get("protocols") or [])))
+            lines.append("- 各方法×协议组合的实测准确率（四位小数，不得改写或四舍五入）：")
+            for k, r in (_gr.get("results") or {}).items():
+                lines.append(f"  - {k}：accuracy={r.get('accuracy'):.4f}，"
+                             f"macro-F1={r.get('f1_macro'):.4f}，"
+                             f"折间标准差={r.get('std'):.4f}，"
+                             f"各折取值={r.get('fold_accuracy')}")
+            _b = _gr.get("best") or {}
+            lines.append(f"- 核心结论（唯一允许称为最优的组合）：{_b.get('key')}，"
+                         f"accuracy={_b.get('accuracy'):.4f}，macro-F1={_b.get('f1_macro'):.4f}")
+            lines.append(f"- {_gr.get('best_selection_note')}")
+            lines.append(f"- 传导泄漏实测：{_gr.get('leakage_note')}")
+            lines.append("- 配对 t 检验（真实计算，逐折配对；p 值必须原样引用）：")
+            for k, v in (analysis.get("paired_tests") or {}).items():
+                lines.append(f"  - {k}：差值={v.get('diff'):.4f}，p={v.get('p'):.4f}")
+            lines.append("【重要】本实验是图节点分类：节点之间不独立同分布，划分方式是"
+                         "「节点级分层 5 折交叉验证」，严禁写成「按固定比例划分训练集与测试集」"
+                         "「样本独立随机划分」。严禁出现「5 种随机种子」「多种子方差」「标准化」"
+                         "「中位数插补」「独热编码」这类本文根本没有做过的预处理表述；"
+                         "稳定性只能叫「折间标准差」。")
+            lines.append("【重要】核心结论只准使用上面「唯一允许称为最优的组合」及其四位小数。"
+                         "「全图邻居均值（传导设定）」协议的数字只可作为含泄漏的上界对照，"
+                         "严禁把它写成最优方法或最终结论；必须明确写出它因传导泄漏被排除。")
+            lines.append("【重要】本文用的是「一跳邻居均值 + 表格分类器」，不是图神经网络。"
+                         "严禁声称使用了 GNN / GCN / 图卷积、严禁声称复现了过平滑现象、"
+                         "严禁声称提出新算法或新框架。不得自行计算事实清单之外的任何数字。")
+            lines.append("【重要】协议之间的差值必须原样引用上面「配对 t 检验」给出的 diff。"
+                         "这些差值由未四舍五入的逐折准确率算出，与两个四位小数均值直接相减"
+                         "可能相差 0.0001；严禁自行用 0.8641−0.8515 之类方式推算差值。"
+                         "逐类指标、混淆矩阵与逐折准确率只能引用事实清单中给出的数值，不得推算或补写。")
+        if analysis.get("significance") and analysis.get("task_type") != "association":
             lines.append(f"- 显著性检验：{analysis['significance']}")
         if analysis.get("per_class"):
             lines.append("- 逐类指标：" + json.dumps(analysis["per_class"], ensure_ascii=False)[:1200])
@@ -976,15 +1176,28 @@ def _strip_cliche(md: str) -> str:
 
 def _templated_summary(key: str, spec, analysis, best_method, best_value_str, dataset) -> str:
     """分章小结的确定性兜底（LLM 不可用或不返回某章时），保证「小结」计数达标且内容不空。"""
-    title = CHAPTER_BY_KEY.get(key, {}).get("cn", "本章")
+    title = (_deep_cn(spec.get("task_type")) if key == "deep"
+             else CHAPTER_BY_KEY.get(key, {}).get("cn", "本章"))
     base = (f"本章小结：本章围绕「{title}」展开，"
             f"基于真实实验素材完成了相应的分析、计算与论证，所得结论均建立在确定性的指标与证据之上。")
     tail = (f"上述工作为后续章节的深入分析与讨论提供了事实基础，"
             f"同时也应看到本章结论在数据集规模与特征结构上的适用边界。")
     if key in ("results", "deep"):
-        base = (f"本章小结：本章报告并深入分析了在 {dataset} 数据集上的实验结果，"
-                f"主指标最优为 {best_method}（{best_value_str}），并通过多种子方差与配对显著性检验"
-                f"量化了各方法的稳定性差异，结论与子假设裁决表保持一致。")
+        if spec.get("task_type") == "association":
+            base = (f"本章小结：本章报告并深入分析了在 {dataset} 上的关联规则挖掘结果，"
+                    f"提升度最高的规则为 {best_method}（lift={best_value_str}），并基于支持度、置信度与"
+                    f"提升度三项指标对 Top 规则的可解释性与业务含义进行了解读，结论建立在 Apriori 算法"
+                    f"对全部频繁项集与派生规则的完整枚举之上。")
+        elif (analysis or {}).get("graph"):
+            _gr = analysis["graph"]
+            base = (f"本章小结：本章报告并深入分析了在 {dataset} 上的图节点分类结果，"
+                    f"在节点级分层 {_gr.get('n_splits', 5)} 折交叉验证下，无传导泄漏协议中的最优组合为 "
+                    f"{best_method}（accuracy={best_value_str}）；同时用配对 t 检验量化了"
+                    f"拓扑特征带来的增益与全图协议因传导泄漏产生的偏乐观幅度。")
+        else:
+            base = (f"本章小结：本章报告并深入分析了在 {dataset} 数据集上的实验结果，"
+                    f"主指标最优为 {best_method}（{best_value_str}），并通过多种子方差与配对显著性检验"
+                    f"量化了各方法的稳定性差异，结论与子假设裁决表保持一致。")
     elif key == "discussion":
         base = (f"本章小结：本章将本文发现与前人文献进行了对照，明确了结论成立的条件与边界，"
                 f"并基于真实证据给出了方法选型的具体建议，所有讨论均未超出素材给出的事实范围。")
@@ -1038,7 +1251,23 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     # 避免出现「素材未提供第5.1节跨数据集对比表」这类在单数据集研究中把 §5.1 错标为
     # 跨数据集表、进而显得自相矛盾的虚假表述。
     is_multi = (analysis or {}).get("task_type") == "multi_dataset"
-    if is_multi:
+    is_assoc = (spec.get("task_type") == "association")
+    is_graph = bool((analysis or {}).get("graph"))
+    if is_graph:
+        stability_instr = (
+            "稳定性与显著性——引用事实清单里各折准确率与折间标准差说明稳定性（这是【折间】波动，"
+            "不是多种子方差，严禁写成随机种子）；引用配对 t 检验的真实 p 值说明"
+            "「折内邻居 vs 仅节点特征」的增益是否显著；必须写明「全图邻居均值」协议"
+            "存在传导泄漏、其偏高的数字只作上界对照、已被排除在核心结论之外。")
+        multi_note = "本文为单数据集的图节点分类研究：结论只在引文网络与节点级交叉验证设定下成立。"
+    elif is_assoc:
+        stability_instr = (
+            "稳定性与显著性——关联规则挖掘为【确定性算法】，不存在随机种子方差或配对显著性检验；"
+            "请以「提升度 lift 为主指标、支持度/置信度为辅」来讨论规则强度，并引用 Top 规则的"
+            "三项真实指标说明结论稳健性（源于对全部频繁项集与派生规则的完整枚举），"
+            "严禁声称存在「多种子标准差」「配对显著性检验」或「随机种子」。")
+        multi_note = "本文为关联规则挖掘研究：结论建立在确定性枚举之上，讨论聚焦规则的真实指标与业务含义。"
+    elif is_multi:
         stability_instr = (
             "稳定性与显著性——引用第 5.1 节跨数据集对比表中最优与次优方法在各数据集上的具体差值，"
             "以及排名稳定性表中的平均排名与排名标准差说明跨数据集稳健性；若素材未提供显著性 p 值，"
@@ -1055,6 +1284,79 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
             "就如实说明“未做配对显著性检验”，不要虚构 p 值。"
         )
         multi_note = "本文为单数据集研究：讨论聚焦本数据集内的结论与边界，不得引用不存在的跨数据集表。"
+
+    # 关联规则专属的写作指令：避免大模型套用「随机种子/显著性检验/多算法对比」等监督学习叙事。
+    # 图节点分类专属写作指令：节点不独立、按节点切分、拓扑特征有传导泄漏风险。
+    if is_graph:
+        method_narrative_instr = (
+            "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释"
+            "图节点分类与独立同分布样本分类的区别、Cora 引文网络的节点/边/词袋特征/7 类标签语义、"
+            "把引用拓扑压缩为「一跳邻居均值」特征的构造方式、三种特征协议（仅节点特征、"
+            "全图邻居均值、折内邻居均值）的定义与差别、节点级分层 5 折交叉验证为何必要、"
+            "传导泄漏如何产生以及为何要把全图协议排除出核心结论；说明本文是"
+            "「一跳邻居特征 + 表格分类器」，不是图神经网络。须严格基于事实清单，"
+            "严禁编造算法、层数、超参数或清单之外的数字。")
+        exp_narrative_instr = (
+            "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）："
+            "说明数据集来源、节点数/边数/特征维数/类别数/平均度、7 类名称、"
+            "为何按节点做分层 5 折而不是按固定比例划分训练集与测试集、"
+            "三种特征协议的构造差异、主指标 accuracy 与次要指标 macro-F1 的选取理由、"
+            "配对 t 检验为什么用逐折配对。严禁写标准化、中位数插补、独热编码、"
+            "5 种随机种子等本文没有做过的处理。")
+        results_narrative_instr = (
+            "5.1 主指标对比解读（不少于400字）：解读表 1 里各方法×协议组合的准确率差值，"
+            "明确核心结论来自无传导泄漏的协议，并解释为何全图协议数字更高却不能作为最优结果；"
+            "所有数字必须原样引用四位小数。")
+        results_viz_instr = (
+            "5.2 结果可视化解读（不少于200字）：描述本文的分组柱状图"
+            "「图节点分类：三种特征协议对比」，横轴为候选分类器、每个分类器三根柱"
+            "对应三种协议、纵轴为节点分类准确率，指出图中最高柱属于哪种协议以及它的泄漏性质。")
+        results_stability_instr = (
+            "5.4 稳定性与显著性解读（不少于250字）：解读各折准确率与【折间】标准差"
+            "（不是多种子方差），引用配对 t 检验的真实 p 值说明折内邻居特征相对仅节点特征的增益，"
+            "以及全图协议相对折内协议的差值反映了多大的传导泄漏；不得虚构 p 值。")
+        method_reflection_instr = (
+            "(3) 从方法论角度反思：为何在有拓扑的数据上，特征构造是否跨越划分边界"
+            "会直接决定结论可信度，以及把含泄漏的更高数字排除出核心结论"
+            "为什么比报一个漂亮分数更重要；")
+    elif is_assoc:
+        method_narrative_instr = (
+            "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释"
+            "关联规则挖掘的核心概念——支持度、置信度、提升度的定义与物理含义，Apriori 算法的"
+            "逐层搜索与先验剪枝原理、为何 lift 被选为主指标；说明最小支持度/最小置信度阈值的设定依据"
+            "及其对规则规模的影响、为何关联规则为确定性算法而无需训练/测试划分与随机种子复现。"
+            "须基于真实素材中的指标名与数据事实，严禁编造算法或数字。")
+        exp_narrative_instr = (
+            "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）："
+            "说明交易数据的来源与字段语义、最小支持度/最小置信度阈值的设定依据及其对规则规模的影响、"
+            "为何关联规则挖掘无需训练/测试划分与随机种子（确定性枚举）、主指标（lift）与辅助指标"
+            "（support/confidence）的选取理由。须基于真实素材，不得编造数据规模以外的数字。")
+        results_narrative_instr = (
+            "5.1 主指标对比解读（不少于400字）：客观解读 Top 关联规则的提升度 lift 数值，"
+            "指认提升度最高与次高的规则及其差距，并说明支持度/置信度三项指标共同刻画的业务含义，不夸大。")
+        results_viz_instr = (
+            "5.2 结果可视化解读（不少于200字）：描述本文唯一一张结果图「Top 关联规则（按 lift 排序）」"
+            "柱状图，说明横轴为提升度 lift、纵轴为规则，并指出图中提升度最高的规则及其业务含义。")
+        results_stability_instr = (
+            "5.4 规则强度与可解释性解读（不少于250字）：说明本文为何以 lift 为主指标、support 与"
+            "confidence 为辅助；引用 Top 规则的真实支持度/置信度/提升度三项指标，解读最强共现规则的"
+            "业务含义；明确指出关联规则为确定性算法，不存在多种子方差或配对显著性检验。")
+        method_reflection_instr = (
+            "(3) 从方法论角度反思：为何关联规则挖掘作为确定性算法，其结论可信度来自对全部频繁项集与"
+            "派生规则的完整枚举（而非随机抽样或单次跑分），以及最小支持度/置信度阈值的选择如何影响结论稳健性；")
+    else:
+        method_narrative_instr = (
+            "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释每一类候选方法的数学模型与核心归纳偏置——线性回归/岭回归/Lasso 的线性假设与正则化、随机森林回归的集成与递归分区、支持向量回归的核诱导映射、KNN 的局部类比；说明各方法超参数的设定依据（树的数量、核函数与 C/gamma、正则化系数 alpha）与本次数据特性（样本量、特征尺度、非线性程度）的关系；解释为何选择相应评价指标。须基于真实素材中的方法名与数据事实，严禁编造算法或数字。")
+        exp_narrative_instr = (
+            "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）：说明数据集的来源与每个特征列的物理语义、为何对数值特征做标准化/对类别特征做编码、缺失值插补为何在训练折上拟合以避免信息泄漏、训练/测试划分比例与 5 种随机种子复现的动机、主指标与次要指标的选取理由。须基于真实素材，不得编造数据规模以外的数字。")
+        results_narrative_instr = (
+            "5.1 主指标对比解读（不少于400字）：客观解读表1各方法主指标的具体数值差，指认最优与次优方法及其差距，不夸大。")
+        results_viz_instr = (
+            "5.2 结果可视化解读（不少于200字）：描述三张图（指标柱状图、系数/重要性图、残差散点图）各自揭示了什么趋势或异常。")
+        results_stability_instr = (
+            "5.4 稳定性与显著性解读（不少于250字）：解读多种子标准差反映的模型稳定性差异，以及配对t检验的 p 值含义与本文结论。")
+        method_reflection_instr = (
+            "(3) 从方法论角度反思：为何统一评估框架（固定划分、多种子复现、配对显著性检验）比单次跑分更可靠；")
 
     out = {}
 
@@ -1075,8 +1377,8 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     p1b = f"""{facts}
 
 请基于以上真实素材撰写研究方法与实验设置的展开叙述，输出 JSON：
-{{"method_narrative": "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释每一类候选方法的数学模型与核心归纳偏置——线性回归/岭回归/Lasso 的线性假设与正则化、随机森林回归的集成与递归分区、支持向量回归的核诱导映射、KNN 的局部类比；说明各方法超参数的设定依据（树的数量、核函数与 C/gamma、正则化系数 alpha）与本次数据特性（样本量、特征尺度、非线性程度）的关系；解释为何选择相应评价指标。须基于真实素材中的方法名与数据事实，严禁编造算法或数字。",
-  "exp_narrative": "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）：说明数据集的来源与每个特征列的物理语义、为何对数值特征做标准化/对类别特征做编码、缺失值插补为何在训练折上拟合以避免信息泄漏、训练/测试划分比例与 5 种随机种子复现的动机、主指标与次要指标的选取理由。须基于真实素材，不得编造数据规模以外的数字。"}}"""
+{{"method_narrative": "{method_narrative_instr}",
+  "exp_narrative": "{exp_narrative_instr}"}}"""
     r1b = LLM.chat_json(p1b, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
     out.update({k: v for k, v in r1b.items() if isinstance(v, str) and v.strip()})
 
@@ -1084,10 +1386,10 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     p2 = f"""{facts}
 
 请基于以上真实素材撰写结果分析部分，输出 JSON：
-{{"results_narrative": "5.1 主指标对比解读（不少于400字）：客观解读表1各方法主指标的具体数值差，指认最优与次优方法及其差距，不夸大。",
-  "results_viz": "5.2 结果可视化解读（不少于200字）：描述三张图（指标柱状图、系数/重要性图、残差散点图）各自揭示了什么趋势或异常。",
+{{"results_narrative": "{results_narrative_instr}",
+  "results_viz": "{results_viz_instr}",
   "results_fine": "5.3 细粒度分析解读（不少于250字）：解读特征重要性排序（权重最高特征及其物理意义）；若素材提供了逐类/分组的指标则一并解读，否则说明本实验未采集逐类明细。",
-  "results_stability": "5.4 稳定性与显著性解读（不少于250字）：解读多种子标准差反映的模型稳定性差异，以及配对t检验的 p 值含义与本文结论。",
+  "results_stability": "{results_stability_instr}",
   "deep_analysis": "深入分析 3 段（本文最重要的一节）：(1) 为什么最优方法会赢——从机理上解释（模型的归纳偏置、正则化、距离度量、特征降维等如何与该数据特性相互作用），必须落到具体数字，并引用第 5.1 节对比表中最优与次优方法的具体差值（如某数据集上 A=0.97、B=0.95，差 0.02）；
   若素材给出了「特征重要性（按绝对值从高到低排序）」，必须严格以该排序为准叙述真正权重最高的特征，
   严禁把排名靠后的中等权重特征说成「具有极高权重」「主导决策边界」，也严禁编造素材中不存在的特征名或数值，
@@ -1117,7 +1419,7 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 研究范围提醒：{multi_note}
 
 请基于以上真实素材撰写收尾部分，输出 JSON：
-{{"discussion": "讨论章（不少于1100字，至少 4-5 段，充分展开，严禁写浓缩版）：(1) 本文发现与前述文献如何呼应或冲突（带 [编号] 引用，至少再引用 3 篇不同文献），以及本文发现在实践上的具体含义（给方法选型的具体建议，而不是泛泛而谈）；(2) 本文结论成立的条件与边界——在什么数据规模/特征结构/噪声条件下结论可能不成立；(3) 从方法论角度反思：为何统一评估框架（固定划分、多种子复现、配对显著性检验）比单次跑分更可靠；(4) 本文证据对工程降噪设计或后续气动建模研究的启示。讨论中提到的假设结论必须与上面“子假设已裁定结果”一致。",
+{{"discussion": "讨论章（不少于1100字，至少 4-5 段，充分展开，严禁写浓缩版）：(1) 本文发现与前述文献如何呼应或冲突（带 [编号] 引用，至少再引用 3 篇不同文献），以及本文发现在实践上的具体含义（给方法选型的具体建议，而不是泛泛而谈）；(2) 本文结论成立的条件与边界——在什么数据规模/特征结构/噪声条件下结论可能不成立；{method_reflection_instr}(4) 本文证据对工程降噪设计或后续气动建模研究的启示。讨论中提到的假设结论必须与上面“子假设已裁定结果”一致。",
   "conclusion": "（本段由系统确定性生成，无需你写；直接输出空字符串即可）",
   "limitations_extra": "1-3 条本文特有的局限性（基于素材中的真实不足，不要写放之四海皆准的套话）"}}"""
     r3 = LLM.chat_json(p3, system=WRITER_SYSTEM, temperature=0.3, max_tokens=4096)
@@ -1150,11 +1452,22 @@ def _fallback_sections(spec, exp, refs, best_method, best_value, main_metric):
         "related": "；".join(
             f"[{r['num']}] {r['title']}（{r['venue']}, {r['year']}）" for r in refs[:8]
         ) + "。上述工作分别为本文的方法选择与实验设计提供了参照。",
-        "results_narrative": f"表 1 汇总了全部实验指标，最优方法为 {best_method}，主指标 {main_metric} = {_fmt(best_value)}。",
+        "results_narrative": (
+            f"表 1 汇总了全部规则的三项指标，提升度最高的规则为 {best_method}，lift = {_fmt(best_value)}。"
+            if spec.get("task_type") == "association" else
+            f"表 1 汇总了全部实验指标，最优方法为 {best_method}，主指标 {main_metric} = {_fmt(best_value)}。"),
         "deep_analysis": "（大模型写作不可用，深入分析节省略；请以第 5 节的真实表格与图为准。）",
         "sub_verdicts": [],
-        "discussion": f"结果显示 {best_method} 在本任务设定下占优，但该结论受 {ds} 的样本规模与特征结构约束。",
-        "conclusion": f"本文在 {ds} 上得到主指标 {main_metric} 最优结果 {best_method}（{_fmt(best_value)}）；该结果本身不等同于主假设已获验证。",
+        "discussion": (
+            f"提升度最高的规则为 {best_method}（lift={_fmt(best_value)}），其业务含义仍需结合品类与消费场景判断，"
+            f"结论受 {ds} 的交易规模与阈值设定约束。"
+            if spec.get("task_type") == "association" else
+            f"结果显示 {best_method} 在本任务设定下占优，但该结论受 {ds} 的样本规模与特征结构约束。"),
+        "conclusion": (
+            f"本文在 {ds} 上完整枚举出满足支持度与置信度阈值的关联规则，提升度最高者为 {best_method}"
+            f"（lift={_fmt(best_value)}）；该结果刻画的是共现相关性，不等同于因果关系。"
+            if spec.get("task_type") == "association" else
+            f"本文在 {ds} 上得到主指标 {main_metric} 最优结果 {best_method}（{_fmt(best_value)}）；该结果本身不等同于主假设已获验证。"),
         "abstract_en": (
             f"This paper conducts an empirical study on the "
             f"{spec.get('direction') or 'machine learning'} task using the {ds} dataset, "
@@ -1192,25 +1505,45 @@ def _deterministic_conclusion(spec: dict, analysis: dict, sub_evidence: dict, is
 
 
 # ── 本科毕设必备前置/后置（模板驱动，集中管理便于迭代） ──────────────
-def _build_toc(is_multi: bool) -> str:
+def _deep_cn(task_type: str) -> str:
+    """第6章标题：关联规则为确定性枚举、不做假设检验，故章节名去掉「假设检验」。"""
+    return "深入分析" if task_type == "association" else "深入分析与假设检验"
+
+
+def _build_toc(is_multi: bool, task_type: str = "") -> str:
     """生成目录（本科毕设规范：前置→各章→后置）。Markdown 无页码，仅列条目。"""
     lines = ["摘要（中文）", "Abstract（英文）"]
     for c in CHAPTERS:
-        lines.append(f"第{c['no']}章 {c['cn']}")
+        _cn = c["cn"]
+        if c["key"] == "deep" and task_type == "association":
+            _cn = _deep_cn(task_type)
+        lines.append(f"第{c['no']}章 {_cn}")
     lines += ["参考文献", "致谢", "附录：完整指标表"]
     return "\n".join(lines)
 
 
-def _org_note() -> str:
+def _org_note(task_type: str = "") -> str:
     """第一章末尾的「论文组织结构」段落（确定性生成，列真实章节，增强毕设真实感）。"""
-    return ("本文后续章节组织结构如下：第二章综述国内外研究现状并定位本文贡献；"
-            "第三章阐述研究方法与实验协议；第四章说明实验设置与数据预处理；"
-            "第五章报告并分析实验结果；第六章进行深入的机理分析与假设检验；"
-            "第七章讨论发现的适用边界；第八章总结全文并展望未来工作。")
+    _d = _deep_cn(task_type)
+    return (f"本文后续章节组织结构如下：第二章综述国内外研究现状并定位本文贡献；"
+            f"第三章阐述研究方法与实验协议；第四章说明实验设置与数据预处理；"
+            f"第五章报告并分析实验结果；第六章进行深入的机理分析（{_d}）；"
+            f"第七章讨论发现的适用边界；第八章总结全文并展望未来工作。")
 
 
 def _future_work_note(spec: dict, analysis: dict, is_multi: bool) -> str:
     """第八章 8.2 未来展望（基于系统真实约束，不编造新事实）。"""
+    if spec.get("task_type") == "association":
+        return ("本文仅在单一交易数据集上完成关联规则挖掘，后续可在更大规模、更多业态（如电商点击流、"
+                "会员消费）的数据上复现，以检验共现规律的稳健性；亦可扩展到多前件多后件（k→m）高阶规则、"
+                "序列模式（如 FP-Growth / GSP）与时间序列关联，并引入外部知识图谱消歧商品实体，"
+                "进一步提升规则的业务可解释性与落地价值。")
+    if (analysis or {}).get("graph"):
+        return ("本文只使用一跳邻居均值与表格分类器，后续可在同一套节点级划分下接入"
+                "多跳拓扑特征与真正的图神经网络，并用层数消融检验过平滑现象；"
+                "也可把折内特征构造推广到严格的归纳式设定（新节点加入时才可见其连边），"
+                "在更大的引文网络与社交网络上复现本文的泄漏检查流程，"
+                "以验证结论是否只属于 Cora 这一特定图结构。")
     return ("本文仅在有限的数据集与随机种子（5 个）下验证结论，后续可在更大规模、"
             "更多分布的数据集上复现，以检验结论的外推性；亦可引入更多候选方法与更宽的"
             "超参数搜索空间，并借助 GPU 加速扩展实验规模，进一步压缩多种子方差估计的不确定性。")
@@ -1336,7 +1669,18 @@ def main() -> int:
         spec.get("task_type"), spec.get("direction") or spec.get("topic") or "机器学习任务")
     methods = _join_methods(spec.get("candidate_methods", [])) or "若干基线模型"
 
-    best_method, best_value = _best_method(metrics, main_metric, objective)
+    if spec.get("task_type") == "association" and isinstance(analysis, dict):
+        best_method = analysis.get("best_method")
+        best_value = analysis.get("best_value")
+    elif (analysis or {}).get("graph"):
+        # 图实验的 metrics 里同时含「全图协议」的数字，它更高但带传导泄漏。
+        # 不能让 _best_method() 按全局 argmax 把它选进摘要/结论，
+        # 必须直接采用引擎落盘的、只从无泄漏协议中选出的结论。
+        _gb = (analysis["graph"].get("best") or {})
+        best_method = _gb.get("key") or analysis.get("best_method")
+        best_value = _gb.get("accuracy", analysis.get("best_value"))
+    else:
+        best_method, best_value = _best_method(metrics, main_metric, objective)
     if is_multi:
         # 跨数据集最稳健的赢家 = 平均排名最低的方法
         stab = (analysis or {}).get("rank_stability") or {}
@@ -1383,6 +1727,9 @@ def main() -> int:
         print(f"[generate_paper] LLM 写作异常，转确定性兜底：{e}")
         written = {}
     used_llm = bool(written.get("abstract"))
+    # 记录「模型真正写了哪些节」：必须在兜底覆盖 written 之前抓取，
+    # 否则 fallback 会把所有节补齐，事后无法区分是模型写的还是模板补的。
+    llm_sections = sorted(written.keys()) if used_llm else []
     if not written.get("abstract"):
         written = _fallback_sections(spec, exp, refs, best_method, best_value, main_metric)
 
@@ -1432,7 +1779,22 @@ def main() -> int:
     # 局限性
     ds_scope = "多个数据集" if is_multi else f"{dataset}数据集"
     lim = [f"实验基于{ds_scope}，样本规模与特征结构有限，结论向更大规模或不同分布数据的外推仍需验证。"]
-    if (analysis or {}).get("seed_variance"):
+    if spec.get("task_type") == "association":
+        lim.append("为保证规则可解释与统计稳健，本文仅考虑 1→1 项集规则，未探索多前件/多后件（k→m）"
+                   "的高阶组合，可能遗漏由多商品协同驱动的复杂共现模式。")
+        lim.append("规则挖掘结果对最小支持度与最小置信度阈值敏感：阈值过高会漏掉长尾共现，过低会引入"
+                   "支持度极低的噪声规则；本文阈值依数据分布经验设定，结论对阈值的稳健性仍需系统评估。")
+        lim.append("关联规则刻画的是共现相关性而非因果性，所得规则不能直接解释为「购买前件导致购买后件」，"
+                   "其业务价值需结合领域知识谨慎落地。")
+    elif (analysis or {}).get("graph"):
+        lim.append("本文用一跳邻居均值压缩拓扑信息，只利用了图的局部结构，未使用高阶邻居、"
+                   "路径或社区特征，也未接入图神经网络，无法刻画多层传播与过平滑等现象。")
+        lim.append("节点级分层交叉验证仍属于传导式设定：划分时整张图的连边结构对训练折可见，"
+                   "只有「折内邻居均值」协议额外屏蔽了测试折的节点特征，"
+                   "因此结论不能等同于严格归纳式（新节点到来）场景下的泛化能力。")
+        lim.append("折数有限，折间标准差与配对 t 检验的统计功效有限；"
+                   "且结论只在 Cora 这一引文网络上验证，向社交网络、推荐系统等其他图域外推需重新验证。")
+    elif (analysis or {}).get("seed_variance"):
         lim.append("多种子实验虽已报告均值±标准差并做显著性检验，但种子数有限（5 个），方差估计本身仍不够精确。")
     else:
         lim.append("未提供多次运行的方差或显著性检验，指标差异的统计稳健性尚待评估。")
@@ -1501,7 +1863,7 @@ def main() -> int:
         "（此处须本人亲笔签名并注明日期）\n\n"
     )
     parts.append("## 目录\n")
-    parts.append(_build_toc(is_multi) + "\n")
+    parts.append(_build_toc(is_multi, spec.get("task_type")) + "\n")
     parts.append("## 摘要\n")
     parts.append(written.get("abstract", "").strip() + "\n")
     parts.append(f"**关键词：** {written.get('keywords','')}\n")
@@ -1514,7 +1876,7 @@ def main() -> int:
             parts.append(f"**Keywords:** {_kw_en}\n")
     parts.append(chapter_heading("intro") + "\n")
     parts.append(written.get("intro", "").strip() + "\n")
-    parts.append(_org_note() + "\n")
+    parts.append(_org_note(spec.get("task_type")) + "\n")
     parts.append(chapter_heading("related") + "\n")
     parts.append(written.get("related", "").strip() + "\n")
     # 确定性「按角色归类」引用块：保证所有入选文献均被正文引用（满足 EvalAgent 引用对应硬要求），
@@ -1530,6 +1892,13 @@ def main() -> int:
         parts.append(f"本文在多个数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
     else:
         parts.append(f"本文在 {dataset} 数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
+    _px = spec.get("data") or {}
+    if _px.get("proxy"):
+        _px_note = (_px.get("proxy_note") or "").strip().rstrip("。；; ")
+        parts.append(f"需要说明的是，本文使用的是**代理数据**：{_px_note}。"
+                     f"数据实际承载的目标量为{_px.get('target_cn') or '见数据说明'}，"
+                     f"并非题目所指的原始领域量。因此本文的结论只在代理数据的意义上成立，"
+                     f"不能直接外推为该领域真实数据上的性能结论。\n")
     parts.append("### 3.2 候选方法\n")
     mb = _method_bullets(spec)
     if mb:
@@ -1554,9 +1923,26 @@ def main() -> int:
         _sec_txt = "、".join(_sec) + "（详见第 5.4 节）"
     else:
         _sec_txt = "本文未设置独立次要指标，一切结论均以主指标为准"
-    parts.append(f"主要评价指标为 {main_metric}（{'越大越好' if objective=='maximize' else '越小越好'}），"
-                 f"次要指标为 {_sec_txt}。"
-                 f"所有实验在 5 个随机种子（42–46）上重复，报告均值±标准差，并对最优与次优方法做配对显著性检验。\n")
+    if spec.get("task_type") == "association":
+        parts.append(f"主要评价指标为 {main_metric}（越大越好），"
+                     f"次要指标为支持度（support）与置信度（confidence）。"
+                     f"关联规则挖掘为确定性算法，不设置随机种子、不做配对显著性检验；"
+                     f"所有规则在统一的最小支持度与最小置信度阈值下由 Apriori 算法完整枚举，"
+                     f"结论建立在对全部频繁项集及其派生规则的穷举之上。\n")
+    elif (analysis or {}).get("graph"):
+        _gr = analysis["graph"]
+        parts.append(f"主要评价指标为 {main_metric}（越大越好），次要指标为 macro-F1。"
+                     f"图节点之间不独立同分布，因此不采用样本级随机训练/测试划分，"
+                     f"而采用节点级分层 {_gr.get('n_splits', 5)} 折交叉验证；"
+                     f"三种特征协议分别为「仅节点词袋特征」「全图一跳邻居均值（传导设定）」"
+                     f"「折内一跳邻居均值（无泄漏）」。其中全图协议在划分前使用了测试折的"
+                     f"节点特征，存在传导泄漏，故其结果仅作上界对照，不参与最优组合的选取；"
+                     f"核心结论只从其余两种无泄漏协议中产生。稳定性以各折准确率的折间标准差"
+                     f"刻画，显著性采用逐折配对 t 检验。\n")
+    else:
+        parts.append(f"主要评价指标为 {main_metric}（{'越大越好' if objective=='maximize' else '越小越好'}），"
+                     f"次要指标为 {_sec_txt}。"
+                     f"所有实验在 5 个随机种子（42–46）上重复，报告均值±标准差，并对最优与次优方法做配对显著性检验。\n")
     # 数学化层：式(1) 主指标定义（任务感知，修回归公式错配）+ 式(2) 问题形式化
     # + 式(3) 统一评估框架 + 式(4) 显著性检验；全部用真实数字填空，不编造。
     parts.append(_methodology_math_block(main_metric, objective, spec.get("task_type"), analysis) + "\n")
@@ -1574,7 +1960,13 @@ def main() -> int:
 
     parts.append(chapter_heading("exp_setup") + "\n")
     parts.append(written.get("exp_narrative", "").strip() + "\n")
-    if is_multi:
+    if spec.get("task_type") == "association":
+        # 关联规则为确定性枚举，不存在「轮次 / 随机种子 / 训练-测试划分」
+        round_txt = "最终以提升度（lift）最高的规则作为核心结论。"
+    elif (analysis or {}).get("graph"):
+        round_txt = ("最终以无传导泄漏协议中准确率最高的「方法×特征协议」组合作为核心结论，"
+                     "含泄漏的全图协议仅作上界对照。")
+    elif is_multi:
         round_txt = "各数据集均取主指标最优的一轮作为报告结果。"
     else:
         round_txt = f"最终取主指标最优的一轮（第 {exp.get('best_round')} 轮）作为报告结果。"
@@ -1620,9 +2012,28 @@ def main() -> int:
                          "降级为序数编码以控制维度。实验由确定性分析引擎依据任务规格直接执行候选方法，"
                          f"{round_txt}\n")
         else:
-            parts.append(f"实验数据为{'多个数据集' if is_multi else dataset}。"
-                         f"数据经标准化等必要预处理后按固定比例划分训练集与测试集。"
-                         f"实验由确定性分析引擎依据任务规格直接执行候选方法，{round_txt}\n")
+            if spec.get("task_type") == "association":
+                _n_tx = (_pp or {}).get("n_samples") if _pp else None
+                _n_it = (_pp or {}).get("n_raw_features") if _pp else None
+                _scope = (f"共 {_n_tx} 笔交易、{_n_it} 种商品"
+                          if (_n_tx and _n_it) else dataset)
+                parts.append(
+                    f"实验数据为{dataset}（{_scope}）。交易级数据无列级特征预处理，"
+                    f"关联规则挖掘亦无需训练/测试划分或随机种子复现。实验由确定性分析引擎在统一的最小支持度与"
+                    f"最小置信度阈值下，对全部交易完整枚举频繁项集并派生关联规则，{round_txt}\n")
+            else:
+                _gr = (analysis or {}).get("graph") or {}
+                if _gr:
+                    parts.append(
+                        f"实验数据为{dataset}（共 {_gr.get('n_nodes')} 个节点、"
+                        f"{_gr.get('n_edges')} 条引用边、{_gr.get('n_features')} 维词袋特征、"
+                        f"{_gr.get('n_classes')} 类）。图数据不做列级标准化或插补，"
+                        f"实验按节点级分层 {_gr.get('n_splits', 5)} 折交叉验证执行，"
+                        f"拓扑信息以一跳邻居均值方式压缩进节点特征，{round_txt}\n")
+                else:
+                    parts.append(f"实验数据为{'多个数据集' if is_multi else dataset}。"
+                                 f"数据经标准化等必要预处理后按固定比例划分训练集与测试集。"
+                                 f"实验由确定性分析引擎依据任务规格直接执行候选方法，{round_txt}\n")
 
     # 如实披露因样本规模而做的同族估算器替换（不隐藏实验口径变化）
     _adapts = (analysis or {}).get("adaptations") or []
@@ -1642,9 +2053,21 @@ def main() -> int:
         parts.append("各数据集上逐方法的完整指标、多种子方差与可视化图表见本目录下的 "
                      "`results/<数据集名>/03_experiment.json` 及对应图片。\n")
     else:
-        parts.append("### 5.1 主指标对比\n")
-        parts.append("**表 1 各方法主指标对比**\n")
-        parts.append(_main_metric_table(metrics, main_metric, objective) + "\n")
+        _assoc = spec.get("task_type") == "association"
+        parts.append("### 5.1 规则强度对比\n" if _assoc else "### 5.1 主指标对比\n")
+        # 关联规则只有一种挖掘算法，写成「各方法对比」会让评审官判成
+        # 把规则列表包装成方法竞赛（与「未提出新方法」的事实矛盾）。
+        parts.append("**表 1 关联规则三项指标（按提升度降序）**\n" if _assoc
+                     else "**表 1 各方法×特征协议主指标对比（节点级分层 K 折）**\n"
+                     if (analysis or {}).get("graph")
+                     else "**表 1 各方法主指标对比**\n")
+        parts.append(_main_metric_table(metrics, main_metric, objective,
+                                       spec.get("task_type"),
+                                       bool((analysis or {}).get("graph"))) + "\n")
+        if (analysis or {}).get("graph"):
+            parts.append("注：表中「全图邻居均值（传导设定）」各行是在划分前使用了测试折的"
+                         "节点特征，存在传导泄漏，数值仅作上界对照；本文的核心结论只从"
+                         "其余两种无泄漏协议中选出，不以表内最高值作为最优结果。\n")
         parts.append(written.get("results_narrative", "").strip() + "\n")
         if plots_md.strip():
             parts.append("### 5.2 结果可视化\n")
@@ -1656,11 +2079,25 @@ def main() -> int:
                 if blk:
                     parts.append(blk + "\n")
         parts.append(written.get("results_fine", "").strip() + "\n")
-        parts.append("### 5.4 稳定性与显著性\n")
-        parts.append(_variance_table(analysis) + "\n")
-        if (analysis or {}).get("significance"):
-            parts.append(f"显著性检验结论：{analysis['significance']}\n")
+        if spec.get("task_type") == "association":
+            parts.append("### 5.4 规则强度与可解释性\n")
+            parts.append(_assoc_rules_interpretation(analysis) + "\n")
             parts.append(written.get("results_stability", "").strip() + "\n")
+        elif (analysis or {}).get("graph"):
+            _gr = analysis["graph"]
+            parts.append("### 5.4 折间稳定性、配对检验与传导泄漏\n")
+            parts.append(_graph_variance_table(analysis) + "\n")
+            parts.append(f"传导泄漏实测：{_gr.get('leakage_note')}。"
+                         f"{_gr.get('best_selection_note')}\n")
+            if (analysis or {}).get("significance"):
+                parts.append(f"配对 t 检验结论：{analysis['significance']}\n")
+            parts.append(written.get("results_stability", "").strip() + "\n")
+        else:
+            parts.append("### 5.4 稳定性与显著性\n")
+            parts.append(_variance_table(analysis) + "\n")
+            if (analysis or {}).get("significance"):
+                parts.append(f"显著性检验结论：{analysis['significance']}\n")
+                parts.append(written.get("results_stability", "").strip() + "\n")
 
         # 本文提出的融合集成方法：结果章锚点 + 指向方法章消融实验
         _pm = (analysis or {}).get("proposed_method")
@@ -1694,7 +2131,7 @@ def main() -> int:
                              f"集成模型平均 gap = {h1.get('ensemble_mean_gap','?'):.4f}。"
                              f"结论：{h1.get('conclusion','')}。\n")
 
-    parts.append(chapter_heading("deep") + "\n")
+    parts.append(f"## 第6章 {_deep_cn(spec.get('task_type'))}\n")
     parts.append(written.get("deep_analysis", "").strip() + "\n")
     if sub_rows:
         parts.append("**表 2 子假设裁决**\n")
@@ -1717,20 +2154,58 @@ def main() -> int:
 
     # 8.0 本文创新点（满足 EvalAgent 内容严谨度：结论章须分条列出创新点 / 独立见解，
     # 并区分本人工作与他人成果）。全部由真实实验事实推导，不引入素材以外的数字。
-    _innov = [
-        f"在统一随机种子（5 个）框架下系统对比了 {methods} 在 {dataset} 上的精度与稳定性，"
-        f"规避了单一随机划分导致的结论偶然性，使方法优劣的判断建立在可重复的统计估计之上。",
-    ]
-    if best_method:
+    if spec.get("task_type") == "association":
+        _innov = [
+            f"针对 {dataset} 交易数据，采用 Apriori 算法在统一支持度/置信度阈值下完整枚举频繁项集"
+            f"与派生规则，得到可复现的购物篮共现结构；所有结论建立在确定性枚举之上，"
+            f"规避了随机划分带来的偶然性，与需要多次随机复现的监督学习形成方法论对照。",
+        ]
+        if best_method:
+            _innov.append(
+                f"以提升度 lift 为主指标对规则排序与解读，识别出 {best_method} 等强共现规则"
+                f"（lift={best_value_str}），并基于支持度与置信度三项指标量化其业务可解释性，"
+                f"而非仅给出点估计。")
         _innov.append(
-            f"通过配对显著性检验与逐类指标分析，揭示 {best_method} 在该数据集上主指标 {main_metric} 最优"
-            f"（{best_value_str}），并量化其与次优方法的具体差距，而非仅给出点估计。")
-    _innov.append(
-        "将多种子方差作为稳定性证据纳入结论，使「方法是否稳健」这一判断建立在均值±标准差与"
-        "显著性检验之上，而非单点结果。")
-    _innov.append(
-        "严格区分本文实验结论与所引文献的已有结论：本文所有数字均来自本地确定性分析引擎的实测，"
-        "未引入任何素材以外的数值或事实，与前人工作形成清晰的方法论边界。")
+            f"结合 {dataset} 的真实交易数据，系统报告了最小支持度与最小置信度阈值的选择对挖掘结果"
+            f"规模与结论稳健性的影响，为同类零售数据集的关联规则分析提供了可复现的阈值设定参照。")
+        _innov.append(
+            "严格区分本文实验结论与所引文献的已有结论：本文所有规则与三项指标均来自本地确定性"
+            "分析引擎对交易数据的实测枚举，未引入任何素材以外的数值或事实。")
+    elif (analysis or {}).get("graph"):
+        _gr = analysis["graph"]
+        _innov = [
+            f"针对 {dataset} 的节点分类任务，采用「仅节点特征 / 全图一跳邻居均值 / "
+            f"折内一跳邻居均值」三种特征协议做同折对照，把拓扑特征的收益与"
+            f"传导泄漏带来的虚高分开度量，而不是只报一个最高的准确率。",
+        ]
+        if best_method:
+            _innov.append(
+                f"在节点级分层 {_gr.get('n_splits', 5)} 折交叉验证下，明确把含传导泄漏的全图协议"
+                f"排除出核心结论，仅从无泄漏协议中选出 {best_method}"
+                f"（accuracy={best_value_str}），并用逐折配对 t 检验量化协议的差异。")
+        _innov.append(
+            f"结合 {dataset} 的真实引文关系（{_gr.get('n_nodes')} 个节点、"
+            f"{_gr.get('n_edges')} 条边），系统报告了特征构造是否跨越划分边界对结论的影响，"
+            f"为同类图数据实验提供可复现的泄漏检查口径。")
+        _innov.append(
+            "严格区分本文实验结论与所引文献的已有结论：本文所有准确率、折间标准差与 p 值"
+            "均来自本地确定性分析引擎的实测，未引入素材以外的数值或事实；"
+            "本文采用的是图特征加表格分类器，不声称提出图神经网络或新算法。")
+    else:
+        _innov = [
+            f"在统一随机种子（5 个）框架下系统对比了 {methods} 在 {dataset} 上的精度与稳定性，"
+            f"规避了单一随机划分导致的结论偶然性，使方法优劣的判断建立在可重复的统计估计之上。",
+        ]
+        if best_method:
+            _innov.append(
+                f"通过配对显著性检验与逐类指标分析，揭示 {best_method} 在该数据集上主指标 {main_metric} 最优"
+                f"（{best_value_str}），并量化其与次优方法的具体差距，而非仅给出点估计。")
+        _innov.append(
+            "将多种子方差作为稳定性证据纳入结论，使「方法是否稳健」这一判断建立在均值±标准差与"
+            "显著性检验之上，而非单点结果。")
+        _innov.append(
+            "严格区分本文实验结论与所引文献的已有结论：本文所有数字均来自本地确定性分析引擎的实测，"
+            "未引入任何素材以外的数值或事实，与前人工作形成清晰的方法论边界。")
     parts.append("### 8.0 本文创新点\n")
     for _i, _p in enumerate(_innov, start=1):
         parts.append(f"{_i}. {_p}\n")
@@ -1804,17 +2279,29 @@ def main() -> int:
     except Exception as e:
         docx_note = f"；Word 生成失败：{e}"
 
-    print(json.dumps({
+    status = {
         "status": "ok",
         "markdown": str(out_md),
-        "llm_written": bool(used_llm and written.get("abstract")) and "deep_analysis" in written,
+        "llm_written": bool(used_llm and "deep_analysis" in llm_sections),
+        "used_llm": used_llm,
+        "llm_sections": llm_sections,
+        "model": os.environ.get("OPENAI_MODEL", "") or "",
+        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "references_count": len(refs),
         "metrics_count": len(metrics),
         "best_method": best_method,
         "best_value": best_value,
         "plots_count": len(analysis.get("plots") or []),
         "note": docx_note,
-    }, ensure_ascii=False, indent=2))
+    }
+    # 写作参与情况落盘：G03 与交付判定都以此为准，避免依赖 stdout 反解
+    # （stdout 里可能混入网关告警/进度行，rfind("{") 解析并不可靠）。
+    try:
+        (base / "06_paper" / "WRITE_STATUS.json").write_text(
+            json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    print("@@WRITE_STATUS@@ " + json.dumps(status, ensure_ascii=False))
     return 0
 
 

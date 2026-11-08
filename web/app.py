@@ -36,7 +36,8 @@ _lock = threading.Lock()
 _task_seq = 0
 
 # 可选内置数据集（sklearn）
-DATASETS = ["breast_cancer", "iris", "wine", "digits", "load_diabetes", "fetch_california_housing"]
+DATASETS = ["breast_cancer", "iris", "wine", "digits", "load_diabetes",
+            "fetch_california_housing", "market_basket", "cora_graph"]
 
 
 def _next_id() -> str:
@@ -56,7 +57,9 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
     优先级高于服务端 .env；留空则回退到服务端 .env 配置。
     data_path / data_url：用户自带 CSV 或公开数据集网址（二选一，覆盖内置 dataset）。
     """
-    cmd = [sys.executable, "auto_research.py"]
+    # -u：子进程无缓冲输出。否则 stdout 接管道时是块缓冲，网页上的「实时日志」
+    # 要等缓冲区写满或进程退出才刷新，用户会误以为卡死。
+    cmd = [sys.executable, "-u", "auto_research.py"]
     if mode == "iterate":
         cmd += ["iterate", "--topic", topic, "--rounds", str(rounds), "--out", str(out_dir)]
     else:  # plan
@@ -76,7 +79,13 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
         if sep:
             cmd += ["--sep", sep]
     elif dataset:
-        cmd += ["--dataset", dataset]
+        if dataset == "market_basket":
+            cmd += ["--data", str(ROOT / "data" / "market_basket.csv")]
+        elif dataset == "cora_graph":
+            # 图数据要 nodes + edges 两个文件，不能走 --data/--dataset 的单表入口。
+            cmd += ["--catalog-key", "cora"]
+        else:
+            cmd += ["--dataset", dataset]
 
     # 仅注入本次运行所需环境变量；auto_research 的 load_dotenv 不会覆盖已存在的 Key
     env = os.environ.copy()

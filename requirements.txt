@@ -14,6 +14,16 @@ matplotlib>=3.7
 #   pip install xgboost lightgbm
 # 想用深度学习后端（PyTorchMLP 包装器）：
 #   pip install torch
+# 想读老式 .xls（data/_concrete.data → data/concrete_strength.csv）：
+#   pip install xlrd
+# 图后端（可选，纯 numpy 也能做）：
+#   pip install networkx
+#
+# 2026-11-05 实测已装并通过 `backends --probe`（子进程真导入）：
+#   torch 2.15.0+cpu (6.93s) / torchvision 0.29.2+cpu (13.04s) /
+#   transformers 5.22.1 (3.97s) / networkx 3.7 / xlrd 2.0.2
+# 边界：torchvision 与 transformers 目前没有任何代码路径使用——图像/语义后端尚未接线，
+#       别把「装了」写成「支持了」；torch 立刻可用的是表格上的 PyTorchMLP。
 # 在 spec 的 candidate_methods 里直接用其完整 import 路径即可，例如
 #   {"estimator": "xgboost.XGBClassifier", "params": {"n_estimators": 300, "random_state": "<seed>"}}
 #   {"estimator": "PyTorchMLP", "params": {"hidden": [64,32], "epochs": 60, "task": "classification"}}

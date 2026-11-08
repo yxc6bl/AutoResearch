@@ -222,3 +222,160 @@ python auto_research.py plan --topic "比较随机森林与逻辑回归在糖尿
 | 去重单测（离线） | 故意在 spec 放入重复 SVC（支持向量机 + RBF核SVM） | 引擎去重后方法数正确、跨数据集无空列、无重复行 |
 
 > 升级后论文示例见同目录 `out_upgrade_iter/round_2/06_paper/paper_full.docx`（多数据集）与 `out_upgrade_test/06_paper/paper_full.docx`（单数据集）。
+
+
+---
+
+## 9. 范围扩展：分类/回归/聚类之外的第四类后端
+
+### 9.1 为什么必须补
+
+原来的三条线（分类、回归、聚类）都建立在「样本独立同分布 + 随机划分 + 多次复现」这套监督学习假设上。
+用户给一个购物篮题、一个序列预测题，系统要么绑错数据，要么把不独立的样本当独立样本切。
+补后端不是换模型，是把新模态接到四个接线点上——题目解析、数据加载、评估协议、事实契约。
+
+### 9.2 已落地：关联规则（Apriori）
+
+| 接线点 | 落点 |
+|---|---|
+| ① 题目解析 | `detect_task_type()` 认「关联规则/购物篮/apriori/频繁项集/共现」；`DATASET_CATALOG` 加 `market_basket`（`source=association`） |
+| ② 数据加载 | `_load_transactions()` 支持单列逗号分隔与多列两种交易格式 |
+| ③ 评估协议 | `run_analysis()` 早返回 `_run_association()`：逐层频繁项集 + 先验剪枝 + 1→1 规则生成，指标为支持度/置信度/lift，出 `assoc_rules.png` |
+| ④ 事实契约 | `_fact_pack()` 注入 Top12 规则四位小数与「不做显著性检验」硬约束；`eval_agent._ground_truth()` 同步补规则数值 |
+
+零新依赖：Apriori 为纯 Python 实现，复用已有 numpy/pandas/matplotlib。
+
+### 9.3 G04 硬门修复：从 hard_fail 到 hard_pass
+
+补完引擎后第一版论文被判 `hard_fail`，四轮迭代的根因是同一个：**模板在说监督学习的话**。
+
+| 轮次 | 评审官指出的编造 | 修法 |
+|---|---|---|
+| 1 | lift 被四舍五入成 3.892；正文称「标准化后划分训练集与测试集」；出现「第 None 轮」；置信度无据可核 | 事实清单与正文统一 4 位小数；第 4 节改交易级说明；`_ground_truth` 补规则数值 |
+| 2 | 表 1 把 0.2047 写成 0.205；创新点称「提出框架」；「固有属性」夸大 | metrics.setting 改 4 位小数并重建实验产物；创新点改「采用」 |
+| 3 | 第 6 章标题与正文出现「假设检验」；正文自算边际概率 0.2285/0.3300 | 新增 `_deep_cn()` 把第 6 章改为「深入分析」；事实包加「禁止反推数字」硬约束 |
+| 4 | 无 | **hard_pass，98.3 分，hallucinations 为空** |
+
+产物：`paper_full.md` 70120 字节、`paper_full.docx` 65375 字节、`plots/assoc_rules.png` 34525 字节，
+`DELIVERY_STATUS.json` 判定「可交付」，正文 16009 汉字。
+
+### 9.4 写作参与证据落盘
+
+G03（模型参与写作）此前依赖 stdout 反解，解析失败时 `llm_written=null`，
+导致 `07_gate_report.json` 判不可交付、而 `DELIVERY_STATUS.json` 判可交付，两份文件互相矛盾。
+现已改为生成器落盘 `06_paper/WRITE_STATUS.json`（含 `llm_sections` 与模型名），
+写作代理、交付判定、G03 门统一以该文件为准。
+
+---
+
+## 10. 架构论证与依赖补齐（2026-11-05 晚）
+
+### 10.1 新增 `docs/ARCHITECTURE.md`
+
+把「为什么这套系统成立」写成了可答辩的论证，而不是功能清单。核心是一条对照实验：
+同一个 `deepseek-v4-pro`，关联规则论文四轮 `hard_fail → hard_pass`，模型没换，
+改的全是系统层（事实清单、模板分支、产物精度）。反向证据是 `out_gate_real`：
+规则评分 99.5「优秀」，评审官给 5 条事实矛盾，闸门判不可交付——**加权分不能决定交付**。
+
+文档结构：五问三层 → 十个设计决策（每条含被否掉的替代方案与代价）→ 可审计产物 DAG
+→ 真实失败模式 → 边界（不能证明什么）→ 与 nanoMuse 的逐条对照 → 答辩三句话。
+
+### 10.2 依赖补齐（`backends --probe` 实测）
+
+新增 `backend_contract.probe()` 与 `auto_research.py backends --probe`：
+`find_spec` 只能证明「文件在」，probe 用子进程真导入并计时，导入崩溃不会带崩 CLI。
+
+| 依赖 | 版本 | 冷启动 | 效果 |
+|---|---|---|---|
+| torch | 2.15.0+cpu | 6.93s | 引擎里原有的 `PyTorchMLP` 立即可用：混凝土数据 R²=0.7011，9.0s |
+| torchvision | 0.29.2+cpu | 13.04s | 仅能 import，图像分支未接线 |
+| transformers | 5.22.1 | 3.97s | 仅能 import，语义分支未接线 |
+| networkx | 3.7 | — | 图后端仍走纯 numpy 方案，未接线 |
+| xlrd | 2.0.2 | — | 老式 `.xls` 可读，P1 缺口关闭 |
+
+### 10.3 P1 关掉一条：复合材料题从不可执行变「可执行(代理)」
+
+`data/_concrete.data`（老式 .xls，1030×9）→ `data/concrete_strength.csv`（列名 snake_case）；
+`DATASET_CATALOG` 加 `concrete`（regression，`proxy: true`，因为题目要等效弹性模量、
+数据给抗压强度）。实跑随机森林 R²=0.8988、7.8s、6 项指标、3 张图。
+题库 33 道：可执行 18 → **19（57.6%）**，其中代理 5 道；**同领域真实数据仍是 14 道**，
+误匹配 0。这条必须说清：新增的是代理数据，不是真接住了复合材料题。
+
+### 10.4 反馈台账补上「销账」
+
+此前只有采集：113 条记录、`fix_rate=0`、`lessons()` 每次读同一批旧账。
+新增 `feedback.close_for_topic(topic, run_dir, reason)`：同题后续运行若 `hard_pass` 且
+幻觉为 0，把**别的运行目录**留下的 open 记录标为 `fixed`，写入 `closed_ts` /
+`closed_by_run` / `close_reason`；本轮刚记录的问题不会被自己销掉。
+主流程在记录 verdict 之后自动调用。单测覆盖三种情况：同题不同运行→销账、
+同一运行→不销、题目空白→不动。
+
+---
+
+## 11. 第六个后端：图节点分类（Cora，2026-11-05 深夜）
+
+### 11.1 真实数据
+
+下载 Cora（LINQS / Planetoid，tkipf/pygcn 的 data/cora）到 `data/cora.content` 与
+`data/cora.cites`。第一次 curl 超时只拿到 929 行，重新下载后校验 Content-Length
+7,823,427 字节、2708 行才通过。实测 2708 节点 / 1433 维词袋特征 / 7 类 / 5429 条边，
+边端点零缺失。**下载的完整性也要验收**，否则实验规模会被正文写错。
+
+### 11.2 四接线点（第二次验证同一套方法）
+
+① `DATASET_CATALOG` 加 `cora`（`source=graph`、`format=linqs`、`modality=graph`、
+`methods=[lr,nb,dt,knn]`），`build_candidate_methods` 加白名单避免 1433 维上跑 RBF-SVC；
+② `_load_graph()` 支持 linqs / csv 两种格式，构造对称去自环邻接与度归一化 Â；
+③ `run_analysis` 按 `data.source=="graph"` 早返回 `_run_graph()`：节点级分层 5 折 ×
+3 种特征协议 × 4 个分类器，67 秒出 12 项指标 + 1 张图；
+④ `_fact_pack` / `_ground_truth` 注入 12 个组合的四位小数、配对 t 检验 p 值与泄漏说明，
+模板在 3.3 / 数学层 / 第 4 章 / 5.1 / 5.4 / 8.0 / 8.1 / 8.2 全部按 `analysis.graph` 分支。
+
+### 11.3 三种协议与「不报最高分」的裁决
+
+```
+X^(self) = X
+X^(full) = [X, ÂX]              划分前用全图特征 → 传导泄漏
+X^(fold) = [X, Â·mask_tr(X)]    逐折只用训练折特征 → 无泄漏
+```
+
+| 项目 | 实测 |
+|---|---|
+| 最优无泄漏组合 | 逻辑回归｜折内邻居均值，accuracy=0.8515、macro-F1=0.8381 |
+| 含泄漏上界 | 逻辑回归｜全图邻居均值 0.8641（**排除在核心结论之外**） |
+| 泄漏虚高 | 全图相对折内平均 +0.0117 |
+| 拓扑增益 | 逻辑回归 +0.0838、p=0.00037；四个方法均显著 |
+| 泄漏显著性 | 逻辑回归 +0.0125、p=0.0701（不显著）；朴素贝叶斯 +0.0074、p=0.0270（显著） |
+
+引擎里 `clean_keys` 只从无泄漏协议择优，`graph.leaky_best` 把被排除的数字和原因
+一起落盘。这是新的一条架构决策 D10：**约束要一直做到「选哪个结果算结论」这一层**，
+只在提示词里写「注意有泄漏」挡不住模型把 0.8641 写进摘要。
+
+### 11.4 网站入口与验收
+
+`web/app.py` 下拉加 `cora_graph` → 翻译成 `--catalog-key cora`（图要两个文件，
+不能走单表 `--data/--dataset`）；`plan` 新增 `--catalog-key`，并对 graph/timeseries/
+association 强制走确定性 spec，避免 LLM Planner 当成 sklearn 数据集。
+
+- `backends --check out_graph_cli/03_experiment.json`：**通过**
+- `benchmark_titles.py`：33 道可执行 **19 → 21（63.6%）**，其中代理 7 道，
+  **同领域真实仍 14 道**，误匹配 0。新增 2 道图题都是「可执行(代理)」——
+  Cora 是真实引文网络，但不是社交网络推荐数据、也不是真 GNN。
+- 代理标记按题目纠正：题目明确研究引文网络节点分类时去掉 `proxy`，
+  否则正文会对着真实数据写「这是代理数据」，反而成假话。
+
+### 11.5 全链路验收：图论文通过 G04
+
+用 `plan --catalog-key cora` 跑出真实文献（60 篇入选、47 篇带 LM 阅读判断）与实验产物，
+再 `step write` + `step eval`。第一版 `hard_fail`（10 条幻觉）里 9 条是
+**评审官事实清单被截断**导致的假阳性（逐类指标/混淆矩阵/逐折数值都是实测，
+但 `_ground_truth` 没给全），第 10 条是正文自算 0.0126 与实测配对差值 0.0125 不一致。
+
+修复：`_ground_truth` 把 `seed_variance` 上限 200→2000、全量补上 `per_class` /
+`confusion_matrix` / 12 组逐折准确率；`_fact_pack` 加「差值只能原样引用
+`paired_tests.diff`」硬约束；`_plots_block` 支持 `plots/` 回退，正文终于嵌进图片。
+已交付稿同步改两处四舍五入、重转 docx。
+
+复评：**hard_pass / 综合 94.8 / 评审官 85 分 / 0 幻觉**，`gates` P0 四项全通过、结论「可交付」。
+中途一次评审官 `bad_json` 被 G04 记「未验证」而非通过，重跑才放行——闸门没放水。
+网站 `/api/open?dir=out_graph_cli` 正确返回该论文（49731 字符 HTML）与评分卡。

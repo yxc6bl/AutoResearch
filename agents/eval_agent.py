@@ -662,8 +662,55 @@ def _ground_truth(analysis: dict) -> str:
             bits.append(f"- {m.get('name','')} = {m.get('value','')}")
     if analysis.get("significance"):
         bits.append(f"显著性检验：{str(analysis['significance'])[:200]}")
+    if analysis.get("task_type") == "association":
+        sfs = analysis.get("single_fit_scores") or {}
+        _rules = sfs.get("rules") or []
+        if _rules:
+            bits.append("关联规则（提升度降序，lift>1 为共现正相关；支持度/置信度/提升度均为实验实测，"
+                        "论文引用时不得出现事实清单之外的数值）：")
+            for _r in _rules[:12]:
+                bits.append(f"  - {_r.get('rule')}：支持度={_r.get('support'):.4f}，"
+                            f"置信度={_r.get('confidence'):.4f}，提升度={_r.get('lift'):.4f}")
     if analysis.get("seed_variance"):
-        bits.append(f"多种子方差：{str(analysis['seed_variance'])[:200]}")
+        _sv_label = ("节点级各折准确率（折间波动，不是多种子方差）"
+                     if analysis.get("graph") else "多种子方差")
+        # 上限放宽到 2000：以前截到 200 字，只露出第一个方法的折值，
+        # 评审官会把正文里其余真实折值判成「事实清单未提供」的编造。
+        bits.append(f"{_sv_label}：{str(analysis['seed_variance'])[:2000]}")
+    _gr = analysis.get("graph")
+    if isinstance(_gr, dict) and _gr:
+        bits.append(f"图节点分类：{_gr.get('n_nodes')} 个节点、{_gr.get('n_edges')} 条边、"
+                    f"{_gr.get('n_features')} 维特征、{_gr.get('n_classes')} 类，"
+                    f"节点级分层 {_gr.get('n_splits')} 折交叉验证（不是随机种子复现、"
+                    f"不是按固定比例划分训练集与测试集）。")
+        bits.append("各方法×协议组合准确率（四位小数，论文引用时不得改写）：")
+        for k, r in (_gr.get("results") or {}).items():
+            bits.append(f"  - {k}：accuracy={r.get('accuracy'):.4f}，"
+                        f"macro-F1={r.get('f1_macro'):.4f}，折间标准差={r.get('std'):.4f}")
+        _b = _gr.get("best") or {}
+        bits.append(f"核心结论（唯一最优组合）：{_b.get('key')} accuracy={_b.get('accuracy'):.4f}")
+        bits.append("各方法×协议组合的逐折准确率（实测，正文引用时必须原样使用这些数值）：")
+        for k, r in (_gr.get("results") or {}).items():
+            bits.append(f"  - {k}：{r.get('fold_accuracy')}")
+        bits.append("注意：配对差值由【未四舍五入】的逐折准确率计算，"
+                    "与两个四位小数均值直接相减可能相差 0.0001；"
+                    "论文必须原样引用 paired_tests 里的 diff，不得自行用均值相减推算差值。")
+        bits.append(f"传导泄漏：{str(_gr.get('leakage_note'))[:240]}")
+        bits.append(f"结论选取规则：{_gr.get('best_selection_note')}")
+        bits.append("配对 t 检验（逐折配对，非 McNemar）：")
+        for k, v in (analysis.get("paired_tests") or {}).items():
+            bits.append(f"  - {k}：差值={v.get('diff'):.4f}，p={v.get('p'):.4f}")
+        bits.append("本文是一跳邻居特征加表格分类器，不是图神经网络，未复现过平滑现象；"
+                    "正文若声称使用 GNN/GCN、5 个随机种子、标准化/插补/独热编码，均为编造。")
+    # 逐类指标与混淆矩阵都是分析引擎实测的，必须完整进事实清单。
+    # 早期版本只把它们塞进写作端的事实包、没给评审官，结果正文里每一个
+    # 真实的逐类数字都被判成「事实清单未提供」的幻觉。
+    if analysis.get("per_class"):
+        bits.append("逐类指标（实测，论文可引用）：" +
+                    json.dumps(analysis["per_class"], ensure_ascii=False)[:2000])
+    if analysis.get("confusion_matrix"):
+        bits.append("混淆矩阵（实测，论文可引用）：" +
+                    json.dumps(analysis["confusion_matrix"], ensure_ascii=False)[:2000])
     if analysis.get("proposed_method"):
         bits.append(f"本文提出方法：{analysis['proposed_method']}（已做消融，消融结果见实验产物）")
     else:

@@ -48,4 +48,8 @@ python auto_research.py run --spec engine/tasks/proof/wine_sklearn_spec.json --o
 {"data": {"source": "csv", "path": "data/my_table.csv", "target": "label"}}
 ```候选方法可用注册表字符串或完整导入路径字典；`"<seed>"` 可替换为重复实验种子。聚类分支独立使用内置 KMeans/Agglomerative/DBSCAN 实现，默认按 ARI 评估，不执行分类/回归的五种子配对检验。
 
-spec 示例及字段限制见 [SPEC_SCHEMA.md](SPEC_SCHEMA.md)。工程现状、能力边界与逐轮修复记录见 [docs/PROGRESS.md](docs/PROGRESS.md)；通用化演进路线与工程量评估见 [docs/ROADMAP.md](docs/ROADMAP.md)。请勿将 API Key 写入版本控制；`.env` 本地配置已忽略，`.env.example` 仅提供配置模板。
+spec 示例及字段限制见 [SPEC_SCHEMA.md](SPEC_SCHEMA.md)。工程现状、能力边界与逐轮修复记录见 [docs/PROGRESS.md](docs/PROGRESS.md)；通用化演进路线与工程量评估见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+
+系统为什么这样设计、每条决策否掉了哪些替代方案、失败过在哪里，见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（答辩用）；补一个新领域后端要改哪四处，见 [docs/BACKENDS.md](docs/BACKENDS.md)；闸门分级与人工放行留痕，见 [docs/GATES.md](docs/GATES.md)。
+
+请勿将 API Key 写入版本控制；`.env` 本地配置已忽略，`.env.example` 仅提供配置模板。

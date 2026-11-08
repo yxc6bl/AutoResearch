@@ -56,22 +56,41 @@ def run(out_dir, task_spec_path, store: MemoryStore | None = None, timeout: int 
         "paper_docx": str(paper) if paper.exists() else None,
         "paper_md": str(paper_md) if paper_md.exists() else None,
     })
-    # generate_paper 会在 stdout 末尾打印一段 JSON 状态（含 llm_written），
-    # 这里解析出来，供上层判断「这是正常稿还是模板骨架稿」。
-    llm_written = None
-    try:
-        _out = proc.stdout or ""
-        _start = _out.rfind("{")
-        if _start >= 0:
-            llm_written = json.loads(_out[_start:]).get("llm_written")
-    except Exception:
-        llm_written = None
+    # 生成器会把写作参与情况写入 06_paper/WRITE_STATUS.json，并在 stdout 打一行
+    # @@WRITE_STATUS@@ 哨兵。优先读文件（最可靠），其次读哨兵行，最后才退回整段反解。
+    status_path = out_dir / "06_paper" / "WRITE_STATUS.json"
+    write_status: dict = {}
+    if status_path.exists():
+        try:
+            write_status = json.loads(status_path.read_text(encoding="utf-8"))
+        except Exception:
+            write_status = {}
+    llm_written = write_status.get("llm_written")
+    if llm_written is None:
+        for _line in (proc.stdout or "").splitlines():
+            if _line.startswith("@@WRITE_STATUS@@"):
+                try:
+                    write_status = json.loads(_line[len("@@WRITE_STATUS@@"):].strip())
+                    llm_written = write_status.get("llm_written")
+                except Exception:
+                    pass
+                break
+    if llm_written is None:
+        # 兼容旧版生成器：整段 stdout 末尾的 JSON
+        try:
+            _out = proc.stdout or ""
+            _start = _out.rfind("{")
+            if _start >= 0:
+                llm_written = json.loads(_out[_start:]).get("llm_written")
+        except Exception:
+            llm_written = None
 
     return {
         "paper": str(paper) if paper.exists() else None,
         "paper_md": str(paper_md) if paper_md.exists() else None,
         "returncode": proc.returncode,
         "llm_written": llm_written,
+        "write_status": write_status,
         "stderr": (proc.stderr or "")[-2500:],
     }
 
