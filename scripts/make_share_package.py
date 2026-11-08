@@ -4,7 +4,7 @@
 
 打包原则：只放「可复现的工程」，不放半成品与密钥。
 
-  放：代码、公开数据集、全部文档、三篇已过 G04 的论文（含 Word 与图）、
+  放：代码、公开数据集、全部文档、四篇已过 G04 的论文（含 Word 与图）、
       一键启动脚本、.env.example、使用说明。
   不放：.git/、out_*/、.env、*.log、*.pyc、__pycache__/、corpus/、
       memory/data/、demo_results/、dist/、任何 .zip。
@@ -33,11 +33,12 @@ SKIP_REL_FILES = {"memory/feedback.jsonl", "memory/lit_usage.json"}
 SKIP_FILE_SUFFIX = {".log", ".pyc", ".pyo", ".zip", ".bak", ".tmp"}
 SKIP_FILE_NAMES = {".env", ".DS_Store", "Thumbs.db"}
 
-# 三篇示例成果：三种「菜单外」后端各一篇，都带真实评审结论与 Word
+# 四篇示例成果：三种「菜单外」后端各一篇 + 一道真实本科毕设选题的完整跑批
 EXAMPLES = {
     "association_paper": "out_assoc",
     "graph_paper": "out_graph_cli",
     "image_paper": "out_image_cli",
+    "thesis_real_paper": "out_thesis_real",
 }
 EXAMPLE_FILES = [
     "task_spec.json", "01_literature.json", "02_hypotheses.json",
@@ -82,7 +83,8 @@ README = '''# 使用说明
 1. 装依赖：`python -m pip install -r requirements.txt`
 2. 启动网站：`python start_web.py`（会自动打开浏览器）
 3. 不填 API Key 也能看成果：在页面「打开已有结果」里填
-   `examples/image_paper`（或 `examples/graph_paper`、`examples/association_paper`），
+   `examples/image_paper`（另有 `examples/graph_paper`、`examples/association_paper`、
+   `examples/thesis_real_paper`），
    直接看到论文全文、评分卡和图表。
 
 ## 自己跑一篇新论文
@@ -103,7 +105,7 @@ API Key 配置模板见 `.env.example`；不要把自己的 Key 写进任何会�
 ## 包里有什么
 
 - 完整代码、公开数据集（Cora 引文网络、MNIST、UCI/NASA 表格数据等）、全部文档；
-- `examples/` 下三篇已通过 G04 零编造硬门的可交付论文，含 Markdown、Word、
+- `examples/` 下四篇已通过 G04 零编造硬门的可交付论文，含 Markdown、Word、
   评审结论和图表；
 - `docs/CAPABILITY.md` 是能力现状盘点，`docs/ARCHITECTURE.md` 是架构论证，
   `docs/BACKENDS.md` 是补新领域后端的操作手册。

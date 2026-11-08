@@ -690,6 +690,15 @@ def _ground_truth(analysis: dict) -> str:
                             f"各次取值=[{_seeds}]")
             else:
                 bits.append(f"  - {_k}：{_v}")
+    # 引擎实测的「方法替换 / 特征重要性 / 回归系数」也必须交给评审官。
+    # 此前事实清单没给这三块，正文里真实存在的 LinearSVR 替换说明、
+    # 模板按实测值生成的重要性表，被连续判成「事实清单未提供」的编造。
+    for _fld, _label in (("adaptations", "可扩展替换（实测，正文可引用）"),
+                         ("feature_importance", "特征重要性（实测，取绝对值排序）"),
+                         ("coefficients", "回归系数（实测）")):
+        _v = analysis.get(_fld)
+        if _v:
+            bits.append(f"{_label}：{str(_v)[:1800]}")
     _gr = analysis.get("graph")
     if isinstance(_gr, dict) and _gr:
         bits.append(f"图节点分类：{_gr.get('n_nodes')} 个节点、{_gr.get('n_edges')} 条边、"

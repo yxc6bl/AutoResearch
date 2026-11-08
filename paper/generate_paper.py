@@ -928,6 +928,32 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
                      f"严禁写成其它数字（例如把特征维度写成 30），也不得把"
                      f"「配置了插补」写成「本数据有大量缺失值」。")
 
+    # 真实跑批里反复出现的三类「模型串数据」：相邻方法的标准差混用、
+    # 解读文字与模板表格第一行不一致、题目点名方法却只报全局最优。
+    _fi_f = (analysis or {}).get("feature_importance") or {}
+    for _m, _vals in _fi_f.items():
+        if isinstance(_vals, dict) and _vals:
+            _top = max(_vals, key=lambda k: abs(float(_vals[k] or 0)))
+            lines.append(f"【重要】5.3 节特征重要性表由模板按实测绝对值排序，第一行是 {_top}；"
+                         f"解读文字必须与表格第一行一致，严禁凭常识写成别的特征。")
+            break
+    _sv_f = (analysis or {}).get("seed_variance") or {}
+    _std_bits = [f"{_k}={float(_v.get('std') or 0):.4f}"
+                 for _k, _v in _sv_f.items()
+                 if isinstance(_v, dict) and str(_k).endswith(("_r2", "_accuracy"))]
+    if _std_bits:
+        lines.append("【重要】各方法标准差必须按名字逐条对应，严禁把两个方法写成同一个数值："
+                     + "；".join(_std_bits[:8]))
+    if (analysis or {}).get("adaptations"):
+        lines.append("【重要】方法实现以实测替换为准："
+                     + "；".join(f"{a.get('method')} 用 {a.get('to')}"
+                                for a in analysis["adaptations"])
+                     + "。禁止把被替换掉的实现（如 RBF 核 SVR、精确梯度提升）写成"
+                       "本文实际使用的模型，也禁止描述高维核映射。")
+    lines.append("【重要】若题目点名了具体方法，摘要与结论必须同时交代该方法本身的"
+                 "实测主指标及其在候选方法中的位置；其它方法只作对照，"
+                 "不得把全局最优方法写成「本文研究/提出的核心方法」。")
+
     lines.append("")
     lines.append("## 真实实验指标（确定性分析引擎计算）")
     for m in metrics:
