@@ -1,0 +1,84 @@
+{
+  "papers": [
+    {
+      "title": "Objective vs. Search: Decomposing What Makes a Good Tokeniser",
+      "authors": "Ahmetcan Yavuz, Clara Meister, Tiago Pimentel",
+      "venue": "arXiv:cs.CL",
+      "year": "2026",
+      "url": "http://arxiv.org/abs/2609.19145v1",
+      "abstract": "Two dominant tokenisation algorithms are used by modern language models: byte-pair encoding (BPE) and UnigramLM. These differ along two orthogonal axes: their optimisation objective (compression vs. log-likelihood) and their search procedure (bottom-up merging vs. top-down pruning). Existing comparisons confound these axes, making it unclear whether their observed differences stem from what is being optimised vs. how it is being optimised. We disentangle the two by introducing two new tokenisation algorithms that complete this 2x2 design space: BottomUpLL, a bottom-up likelihood-based tokeniser, and TopDownComp, a top-down compression-based tokeniser. We train language models with tokenisers"
+    },
+    {
+      "title": "VS-Net: Voting with Segmentation for Visual Localization",
+      "authors": "Zhaoyang Huang, Han Zhou, Yijin Li, Bangbang Yang, Yan Xu, Xiaowei Zhou, Hujun Bao, Guofeng Zhang, Hongsheng Li",
+      "venue": "arXiv:cs.CV",
+      "year": "2021",
+      "url": "http://arxiv.org/abs/2105.10886v1",
+      "abstract": "Visual localization is of great importance in robotics and computer vision. Recently, scene coordinate regression based methods have shown good performance in visual localization in small static scenes. However, it still estimates camera poses from many inferior scene coordinates. To address this problem, we propose a novel visual localization framework that establishes 2D-to-3D correspondences between the query image and the 3D map with a series of learnable scene-specific landmarks. In the landmark generation stage, the 3D surfaces of the target scene are over-segmented into mosaic patches whose centers are regarded as the scene-specific landmarks. To robustly and accurately recover the sc"
+    },
+    {
+      "title": "Low-rank methods for high-dimensional approximation and model order reduction",
+      "authors": "Anthony Nouy",
+      "venue": "arXiv:math.NA",
+      "year": "2015",
+      "url": "http://arxiv.org/abs/1511.01554v1",
+      "abstract": "Tensor methods are among the most prominent tools for the numerical solution of high-dimensional problems where functions of multiple variables have to be approximated. These methods exploit the tensor structure of function spaces and apply to many problems in computational science which are formulated in tensor spaces, such as problems arising in stochastic calculus, uncertainty quantification or parametric analyses. Here, we present complexity reduction methods based on low-rank approximation methods. We analyze the problem of best approximation in subsets of low-rank tensors and discuss its connection with the problem of optimal model reduction in low-dimensional reduced spaces. We presen"
+    },
+    {
+      "title": "High-Dimensional Search, Low-Dimensional Solution: Decoupling Optimization from Representation",
+      "authors": "Yusuf Kalyoncuoglu, Ratmir Miftachov",
+      "venue": "arXiv:cs.LG",
+      "year": "2025",
+      "url": "http://arxiv.org/abs/2512.23410v2",
+      "abstract": "State-of-the-art models rely on massive widths despite exhibiting low Intrinsic Dimension (ID). We posit that this redundancy serves the non-convex optimization search rather than the final representation. We validate this hypothesis by decoupling the solution geometry via data-independent random projections, demonstrating that ResNet, ViT, and BERT representations can be compressed by up to 16x with negligible performance degradation of around 1%. Notably, these oblivious projections achieve parity with PCA and learned baselines, confirming the solution manifold is intrinsically robust. These findings establish the foundation for Subspace-Native Distillation: a paradigm where student models"
+    },
+    {
+      "title": "Towards Better Benchmark Datasets for Inductive Knowledge Graph Completion",
+      "authors": "Harry Shomer, Jay Revolinsky, Jiliang Tang",
+      "venue": "arXiv:cs.AI",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2406.11898v3",
+      "abstract": "Knowledge Graph Completion (KGC) attempts to predict missing facts in a Knowledge Graph (KG). Recently, there's been an increased focus on designing KGC methods that can excel in the inductive setting, where a portion or all of the entities and relations seen in inference are unobserved during training. Numerous benchmark datasets have been proposed for inductive KGC, all of which are subsets of existing KGs used for transductive KGC. However, we find that the current procedure for constructing inductive KGC datasets inadvertently creates a shortcut that can be exploited even while disregarding the relational information. Specifically, we observe that the Personalized PageRank (PPR) score ca"
+    },
+    {
+      "title": "High-Dimensional Directional Brain Network Analysis for Focal Epileptic Seizures",
+      "authors": "Yaotian Wang, Guofen Yan, Seiji Tanabe, Chang-Chia Liu, Shayan Moosa, Mark S. Quigg, Tingting Zhang",
+      "venue": "arXiv:stat.AP",
+      "year": "2022",
+      "url": "http://arxiv.org/abs/2208.07991v1",
+      "abstract": "The brain is a high-dimensional directional network system consisting of many regions as network nodes that influence each other. The directional influence from one region to another is referred to as directional connectivity. Epilepsy is a directional network disorder, as epileptic activity spreads from a seizure onset zone (SOZ) to many other regions after seizure onset. However, directional network studies of epilepsy have been mostly limited to low-dimensional directional networks between the SOZ and contiguous regions due to the lack of efficient methods for analyzing high-dimensional directional brain networks. To address this gap, we study high-dimensional directional networks in epil"
+    },
+    {
+      "title": "Divergence of Empirical Neural Tangent Kernel in Classification Problems",
+      "authors": "Zixiong Yu, Songtao Tian, Guhan Chen",
+      "venue": "arXiv:cs.LG",
+      "year": "2025",
+      "url": "http://arxiv.org/abs/2504.11130v2",
+      "abstract": "This paper demonstrates that in classification problems, fully connected neural networks (FCNs) and residual neural networks (ResNets) cannot be approximated by kernel logistic regression based on the Neural Tangent Kernel (NTK) under overtraining (i.e., when training time approaches infinity). Specifically, when using the cross-entropy loss, regardless of how large the network width is (as long as it is finite), the empirical NTK diverges from the NTK on the training samples as training time increases. To establish this result, we first demonstrate the strictly positive definiteness of the NTKs for multi-layer FCNs and ResNets. Then, we prove that during training, % with the cross-entropy l"
+    },
+    {
+      "title": "Low-dimensional Interpretable Kernels with Conic Discriminant Functions for Classification",
+      "authors": "Gurhan Ceylan, S. Ilker Birbil",
+      "venue": "arXiv:cs.LG",
+      "year": "2020",
+      "url": "http://arxiv.org/abs/2007.08986v1",
+      "abstract": "Kernels are often developed and used as implicit mapping functions that show impressive predictive power due to their high-dimensional feature space representations. In this study, we gradually construct a series of simple feature maps that lead to a collection of interpretable low-dimensional kernels. At each step, we keep the original features and make sure that the increase in the dimension of input data is extremely low, so that the resulting discriminant functions remain interpretable and amenable to fast training. Despite our persistence on interpretability, we obtain high accuracy results even without in-depth hyperparameter tuning. Comparison of our results against several well-known"
+    },
+    {
+      "title": "Drive vs. Decay: On the Training Dynamics of Joint-Embedding Predictive Architectures",
+      "authors": "José Lucas De Melo Costa, Seong Woo Ahn, Fabrice Popineau, Arpad Rimmel, Bich-Liên Doan",
+      "venue": "arXiv:cs.LG",
+      "year": "2026",
+      "url": "http://arxiv.org/abs/2610.02344v1",
+      "abstract": "Joint-Embedding Predictive Architectures (JEPAs) are prone to representation collapse, typically mitigated through empirical heuristics. We develop an early-training stability theory that unifies these heuristics. Linearising the coupled JEPA gradient flow around the trivial fixed point reveals two competing effects: a driving force ($γ$) and a decay effect ($σ$). Under approximate spectral decoupling, a per-mode stability ratio $μ_i = γ_i / σ_i$ factorises into independent data-side and predictor-side terms and the count of unstable modes tracks the rank of representations that can emerge. The framework predicts a phase boundary, which we confirm empirically across more than 800 Tabular-JEP"
+    },
+    {
+      "title": "Token-Oriented Object Notation vs JSON: A Benchmark of Plain and Constrained Decoding Generation",
+      "authors": "Ivan Matveev",
+      "venue": "arXiv:cs.CL",
+      "year": "2026",
+      "url": "http://arxiv.org/abs/2603.03306v1",
+      "abstract": "Recently presented Token-Oriented Object Notation (TOON) aims to replace JSON as a serialization format for passing structured data to LLMs with significantly reduced token usage. While showing solid accuracy in LLM comprehension, there is a lack of tests against JSON generation. Though never present in training data, TOON syntax is simple enough to suggest one-shot in-context learning could support accurate generation. The inevitable prompt overhead can be an acceptable trade-off for shorter completions.   To test this, we conducted a benchmark creating several test cases with regard to structural complexity, a validation pipeline, and comparing plain JSON generation vs structured output (v"
+    }
+  ]
+}

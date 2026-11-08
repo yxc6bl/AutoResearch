@@ -1,0 +1,84 @@
+{
+  "papers": [
+    {
+      "title": "Screening Mammography Breast Cancer Detection",
+      "authors": "Debajyoti Chakraborty",
+      "venue": "arXiv:eess.IV",
+      "year": "2023",
+      "url": "http://arxiv.org/abs/2307.11274v1",
+      "abstract": "Breast cancer is a leading cause of cancer-related deaths, but current programs are expensive and prone to false positives, leading to unnecessary follow-up and patient anxiety. This paper proposes a solution to automated breast cancer detection, to improve the efficiency and accuracy of screening programs. Different methodologies were tested against the RSNA dataset of radiographic breast images of roughly 20,000 female patients and yielded an average validation case pF1 score of 0.56 across methods."
+    },
+    {
+      "title": "MeisenMeister: A Simple Two Stage Pipeline for Breast Cancer Classification on MRI",
+      "authors": "Benjamin Hamm, Yannick Kirchhoff, Maximilian Rokuss, Klaus Maier-Hein",
+      "venue": "arXiv:cs.CV",
+      "year": "2025",
+      "url": "http://arxiv.org/abs/2510.27326v1",
+      "abstract": "The ODELIA Breast MRI Challenge 2025 addresses a critical issue in breast cancer screening: improving early detection through more efficient and accurate interpretation of breast MRI scans. Even though methods for general-purpose whole-body lesion segmentation as well as multi-time-point analysis exist, breast cancer detection remains highly challenging, largely due to the limited availability of high-quality segmentation labels. Therefore, developing robust classification-based approaches is crucial for the future of early breast cancer detection, particularly in applications such as large-scale screening. In this write-up, we provide a comprehensive overview of our approach to the challeng"
+    },
+    {
+      "title": "A CNN-based methodology for breast cancer diagnosis using thermal images",
+      "authors": "Juan Zuluaga-Gomez, Zeina Al Masry, Khaled Benaggoune, Safa Meraghni, Noureddine Zerhouni",
+      "venue": "arXiv:cs.CV",
+      "year": "2019",
+      "url": "http://arxiv.org/abs/1910.13757v1",
+      "abstract": "Micro Abstract: A recent study from GLOBOCAN disclosed that during 2018 two million women worldwide had been diagnosed from breast cancer. This study presents a computer-aided diagnosis system based on convolutional neural networks as an alternative diagnosis methodology for breast cancer diagnosis with thermal images. Experimental results showed that lower false-positives and false-negatives classification rates are obtained when data pre-processing and data augmentation techniques are implemented in these thermal images. Background: There are many types of breast cancer screening techniques such as, mammography, magnetic resonance imaging, ultrasound and blood sample tests, which require e"
+    },
+    {
+      "title": "Novel approach to locate region of interest in mammograms for Breast cancer",
+      "authors": "BV Divyashree, Amarnath R, Naveen M, G Hemantha Kumar",
+      "venue": "arXiv:cs.CV",
+      "year": "2018",
+      "url": "http://arxiv.org/abs/1811.07818v1",
+      "abstract": "Locating region of interest for breast cancer masses in the mammographic image is a challenging problem in medical image processing. In this research work, the keen idea is to efficiently extract suspected mass region for further examination. In particular to this fact breast boundary segmentation on sliced rgb image using modified intensity based approach followed by quad tree based division to spot out suspicious area are proposed in the paper. To evaluate the performance DDSM standard dataset are experimented and achieved acceptable accuracy."
+    },
+    {
+      "title": "Inception Architecture and Residual Connections in Classification of Breast Cancer Histology Images",
+      "authors": "Mohammad Ibrahim Sarker, Hyongsuk Kim, Denis Tarasov, Dinar Akhmetzanov",
+      "venue": "arXiv:eess.IV",
+      "year": "2019",
+      "url": "http://arxiv.org/abs/1912.04619v1",
+      "abstract": "This paper presents results of applying Inception v4 deep convolutional neural network to ICIAR-2018 Breast Cancer Classification Grand Challenge, part a. The Challenge task is to classify breast cancer biopsy results, presented in form of hematoxylin and eosin stained images. Breast cancer classification is of primary interest to the medical practitioners and thus binary classification of breast cancer images have been under investigation by many researchers, but multi-class categorization of histology breast images have been challenging due to the subtle differences among the categories. In this work extensive data augmentation is conducted to reduce overfitting and effectiveness of commit"
+    },
+    {
+      "title": "Breast Cancer Data Analytics With Missing Values: A study on Ethnic, Age and Income Groups",
+      "authors": "Santosh Tirunagari, Norman Poh, Hajara Abdulrahman, Nawal Nemmour, David Windridge",
+      "venue": "arXiv:q-bio.QM",
+      "year": "2015",
+      "url": "http://arxiv.org/abs/1503.03680v1",
+      "abstract": "An analysis of breast cancer incidences in women and the relationship between ethnicity and survival rate has been an ongoing study with recorded incidences of missing values in the secondary data. In this paper, we study and report the results of breast cancer survival rate by ethnicity, age and income groups from the dataset collected for 53593 patients in South East England between the years 1998 and 2003. In addition to this, we also predict the missing values for the ethnic groups in the dataset. The principle findings in our study suggest that: 1) women of white ethnicity in South East England have a highest percentage of survival rate when compared to the black ethnicity, 2) High inco"
+    },
+    {
+      "title": "Using convolutional neural networks for the classification of breast cancer images",
+      "authors": "Eric Bonnet",
+      "venue": "arXiv:q-bio.QM",
+      "year": "2021",
+      "url": "http://arxiv.org/abs/2108.13661v3",
+      "abstract": "An important part of breast cancer staging is the assessment of the sentinel axillary node for early signs of tumor spreading. However, this assessment by pathologists is not always easy and retrospective surveys often requalify the status of a high proportion of sentinel nodes. Convolutional Neural Networks (CNNs) are a class of deep learning algorithms that have shown excellent performances in the most challenging visual classification tasks, with numerous applications in medical imaging. In this study I compare twelve different CNNs and different hardware acceleration devices for the detection of breast cancer from microscopic images of breast cancer tissue. Convolutional models are train"
+    },
+    {
+      "title": "MM-SurvNet: Deep Learning-Based Survival Risk Stratification in Breast Cancer Through Multimodal Data Fusion",
+      "authors": "Raktim Kumar Mondol, Ewan K. A. Millar, Arcot Sowmya, Erik Meijering",
+      "venue": "arXiv:cs.CV",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2402.11788v1",
+      "abstract": "Survival risk stratification is an important step in clinical decision making for breast cancer management. We propose a novel deep learning approach for this purpose by integrating histopathological imaging, genetic and clinical data. It employs vision transformers, specifically the MaxViT model, for image feature extraction, and self-attention to capture intricate image relationships at the patient level. A dual cross-attention mechanism fuses these features with genetic data, while clinical data is incorporated at the final layer to enhance predictive accuracy. Experiments on the public TCGA-BRCA dataset show that our model, trained using the negative log likelihood loss function, can ach"
+    },
+    {
+      "title": "BioFusionNet: Deep Learning-Based Survival Risk Stratification in ER+ Breast Cancer Through Multifeature and Multimodal Data Fusion",
+      "authors": "Raktim Kumar Mondol, Ewan K. A. Millar, Arcot Sowmya, Erik Meijering",
+      "venue": "arXiv:cs.CV",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2402.10717v2",
+      "abstract": "Breast cancer is a significant health concern affecting millions of women worldwide. Accurate survival risk stratification plays a crucial role in guiding personalised treatment decisions and improving patient outcomes. Here we present BioFusionNet, a deep learning framework that fuses image-derived features with genetic and clinical data to obtain a holistic profile and achieve survival risk stratification of ER+ breast cancer patients. We employ multiple self-supervised feature extractors (DINO and MoCoV3) pretrained on histopathological patches to capture detailed image features. These features are then fused by a variational autoencoder and fed to a self-attention network generating pati"
+    },
+    {
+      "title": "AI-Enabled Lung Cancer Prognosis",
+      "authors": "Mahtab Darvish, Ryan Trask, Patrick Tallon, Mélina Khansari, Lei Ren, Michelle Hershman, Bardia Yousefi",
+      "venue": "arXiv:q-bio.QM",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2402.09476v1",
+      "abstract": "Lung cancer is the primary cause of cancer-related mortality, claiming approximately 1.79 million lives globally in 2020, with an estimated 2.21 million new cases diagnosed within the same period. Among these, Non-Small Cell Lung Cancer (NSCLC) is the predominant subtype, characterized by a notably bleak prognosis and low overall survival rate of approximately 25% over five years across all disease stages. However, survival outcomes vary considerably based on the stage at diagnosis and the therapeutic interventions administered. Recent advancements in artificial intelligence (AI) have revolutionized the landscape of lung cancer prognosis. AI-driven methodologies, including machine learning a"
+    }
+  ]
+}

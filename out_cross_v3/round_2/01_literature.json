@@ -1,0 +1,84 @@
+{
+  "papers": [
+    {
+      "title": "An improvement to k-nearest neighbor classifier",
+      "authors": "T. Hitendra Sarma, P. Viswanath, D. Sai Koti Reddy, S. Sri Raghava",
+      "venue": "arXiv:cs.CV",
+      "year": "2013",
+      "url": "http://arxiv.org/abs/1301.6324v1",
+      "abstract": "K-Nearest neighbor classifier (k-NNC) is simple to use and has little design time like finding k values in k-nearest neighbor classifier, hence these are suitable to work with dynamically varying data-sets. There exists some fundamental improvements over the basic k-NNC, like weighted k-nearest neighbors classifier (where weights to nearest neighbors are given based on linear interpolation), using artificially generated training set called bootstrapped training set, etc. These improvements are orthogonal to space reduction and classification time reduction techniques, hence can be coupled with any of them. The paper proposes another improvement to the basic k-NNC where the weights to nearest"
+    },
+    {
+      "title": "The RSNA Abdominal Traumatic Injury CT (RATIC) Dataset",
+      "authors": "Jeffrey D. Rudie, Hui-Ming Lin, Robyn L. Ball, Sabeena Jalal, Luciano M. Prevedello, Savvas Nicolaou, Brett S. Marinelli, Adam E. Flanders, Kirti Magudia, George Shih, Melissa A. Davis, John Mongan, Peter D. Chang, Ferco H. Berger, Sebastiaan Hermans, Meng Law, Tyler Richards, Jan-Peter Grunz, Andreas Steven Kunz, Shobhit Mathur, Sandro Galea-Soler, Andrew D. Chung, Saif Afat, Chin-Chi Kuo, Layal Aweidah, Ana Villanueva Campos, Arjuna Somasundaram, Felipe Antonio Sanchez Tijmes, Attaporn Jantarangkoon, Leonardo Kayat Bittencourt, Michael Brassil, Ayoub El Hajjami, Hakan Dogan, Muris Becircic, Agrahara G. Bharatkumar, Eduardo Moreno Júdice de Mattos Farina, Dataset Curator Group, Dataset Contributor Group, Dataset Annotator Group, Errol Colak",
+      "venue": "arXiv:cs.CV",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2405.19595v1",
+      "abstract": "The RSNA Abdominal Traumatic Injury CT (RATIC) dataset is the largest publicly available collection of adult abdominal CT studies annotated for traumatic injuries. This dataset includes 4,274 studies from 23 institutions across 14 countries. The dataset is freely available for non-commercial use via Kaggle at https://www.kaggle.com/competitions/rsna-2023-abdominal-trauma-detection. Created for the RSNA 2023 Abdominal Trauma Detection competition, the dataset encourages the development of advanced machine learning models for detecting abdominal injuries on CT scans. The dataset encompasses detection and classification of traumatic injuries across multiple organs, including the liver, spleen, "
+    },
+    {
+      "title": "Secure $k$-ish Nearest Neighbors Classifier",
+      "authors": "Hayim Shaul, Dan Feldman, Daniela Rus",
+      "venue": "arXiv:cs.DS",
+      "year": "2018",
+      "url": "http://arxiv.org/abs/1801.07301v2",
+      "abstract": "In machine learning, classifiers are used to predict a class of a given query based on an existing (classified) database. Given a database S of n d-dimensional points and a d-dimensional query q, the k-nearest neighbors (kNN) classifier assigns q with the majority class of its k nearest neighbors in S.   In the secure version of kNN, S and q are owned by two different parties that do not want to share their data. Unfortunately, all known solutions for secure kNN either require a large communication complexity between the parties, or are very inefficient to run.   In this work we present a classifier based on kNN, that can be implemented efficiently with homomorphic encryption (HE). The effic"
+    },
+    {
+      "title": "Improving Vertical Positioning Accuracy with the Weighted Multinomial Logistic Regression Classifier",
+      "authors": "Yiyan Yao, Xin-long Luo",
+      "venue": "arXiv:eess.SP",
+      "year": "2020",
+      "url": "http://arxiv.org/abs/2004.13909v2",
+      "abstract": "In this paper, a method of improving vertical positioning accuracy with the Global Positioning System (GPS) information and barometric pressure values is proposed. Firstly, we clear null values for the raw data collected in various environments, and use the 3$σ$-rule to identify outliers. Secondly, the Weighted Multinomial Logistic Regression (WMLR) classifier is trained to obtain the predicted altitude of outliers. Finally, in order to verify its effect, we compare the MLR method, the WMLR method, and the Support Vector Machine (SVM) method for the cleaned dataset which is regarded as the test baseline. The numerical results show that the vertical positioning accuracy is improved from 5.9 m"
+    },
+    {
+      "title": "Benchmarking Logistic Regression, SVM, and LightGBM Against BiLSTM with Attention for Sentiment Analysis on Indonesian Product Reviews",
+      "authors": "Razin Hafid Hamdi, Ivana Margareth Hutabarat, Hanna Gresia Sinaga, Luluk Muthoharoh, Ardika Satria, Martin C. T. Manullang",
+      "venue": "arXiv:cs.CL",
+      "year": "2026",
+      "url": "http://arxiv.org/abs/2604.25452v1",
+      "abstract": "Sentiment analysis of product reviews on e-commerce platforms plays a critical role in automatically understanding customer satisfaction and providing actionable insights for sellers seeking to improve product quality. This paper presents a comprehensive benchmarking study comparing a Machine Learning (ML) approach via the PyCaret AutoML framework against a Deep Learning (DL) approach based on a Bidirectional Long Short-Term Memory (BiLSTM) architecture with an Attention mechanism for binary sentiment classification on Indonesian product reviews. The dataset comprises 19,728 samples balanced equally between positive and negative reviews. For the ML approach, three prominent algorithms were e"
+    },
+    {
+      "title": "Distance and Similarity Measures Effect on the Performance of K-Nearest Neighbor Classifier -- A Review",
+      "authors": "V. B. Surya Prasath, Haneen Arafat Abu Alfeilat, Ahmad B. A. Hassanat, Omar Lasassmeh, Ahmad S. Tarawneh, Mahmoud Bashir Alhasanat, Hamzeh S. Eyal Salman",
+      "venue": "arXiv:cs.LG",
+      "year": "2017",
+      "url": "http://arxiv.org/abs/1708.04321v3",
+      "abstract": "The K-nearest neighbor (KNN) classifier is one of the simplest and most common classifiers, yet its performance competes with the most complex classifiers in the literature. The core of this classifier depends mainly on measuring the distance or similarity between the tested examples and the training examples. This raises a major question about which distance measures to be used for the KNN classifier among a large number of distance and similarity measures available? This review attempts to answer this question through evaluating the performance (measured by accuracy, precision and recall) of the KNN using a large number of distance measures, tested on a number of real-world datasets, with "
+    },
+    {
+      "title": "Rage Music Classification and Analysis using K-Nearest Neighbour, Random Forest, Support Vector Machine, Convolutional Neural Networks, and Gradient Boosting",
+      "authors": "Akul Kumar",
+      "venue": "arXiv:cs.SD",
+      "year": "2024",
+      "url": "http://arxiv.org/abs/2408.10864v1",
+      "abstract": "We classify rage music (a subgenre of rap well-known for disagreements on whether a particular song is part of the genre) with an extensive feature set through algorithms including Random Forest, Support Vector Machine, K-nearest Neighbour, Gradient Boosting, and Convolutional Neural Networks. We compare methods of classification in the application of audio analysis with machine learning and identify optimal models. We then analyze the significant audio features present in and most effective in categorizing rage music, while also identifying key audio features as well as broader separating sonic variations and trends."
+    },
+    {
+      "title": "Security Evaluation of Support Vector Machines in Adversarial Environments",
+      "authors": "Battista Biggio, Igino Corona, Blaine Nelson, Benjamin I. P. Rubinstein, Davide Maiorca, Giorgio Fumera, Giorgio Giacinto, and Fabio Roli",
+      "venue": "arXiv:cs.LG",
+      "year": "2014",
+      "url": "http://arxiv.org/abs/1401.7727v1",
+      "abstract": "Support Vector Machines (SVMs) are among the most popular classification techniques adopted in security applications like malware detection, intrusion detection, and spam filtering. However, if SVMs are to be incorporated in real-world security systems, they must be able to cope with attack patterns that can either mislead the learning algorithm (poisoning), evade detection (evasion), or gain information about their internal parameters (privacy breaches). The main contributions of this chapter are twofold. First, we introduce a formal general framework for the empirical evaluation of the security of machine-learning systems. Second, according to our framework, we demonstrate the feasibility "
+    },
+    {
+      "title": "Examining the Use of Neural Networks for Feature Extraction: A Comparative Analysis using Deep Learning, Support Vector Machines, and K-Nearest Neighbor Classifiers",
+      "authors": "Stephen Notley, Malik Magdon-Ismail",
+      "venue": "arXiv:cs.LG",
+      "year": "2018",
+      "url": "http://arxiv.org/abs/1805.02294v2",
+      "abstract": "Neural networks in many varieties are touted as very powerful machine learning tools because of their ability to distill large amounts of information from different forms of data, extracting complex features and enabling powerful classification abilities. In this study, we use neural networks to extract features from both images and numeric data and use these extracted features as inputs for other machine learning models, namely support vector machines (SVMs) and k-nearest neighbor classifiers (KNNs), in order to see if neural-network-extracted features enhance the capabilities of these models. We tested 7 different neural network architectures in this manner, 4 for images and 3 for numeric "
+    },
+    {
+      "title": "Early Detection of Late Blight Tomato Disease using Histogram Oriented Gradient based Support Vector Machine",
+      "authors": "Yousef Alhwaiti, Muhammad Ishaq, Muhammad Hameed Siddiqi, Muhammad Waqas, Madallah Alruwaili, Saad Alanazi, Asfandyar Khan, Faheem Khan",
+      "venue": "arXiv:cs.CV",
+      "year": "2023",
+      "url": "http://arxiv.org/abs/2306.08326v3",
+      "abstract": "The tomato is one of the most important fruits on earth. It plays an important and useful role in the agricultural production of any country. This research propose a novel smart technique for early detection of late blight diseases in tomatoes. This work improve the dataset with an increase in images from the field (the Plant Village dataset) and proposed a hybrid algorithm composed of support vector machines (SVM) and histogram-oriented gradients (HOG) for real-time detection of late blight tomato disease. To propose a HOG-based SVM model for early detection of late blight tomato leaf disease. To check the performance of the proposed model in terms of MSE, accuracy, precision, and recall as"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "round": 1,
+    "out_dir": "out_single_v3\\round_1",
+    "best_method": "逻辑回归",
+    "paper": "C:\\Users\\yang\\WorkBuddy\\2026-10-19-21-08-29\\autoresearch_v4\\autoresearch\\AutoResearch-v2-internal(1)\\AutoResearch\\out_single_v3\\round_1\\06_paper\\paper_full.docx",
+    "errors": []
+  },
+  {
+    "round": 2,
+    "out_dir": "out_single_v3\\round_2",
+    "best_method": "(多数据集)",
+    "paper": "C:\\Users\\yang\\WorkBuddy\\2026-10-19-21-08-29\\autoresearch_v4\\autoresearch\\AutoResearch-v2-internal(1)\\AutoResearch\\out_single_v3\\round_2\\06_paper\\paper_full.docx",
+    "errors": []
+  }
+]

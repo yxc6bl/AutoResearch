@@ -1,0 +1,19 @@
+# AutoResearch 运行依赖（建议 Python 3.11）
+openai>=1.0
+python-docx>=1.1
+
+# 核心分析引擎依赖（sklearn 后端必需；原配置文件漏装导致第三步 import numpy 崩溃）
+numpy>=1.24
+scikit-learn>=1.3
+scipy>=1.10
+pandas>=2.0
+matplotlib>=3.7
+
+# ── 可选后端（装了就用，不装则引擎自动跳过该方法，不影响主链路） ──
+# 想用梯度提升 / 树模型进阶后端：
+#   pip install xgboost lightgbm
+# 想用深度学习后端（PyTorchMLP 包装器）：
+#   pip install torch
+# 在 spec 的 candidate_methods 里直接用其完整 import 路径即可，例如
+#   {"estimator": "xgboost.XGBClassifier", "params": {"n_estimators": 300, "random_state": "<seed>"}}
+#   {"estimator": "PyTorchMLP", "params": {"hidden": [64,32], "epochs": 60, "task": "classification"}}

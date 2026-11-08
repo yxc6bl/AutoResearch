@@ -1,0 +1,20 @@
+{
+  "title": "基于多种机器学习方法的葡萄酒品种判别基准比较",
+  "research_question": "三种葡萄酒的化学成分在线性与集成模型下的可分性差异及其成因？",
+  "task_type": "classification",
+  "data": { "source": "sklearn", "name": "wine" },
+  "candidate_methods": [
+    { "name": "逻辑回归", "estimator": "sklearn.linear_model.LogisticRegression", "params": { "max_iter": 3000, "random_state": "<seed>" } },
+    { "name": "随机森林", "estimator": "sklearn.ensemble.RandomForestClassifier", "params": { "n_estimators": 300, "random_state": "<seed>" } },
+    { "name": "支持向量机", "estimator": "sklearn.svm.SVC", "params": { "random_state": "<seed>" } }
+  ],
+  "metric": "accuracy",
+  "objective": "maximize",
+  "sub_hypotheses": [
+    { "id": "H1", "statement": "集成方法（随机森林）在葡萄酒品种判别上的准确率显著高于线性方法", "rationale": "化学成分呈非线性交互，集成方法更能刻画复杂决策边界", "expected": "随机森林 accuracy 居首" },
+    { "id": "H2", "statement": "Top-10 特征即可逼近全量特征的判别性能，说明特征存在冗余", "rationale": "真实化学数据常含相关特征", "expected": "Top-10 特征 accuracy 不显著下降" },
+    { "id": "H3", "statement": "模型表现对随机种子具有稳定性（5 种子标准差小于主指标 2%）", "rationale": "稳定训练协议下方差应可控", "expected": "多种子 std 较小" }
+  ],
+  "analysis_plan": "在 wine 上统一评估各方法，以 accuracy 为主指标比较，并做多种子稳定性与假设检验。",
+  "literature_query": "wine classification machine learning benchmark"
+}

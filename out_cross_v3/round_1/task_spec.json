@@ -1,0 +1,95 @@
+{
+  "title": "多分类器在异构表格数据上的准确率、排名一致性与跨数据集稳定性研究",
+  "research_question": "在特征维度、样本量与类别数差异显著的多个结构化数据集上，不同归纳偏置族（线性模型、树集成、核方法、近邻）的分类器在准确率、排名一致性及跨数据集稳定性方面表现出何种差异？",
+  "task_type": "classification",
+  "data": {
+    "source": "sklearn",
+    "name": "breast_cancer"
+  },
+  "datasets": [
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "breast_cancer"
+      },
+      "label": "乳腺癌数据集（低维二分类）"
+    },
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "digits"
+      },
+      "label": "手写数字数据集（中高维多类）"
+    },
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "wine"
+      },
+      "label": "葡萄酒数据集（低维多类）"
+    }
+  ],
+  "candidate_methods": [
+    {
+      "name": "逻辑回归",
+      "estimator": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "max_iter": 3000,
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "随机森林",
+      "estimator": "sklearn.ensemble.RandomForestClassifier",
+      "params": {
+        "n_estimators": 300,
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "支持向量机",
+      "estimator": "sklearn.svm.SVC",
+      "params": {
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "K近邻",
+      "estimator": "sklearn.neighbors.KNeighborsClassifier",
+      "params": {
+        "n_neighbors": 5
+      }
+    },
+    {
+      "name": "梯度提升树",
+      "estimator": "sklearn.ensemble.GradientBoostingClassifier",
+      "params": {
+        "random_state": "<seed>"
+      }
+    }
+  ],
+  "metric": "accuracy",
+  "objective": "maximize",
+  "sub_hypotheses": [
+    {
+      "id": "H1",
+      "statement": "在多种子下，随机森林的准确率标准差小于K近邻。",
+      "rationale": "随机森林通过集成多棵决策树降低了模型方差，而K近邻对数据局部结构和噪声敏感，在不同训练/测试划分下波动更大。",
+      "expected": "随机森林的准确率标准差显著低于K近邻。"
+    },
+    {
+      "id": "H2",
+      "statement": "在准确率上，梯度提升树显著优于逻辑回归。",
+      "rationale": "梯度提升树能自动捕捉特征间的非线性交互作用，而逻辑回归仅学习线性决策边界，在包含非线性结构的数据上表达能力受限。",
+      "expected": "梯度提升树的平均准确率高于逻辑回归。"
+    },
+    {
+      "id": "H3",
+      "statement": "梯度提升树相对逻辑回归的准确率优势在手写数字数据集上比在乳腺癌数据集上更大。",
+      "rationale": "手写数字数据集特征维度更高、类别数更多，非线性结构更丰富，更能体现树集成模型相对于线性模型的表达能力优势；乳腺癌数据集结构相对简单，线性模型已能取得不错效果。",
+      "expected": "梯度提升树与逻辑回归的准确率差值在手写数字数据集上大于乳腺癌数据集。"
+    }
+  ],
+  "analysis_plan": "在三个数据集上分别进行多次随机种子重复实验，计算各方法的平均准确率与标准差，比较排名一致性并分析跨数据集的性能差异模式。",
+  "literature_query": "classifier comparison benchmark ranking stability tabular data"
+}

@@ -1,0 +1,102 @@
+{
+  "title": "多分类器在异构表格数据上的准确率、排名一致性与跨数据集稳定性研究",
+  "research_question": "在特征维度、样本量与类别数差异显著的多个结构化数据集上，线性模型、树集成、核方法、近邻及梯度提升等不同归纳偏置族的分类器在准确率、排名一致性及跨数据集稳定性方面表现出何种差异？",
+  "task_type": "classification",
+  "metric": "accuracy",
+  "objective": "maximize",
+  "datasets": [
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "breast_cancer"
+      },
+      "label": "乳腺癌数据集（低维二分类）"
+    },
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "digits"
+      },
+      "label": "手写数字数据集（中高维多类）"
+    },
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "wine"
+      },
+      "label": "葡萄酒数据集（低维多类）"
+    },
+    {
+      "data": {
+        "source": "sklearn",
+        "name": "iris"
+      },
+      "label": "鸢尾花数据集（低维多类）"
+    }
+  ],
+  "candidate_methods": [
+    {
+      "name": "逻辑回归",
+      "estimator": "sklearn.linear_model.LogisticRegression",
+      "params": {
+        "max_iter": 3000,
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "随机森林",
+      "estimator": "sklearn.ensemble.RandomForestClassifier",
+      "params": {
+        "n_estimators": 300,
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "支持向量机",
+      "estimator": "sklearn.svm.SVC",
+      "params": {
+        "random_state": "<seed>"
+      }
+    },
+    {
+      "name": "K近邻",
+      "estimator": "sklearn.neighbors.KNeighborsClassifier",
+      "params": {
+        "n_neighbors": 5
+      }
+    },
+    {
+      "name": "梯度提升树",
+      "estimator": "sklearn.ensemble.GradientBoostingClassifier",
+      "params": {
+        "random_state": "<seed>"
+      }
+    }
+  ],
+  "sub_hypotheses": [
+    {
+      "id": "H1",
+      "statement": "在多种子下，支持向量机的准确率标准差小于K近邻",
+      "rationale": "上一轮结果显示支持向量机排名标准差最低（0.47），K近邻排名标准差较高（0.82），推测支持向量机在准确率上的跨种子稳定性也优于K近邻，需直接验证准确率标准差。",
+      "expected": "支持向量机准确率标准差在所有数据集上均低于K近邻"
+    },
+    {
+      "id": "H2",
+      "statement": "在准确率上，支持向量机显著优于梯度提升树",
+      "rationale": "上一轮中支持向量机在两个数据集上取得最优，梯度提升树平均排名最低（4.33），需通过两两比较检验支持向量机对梯度提升树的优势是否统计显著。",
+      "expected": "支持向量机在多数数据集上准确率显著高于梯度提升树"
+    },
+    {
+      "id": "H3",
+      "statement": "逻辑回归相对K近邻的优势在乳腺癌数据集上比在手写数字数据集上更大",
+      "rationale": "上一轮乳腺癌数据集上逻辑回归最优（0.974），而K近邻在低维数据上可能受噪声影响；手写数字数据集维度高，K近邻可能因维度灾难表现更差，需检验逻辑回归相对K近邻的优势在不同数据集上的差异。",
+      "expected": "逻辑回归与K近邻的准确率差值在乳腺癌数据集上大于手写数字数据集"
+    }
+  ],
+  "analysis_plan": "在4个分类数据集上运行5种分类器，每种组合进行多轮随机种子评估，计算准确率均值与标准差，执行配对t检验和跨数据集效应量分析。",
+  "literature_query": "classifier stability across datasets, accuracy ranking consistency, support vector machine vs gradient boosting, logistic regression vs k-nearest neighbors, dataset characteristics effect on classifier performance",
+  "data": {
+    "source": "sklearn",
+    "name": "breast_cancer"
+  }
+}
