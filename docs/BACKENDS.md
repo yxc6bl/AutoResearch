@@ -296,3 +296,48 @@ G04 正确记为「未验证」而不是通过，重跑一次才拿到有效评�
 `paper_full.docx`（97KB）、`plots/graph_protocol.png`（34KB）。
 网站 `/api/open?dir=out_graph_cli` 返回 `hard_pass / 94.8`，正文含
 「Cora / 传导泄漏 / 0.8515 / 节点级分层」与图片路径。
+
+## 八、已落地实例：小规模图像分类（image）
+
+### 8.1 真实数据与可复现性
+
+`data/mnist/` 下四个 IDX gzip 文件，来自 torchvision 使用的公开 MNIST 镜像。
+下载后逐个校验 magic 与维度：2051 / 60000×28×28、2051 / 10000×28×28、
+2049 / 60000、2049 / 10000，端点齐全。
+
+实验沿用 MNIST 官方划分，按固定种子 42 分层抽取 12000/2000 张（控制 CPU 预算、
+保持各类比例）。**torch 多线程下卷积的浮点归约顺序不确定**，实测同题两次跑出
+0.9665 / 0.9685；固定 `torch.set_num_threads(1)` + `manual_seed(42)` 后两次都是 0.9615。
+这是第一个 torch 后端特有的坑：确定性不只要设种子，还要限制并行归约。
+
+### 8.2 四接线点
+
+| 接线点 | 落点 |
+|---|---|
+| ① 题目解析 | `DATASET_CATALOG` 加 `mnist`（`source=image`、`format=idx`、`modality=image`、方法白名单、`strict_kw`）；`_data_binding` 加 image 分支；`build_candidate_methods` 支持白名单 |
+| ② 数据加载 | 独立模块 `engine/image_backend.py` 的 `load_idx()` 直读 gzip IDX 张量 (N,1,28,28)，**跳过** `build_tabular_preprocessor`（它只认 DataFrame） |
+| ③ 评估协议 | `run_image()`：三个模型共用同一划分 / 种子 / 训练预算，自管 batch、epoch、参数量与耗时；指标 top-1 accuracy + macro-F1，出三张图 |
+| ④ 事实契约 | `_fact_pack` / `_ground_truth` 注入模型实测值、逐 epoch 曲线、参数量与训练配置；模板在 3.3 / 数学层 / 第 4 章 / 5.1 / 5.4 / 第 6 章标题 / 8.0 / 8.1 / 8.2 全部按 `analysis.image` 分支 |
+
+三个模型：小型 CNN（2 层卷积 + 池化 + 全连接，105866 参数）、扁平像素 MLP
+（101770 参数）、像素逻辑回归（7850 参数）。5 个 epoch、batch 128、
+CPU 从头训练、无预训练权重、增广接口预留但默认关闭、预处理只有 /255。
+
+### 8.3 一个必要的防守：`strict_kw`
+
+刚加 MNIST 目录时用了「卷积 / cnn / 像素 / 图像分类」这类泛关键词，
+`match_dataset` 里 `modality=image` 还有 +1 加权，结果把车辆识别、域迁移、
+乳腺诊断等题从它们真正的同领域数据集上抢了过来：
+**同领域真实可执行从 14 掉到 10**。
+
+修法是给目录加 `strict_kw`：题目必须点名「手写数字 / 数字识别 / mnist / 手写体」
+才允许匹配 MNIST。再去掉多余的 `proxy` 标记（strict_kw 保证它接住的都是同领域真实数据），
+benchmark 恢复 **21/33、代理 7、同领域真实 14、误匹配 0**。
+
+一句话：**扩能力不能以牺牲已有正确匹配为代价**，每次加目录都要重跑
+`benchmark_titles.py` 看「同领域真实」这一栏有没有掉。
+
+### 8.4 网站入口
+
+下拉框加 `mnist_image` → `--catalog-key mnist`；`plan` 对 image 也强制走确定性 spec
+（否则 LLM Planner 会把它当 sklearn 数据集）。

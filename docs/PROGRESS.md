@@ -379,3 +379,59 @@ association 强制走确定性 spec，避免 LLM Planner 当成 sklearn 数据�
 复评：**hard_pass / 综合 94.8 / 评审官 85 分 / 0 幻觉**，`gates` P0 四项全通过、结论「可交付」。
 中途一次评审官 `bad_json` 被 G04 记「未验证」而非通过，重跑才放行——闸门没放水。
 网站 `/api/open?dir=out_graph_cli` 正确返回该论文（49731 字符 HTML）与评分卡。
+
+---
+
+## 12. GitHub 同步链路 + 第七个后端：小规模图像分类（2026-11-08）
+
+### 12.1 仓库与远端
+
+本地仓库已提交 `51b1ceb`（20 文件、15414 行改动），工作区干净、40+ 次提交、
+37MB / 59 个跟踪文件。`origin` **未配置**，本机没有 GitHub 凭据，
+但网络通（`git ls-remote https://github.com/git/git.git` 成功），
+且 Git Credential Manager 2.9.0 已安装。
+
+新增 `scripts/github_sync.py` 与 `docs/GITHUB_SYNC.md`：`--setup <URL>` 配置 origin
++ 仓库级 `credential.helper=manager` + 安装 post-commit 自动推送 hook；
+无参数则 `add -A → commit → push`。Token 只用 `git -c http.extraheader=...`
+临时注入 push 进程，**不写 remote URL / .git/config / hook 文件**；
+hook 只推不提交避免递归，失败写 `.git/sync.log` 不影响 commit。
+
+差用户提供的两样：**仓库 URL** 与 **一次授权**（GCM 弹窗或 PAT）。
+
+### 12.2 真实数据：MNIST
+
+`data/mnist/` 四个 IDX gzip 文件，校验 magic / 维度（60000×28×28 train、
+10000×28×28 test）。沿用官方划分，按种子 42 分层抽 12000/2000 张。
+
+**torch 确定性坑**：多线程卷积的浮点归约顺序不确定，同题两次 0.9665 / 0.9685；
+固定 `set_num_threads(1)` + `manual_seed(42)` 后两次都是 0.9615。
+这是第一个 torch 后端，确定性不只要设种子。
+
+### 12.3 四接线点
+
+独立模块 `engine/image_backend.py`（`load_idx` 直读张量，`run_image` 自管
+batch/epoch/参数量/耗时），`run_analysis` 按 `data.source=="image"` 早返回。
+三个模型共用同一划分与预算：小型 CNN（105866 参数）/ 扁平 MLP（101770）/
+像素逻辑回归（7850）；5 epoch、batch 128、CPU 从头训练、无预训练权重、
+只做 /255、增广接口预留默认关闭。实测 CNN 0.9615、MLP 0.9245、LR 0.9015，
+3 张图（训练曲线 / 混淆矩阵 / 样例预测）。
+
+模板按 `analysis.image` 分支：3.3 评价协议、数学层式(2)–(4)、第 4 章、
+表 1 表头、5.4 逐 epoch 表、第 6 章标题去掉「假设检验」、8.0/8.1/8.2；
+`_fact_pack` / `_ground_truth` 注入全部实测值并禁用「多种子方差 / 标准化 /
+预训练权重 / GPU / 配对显著性检验」等套话。`_plots_block` 支持 `plots/` 回退，
+三张图终于真正嵌进正文与 Word。
+
+### 12.4 一个倒退与修复
+
+新目录一开始用了「卷积 / cnn / 像素 / 图像分类」泛关键词，叠加
+`modality=image` 的 +1 加权，把车辆识别、域迁移、乳腺诊断等题从真正的
+数据集上抢走：**同领域真实可执行 14 → 10**。加 `strict_kw`
+（题目必须点名手写数字才允许匹配）并去掉多余的 proxy 标记后恢复
+**21/33、代理 7、同领域真实 14、误匹配 0**。
+扩能力不能牺牲已有正确匹配，每次加目录都要重跑 benchmark 看这一栏。
+
+### 12.5 网站
+
+下拉框加 `mnist_image` → `--catalog-key mnist`；`plan` 对 image 强制确定性 spec。

@@ -702,6 +702,34 @@ def _ground_truth(analysis: dict) -> str:
             bits.append(f"  - {k}：差值={v.get('diff'):.4f}，p={v.get('p'):.4f}")
         bits.append("本文是一跳邻居特征加表格分类器，不是图神经网络，未复现过平滑现象；"
                     "正文若声称使用 GNN/GCN、5 个随机种子、标准化/插补/独热编码，均为编造。")
+    _im = analysis.get("image")
+    if isinstance(_im, dict) and _im:
+        bits.append(f"图像分类：{_im.get('dataset')}，官方划分 "
+                    f"{_im.get('n_train_full')}/{_im.get('n_test_full')}，"
+                    f"按种子 {_im.get('seed')} 分层抽取 "
+                    f"{_im.get('n_train_used')}/{_im.get('n_test_used')}；"
+                    f"输入形状 {_im.get('input_shape')}，{_im.get('n_classes')} 类；"
+                    f"归一化={_im.get('normalization')}，增广={_im.get('augmentation')}，"
+                    f"设备={_im.get('device')}，预训练权重={_im.get('pretrained')}。")
+        bits.append(f"训练配置：epoch={_im.get('epochs')}，batch={_im.get('batch_size')}，"
+                    f"随机种子={_im.get('seed')}，torch={_im.get('torch_version')}，"
+                    f"合计耗时={_im.get('total_s')}s。")
+        bits.append("各模型实测（四位小数，论文引用时不得改写）：")
+        for k, v in (_im.get("models") or {}).items():
+            bits.append(f"  - {k}：accuracy={v.get('accuracy'):.4f}，"
+                        f"macro-F1={v.get('f1_macro'):.4f}，参数量={v.get('params')}，"
+                        f"epoch={v.get('epochs') or '不适用'}，训练耗时={v.get('train_s')}s")
+        bits.append("逐 epoch 训练损失与测试准确率（实测，论文可原样引用）：")
+        for k, hst in (_im.get("history") or {}).items():
+            bits.append(f"  - {k}：" + "；".join(
+                f"epoch{h['epoch']} 损失={h['train_loss']:.4f} 准确率={h['test_accuracy']:.4f}"
+                for h in hst))
+        _ib = _im.get("best") or {}
+        bits.append(f"核心结论（最优模型）：{_ib.get('name')} "
+                    f"accuracy={_ib.get('accuracy'):.4f}，macro-F1={_ib.get('f1_macro'):.4f}")
+        bits.append("本实验固定划分、固定种子、单次训练，未做多种子复现与配对显著性检验；"
+                    "正文若声称多种子标准差、p 值、预训练权重、迁移学习、GPU、"
+                    "数据增广、标准化/中位数插补/独热编码，均为编造。")
     # 逐类指标与混淆矩阵都是分析引擎实测的，必须完整进事实清单。
     # 早期版本只把它们塞进写作端的事实包、没给评审官，结果正文里每一个
     # 真实的逐类数字都被判成「事实清单未提供」的幻觉。

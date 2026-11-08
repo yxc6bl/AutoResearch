@@ -1545,6 +1545,10 @@ def run_analysis(spec: dict, out_path: Path) -> dict:
     # 图节点分类靠 data.source 分派（它仍是分类任务，但划分与泄漏语义完全不同）
     if (spec.get("data") or {}).get("source") == "graph":
         return _run_graph(spec, out_path)
+    # 图像张量走不了 build_tabular_preprocessor，独立模块自己管 batch/epoch
+    if (spec.get("data") or {}).get("source") == "image":
+        from engine.image_backend import run_image
+        return run_image(spec, out_path)
 
     norm = _normalize_methods(spec.get("candidate_methods"))
     methods = [k for k, _ in norm]

@@ -37,7 +37,7 @@ _task_seq = 0
 
 # 可选内置数据集（sklearn）
 DATASETS = ["breast_cancer", "iris", "wine", "digits", "load_diabetes",
-            "fetch_california_housing", "market_basket", "cora_graph"]
+            "fetch_california_housing", "market_basket", "cora_graph", "mnist_image"]
 
 
 def _next_id() -> str:
@@ -84,6 +84,9 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
         elif dataset == "cora_graph":
             # 图数据要 nodes + edges 两个文件，不能走 --data/--dataset 的单表入口。
             cmd += ["--catalog-key", "cora"]
+        elif dataset == "mnist_image":
+            # 图像是 IDX 张量目录，同样走目录绑定而不是单表入口。
+            cmd += ["--catalog-key", "mnist"]
         else:
             cmd += ["--dataset", dataset]
 

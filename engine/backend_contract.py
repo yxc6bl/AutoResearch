@@ -79,6 +79,11 @@ register(BackendSpec("graph", "graph", ("graph",),
                      note="独立分支 _run_graph()：节点级分层 K 折 × 三种特征协议；"
                           "显式区分全图（含传导泄漏）与折内（无泄漏）邻居均值，"
                           "核心结论只从无泄漏协议中择优；source=graph 指 nodes+edges 两个文件"))
+register(BackendSpec("image", "image", ("image",),
+                     deps=("torch", "numpy", "matplotlib", "sklearn"),
+                     note="独立模块 engine/image_backend.py：IDX 张量直读，"
+                          "torch 小型 CNN / MLP + sklearn 线性基线，自管 batch/epoch/参数量；"
+                          "跳过 build_tabular_preprocessor；source=image 指 IDX gzip 目录"))
 
 # ── 尚未接线、按性价比排序的缺口 ────────────────────────────────────────
 GAPS = [
@@ -98,12 +103,14 @@ GAPS = [
                "剩余缺口是社交网络/推荐领域的同领域真实数据，以及真 GNN 的层数消融。",
     },
     {
-        "name": "视觉/视频", "priority": 3, "new_branch": True,
+        "name": "视觉/视频（小规模图像分类已接线）", "priority": 3, "new_branch": True,
         "topics": ["基于深度学习的车辆识别系统", "基于深度学习的智能无人收银系统",
                    "基于深度学习的交通标志检测系统", "基于深度神经网络的智能视频计算",
                    "基于迁移学习的模态检测方法", "基于机器学习的入侵检测方法"],
-        "deps": ("torch", "torchvision"), "extra": "依赖之外还需要预训练权重与 CPU/GPU 预算；装没装以 --probe 的真导入为准，find_spec 不算数",
-        "how": "新增 source=image，load 返回张量；run_analysis 增图像分支（跳过 build_tabular_preprocessor，它对张量不适用）；评估用 top-1/mAP；事实清单必须给真实 epoch/权重来源。",
+        "deps": ("torch", "torchvision"), "extra": "torch 2.15.0+cpu / torchvision 0.29.2+cpu 已装；"
+                              "2026-11-08 已接 MNIST 小规模图像分类，但检测/分割/视频与真实场景数据仍是缺口",
+        "how": "source=image 已实现（IDX 张量直读 + torch CNN/MLP + sklearn 线性基线）；"
+               "剩余工作是把 DataLoader、增广、预训练权重与检测/视频指标接到同一套契约上。",
     },
     {
         "name": "文本/语言模型", "priority": 4, "new_branch": True,

@@ -14,6 +14,9 @@ matplotlib>=3.7
 #   pip install xgboost lightgbm
 # 想用深度学习后端（PyTorchMLP 包装器）：
 #   pip install torch
+# 想跑小规模图像分类后端（source=image，MNIST IDX + torch CNN）：
+#   pip install torch matplotlib
+#   torch 是这条后端的硬依赖；缺了它图像分支会直接报「无法加载图像数据」。
 # 想读老式 .xls（data/_concrete.data → data/concrete_strength.csv）：
 #   pip install xlrd
 # 图后端（可选，纯 numpy 也能做）：

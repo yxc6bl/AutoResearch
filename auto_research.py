@@ -667,7 +667,8 @@ def cmd_plan(args) -> int:
         try:
             from engine.topic_parser import detect_task_type as _dtt, assemble_title_spec as _ats
             if (_dtt(args.topic) == "association"
-                    or data_override.get("source") in ("graph", "timeseries", "association")):
+                    or data_override.get("source") in
+                    ("graph", "timeseries", "association", "image")):
                 spec = _ats(args.topic, data_override=data_override)
                 print("[plan·确定性] 自带/目录数据 + 非表格任务，使用可复现 spec")
         except Exception:

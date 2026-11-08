@@ -114,6 +114,21 @@ _METHOD_DEFS = {
                        "early_stopping": True, "random_state": "<seed>"},
         "cat": "神经网络",
     },
+    # 图像后端专用：这两个 key 不经过 build_estimator，_run_image 会按名字
+    # 自己构造 torch 模型。放在 _METHOD_DEFS 里是为了让 spec 的
+    # candidate_methods 如实列出论文里真正比较的模型，3.2 节不会写错。
+    "small_cnn": {
+        "cn": "小型卷积神经网络",
+        "aliases": ["小型卷积", "small cnn", "卷积网络"],
+        "clf": "torch.SmallCNN", "reg": "",
+        "params_clf": {}, "params_reg": {}, "cat": "神经网络",
+    },
+    "mlp_torch": {
+        "cn": "多层感知机（图像）",
+        "aliases": ["图像多层感知机", "torch mlp"],
+        "clf": "torch.FlatMLP", "reg": "",
+        "params_clf": {}, "params_reg": {}, "cat": "神经网络",
+    },
 }
 
 # 题目里出现这些写法但目前引擎未内置后端 → 记录为「暂不支持」，不阻塞主流程。
@@ -138,6 +153,7 @@ _DEFAULT_METHODS = {
     # 图节点特征高达 1433 维且稀疏，只放在本数据上跑得动、语义也合适的方法：
     # 线性模型 / 朴素贝叶斯 / 决策树 / KNN。SVC-RBF 在这里是 O(n²)，不做。
     "graph": ["lr", "nb", "dt", "knn"],
+    "image": ["small_cnn", "mlp_torch", "lr"],
 }
 
 
@@ -212,6 +228,34 @@ DATASET_CATALOG = [
         "proxy": True,
         "proxy_note": "Cora 是真实引文网络，但题目若指向社交网络推荐或 GNN 过平滑，"
                       "它是代理数据；且本后端是一跳邻居特征加表格分类器，不是图神经网络",
+    },
+    {
+        "key": "mnist",
+        "label": "MNIST 手写数字图像数据集（IDX）",
+        "source": "image",
+        "format": "idx",
+        "root": str(DATA_DIR / "mnist"),
+        "target": "label",
+        "task": "classification",
+        "modality": "image",
+        "methods": ["small_cnn", "mlp_torch", "lr"],
+        "n_train": 12000, "n_test": 2000, "epochs": 5,
+        "batch_size": 128, "seed": 42, "augment": False,
+        # 关键词只放专属词。放「卷积 / cnn / 像素 / 图像分类」这类泛词会
+        # 把别的题目从它们真正的同领域数据集上抢过来，实测同领域可执行
+        # 从 14 掉到 10 —— 扩能力不能以牺牲已有正确匹配为代价。
+        "domain_kw": ["手写数字", "数字识别", "mnist", "手写体", "数字图像分类"],
+        "strict_kw": ["手写数字", "数字识别", "mnist", "手写体"],
+        "lit_query": "MNIST handwritten digit classification CNN convolutional neural network benchmark",
+        "desc_cn": "手写数字图像分类",
+        "target_cn": "手写数字类别（0–9）",
+        "n": 70000, "feat": 784,
+        # strict_kw 保证只有题目点名手写数字才会匹配到 MNIST，
+        # 因此它能接住的题都是同领域真实数据，不该再标 proxy。
+        # 真实场景图像题（车辆/交通标志/无人收银）被 strict_kw 挡在外面，
+        # 不会拿手写数字冒充，也不会把别人的正确匹配抢过来。
+        "scope_note": "本后端只做小规模图像分类，不含检测/分割/视频链路；"
+                      "真实场景图像题仍需对应领域数据与新评估协议。",
     },
     {
         "key": "iris",
@@ -530,6 +574,12 @@ def match_dataset(title: str, direction: str = "", task_type: str = None) -> dic
     t_text = any(k in t for k in ["文本", "语义", "自然语言", "nlp", "语料", "文档", "新闻"])
     best, best_score = None, 0
     for ds in DATASET_CATALOG:
+        # 代理数据集必须「题目点名才算数」。否则 modality=image 的 +1 加权
+        # 会让 MNIST 把车辆识别、域迁移、乳腺诊断这类题从它们真正的
+        # 数据集上抢走（实测同领域可执行 14→11）。
+        strict = ds.get("strict_kw") or []
+        if strict and not any(k.lower() in t for k in strict):
+            continue
         score = sum(1 for kw in ds["domain_kw"] if kw.lower() in t)
         # 任务类型一致时加权，避免「心脏病」被错配到回归集
         if task_type and ds.get("task") == task_type:
@@ -623,7 +673,28 @@ def _data_binding(ds: dict) -> dict:
                 "format": ds.get("format", "linqs"), "target": ds.get("target", "label"),
                 "methods": list(ds.get("methods") or []),
                 "n_splits": int(ds.get("n_splits", 5)), **meta}
+    if ds["source"] == "image":
+        return {"source": "image", "root": ds["root"], "format": ds.get("format", "idx"),
+                "methods": list(ds.get("methods") or []),
+                "n_train": int(ds.get("n_train", 8000)), "n_test": int(ds.get("n_test", 2000)),
+                "epochs": int(ds.get("epochs", 3)), "batch_size": int(ds.get("batch_size", 128)),
+                "seed": int(ds.get("seed", 42)), "augment": bool(ds.get("augment", False)),
+                **meta}
     raise ValueError(f"未知数据源：{ds['source']}")
+
+
+def _proxy_is_real(title: str, direction: str, source: str | None) -> bool:
+    """目录里的 proxy 是给题库验收用的保守默认；成文时要按题目语义纠正。
+
+    对着真实数据硬写「这是代理数据」同样是假话，所以：题目明确研究的
+    就是该数据集本身（引文网络节点分类 / 手写数字图像分类）时去掉标记。
+    """
+    t = (title + " " + direction).lower()
+    if source == "graph":
+        return any(k in t for k in ("引文", "citation", "论文分类", "cora", "节点分类"))
+    if source == "image":
+        return any(k in t for k in ("手写数字", "mnist", "数字识别", "图像分类", "手写体"))
+    return False
 
 
 def assemble_title_spec(title: str, direction: str = "", data_override: dict = None,
@@ -649,20 +720,21 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
     hints, unsupported = extract_method_hints(title, direction)
     if method_hints:  # 显式覆盖
         hints = [h for h in method_hints if h in _METHOD_DEFS]
-    _is_graph = (bool(matched and matched.get("source") == "graph")
-                 or (data_override or {}).get("source") == "graph")
-    _graph_keys = ((matched.get("methods") if _is_graph and matched else None)
-                   or ((data_override or {}).get("methods") if _is_graph else None))
-    candidate_methods = build_candidate_methods(
-        task_type, hints, method_keys=_graph_keys)
+    _source = (matched.get("source") if matched else None) or (data_override or {}).get("source")
+    _is_graph = _source == "graph"
+    _is_image = _source == "image"
+    # 图 / 图像后端有自己的模型白名单，不能用表格分类默认的六个 sklearn 方法。
+    _special_keys = (((matched.get("methods") if matched else None)
+                      or (data_override or {}).get("methods"))
+                     if (_is_graph or _is_image) else None)
+    candidate_methods = build_candidate_methods(task_type, hints, method_keys=_special_keys)
 
     # 3) 数据集绑定
     if data_override:
         data = data_override
         # 与自动匹配走同一条「代理标记按题目纠正」逻辑，避免自带数据被
         # 无条件写成「代理数据」。
-        if _is_graph and any(k in (title + " " + direction).lower()
-                             for k in ("引文", "citation", "论文分类", "cora", "节点分类")):
+        if _proxy_is_real(title, direction, _source):
             data = dict(data)
             data.pop("proxy", None)
             data.pop("proxy_note", None)
@@ -673,8 +745,7 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         # 但对「引文网络节点分类」就是题目所指的真实数据。目录里的 proxy 是
         # 给题库验收用的保守默认，成文时必须按具体题目纠正，否则正文会
         # 对着真实数据写「这是代理数据」，反而变成一句假话。
-        if _is_graph and any(k in (title + " " + direction).lower()
-                             for k in ("引文", "citation", "论文分类", "cora", "节点分类")):
+        if _proxy_is_real(title, direction, _source):
             data.pop("proxy", None)
             data.pop("proxy_note", None)
         _n, _f = matched.get("n"), matched.get("feat")
@@ -727,6 +798,17 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
             f"词袋特征的协议；但全图协议与折内协议之间的差距可度量传导泄漏的影响，"
             f"因此只有折内协议的性能增益能作为结构信息有效的可靠证据。"
         )
+    if _is_image:
+        research_question = (
+            f"在{desc}任务中，卷积结构相对扁平像素上的全连接网络与线性基线，"
+            f"能否在相同的固定划分、相同训练轮数与相同数据预算下带来更高的 top-1 准确率？"
+            f"这种差距与模型参数量、训练耗时之间是什么关系？"
+        )
+        hypothesis_statement = (
+            f"假设：利用局部空间归纳偏置的小型卷积神经网络，在相同 epoch 与相同子集规模下"
+            f"优于把图像扁平化的多层感知机与线性基线，且训练损失与测试准确率随 epoch 的"
+            f"变化可以说明该差距不是单纯由参数量堆出来的。"
+        )
 
     lit_query = (ds_for_meta["lit_query"] if ds_for_meta
                  else (direction or title))
@@ -746,8 +828,9 @@ def assemble_title_spec(title: str, direction: str = "", data_override: dict = N
         "_unsupported_methods": unsupported,
         # 忠实选题：是否需要方法贡献。由题目语义决定，run_task 据此决定是否注入融合集成。
         # True=需要（题目要改进/融合/提出）；False=忠实复现（题目基于某方法做研究/对比）。
-        # 图节点分类走独立评估分支，不构造融合集成，否则正文会声称一个根本没跑过的方法。
-        "_needs_contribution": (False if _is_graph
+        # 图节点分类 / 图像分类走独立评估分支，不构造融合集成，否则正文会声称
+        # 一个根本没跑过的方法。
+        "_needs_contribution": (False if (_is_graph or _is_image)
                                 else detect_contribution_intent(title, direction)),
     }
     return spec

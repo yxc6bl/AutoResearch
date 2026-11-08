@@ -284,6 +284,8 @@ python auto_research.py step    --name eval --out out_web/task_0001            #
 | 表 1 把规则列表写成「各方法主指标对比」 | 模板把「规则」当「方法」，只有一种算法却包装成方法竞赛 | association 专用表头「规则 / 阈值设置」；事实包加硬约束（D7） |
 | 网站跑 25 分钟页面一片安静 | 子进程 stdout 块缓冲 | `python -u` 启动子进程 |
 | 评审官把正文里**真实的**逐类指标、混淆矩阵、逐折数值判成编造（10 条） | `_ground_truth` 把 `seed_variance` 截到 200 字、且根本没把 `per_class` / `confusion_matrix` 交给评审官；事实清单比正文短，模型写的真数也成了「无据」 | 评审官事实清单补全（逐折、逐类、混淆矩阵全量），并规定配对差值只能原样引用 `paired_tests.diff`，不许用两个四位小数相减推算（0.8641−0.8515=0.0126 与实测 0.0125 差 0.0001） |
+| 加一个 MNIST 目录，题库「同领域真实可执行」从 14 掉到 10 | `domain_kw` 放了「卷积 / cnn / 像素 / 图像分类」泛词，叠加 `modality=image` 的 +1 加权，把车辆识别、域迁移、乳腺诊断等题从真正的数据集上抢走 | 新增 `strict_kw`：题目必须点名手写数字才允许匹配；目录不再标 `proxy`。benchmark 恢复 21/33 / 代理 7 / 同领域真实 14 / 误匹配 0 |
+| torch 同题两次跑出 0.9665 与 0.9685 | 多线程卷积的浮点归约顺序不确定，只设 `manual_seed` 不够 | `torch.set_num_threads(1)`，两次重跑均为 0.9615；确定性后端要把并行归约也固定住 |
 | 反馈台账 113 条、修复率 0 | 只采集不销账，`lessons()` 永远读到同一批 open 条目 | 见 6.2（本轮补的闭环） |
 
 这张表是答辩时最有用的材料：它证明系统不是「设想出来的架构」，
@@ -318,11 +320,11 @@ python auto_research.py step    --name eval --out out_web/task_0001            #
 新协议的叙事模板仍然要人写。这是当前架构最大的成本项，也是下一步要沉淀的东西
 （把「协议特征 → 模板分支」做成一张表，而不是每次现改代码）。
 
-### 6.4 覆盖范围：6 条后端
+### 6.4 覆盖范围：7 条后端
 
-分类/回归、文本 TF-IDF、时序、聚类、关联规则、**图节点分类**。
-图像/视频、真图神经网络、语义检索与 RAG 仍是缺口；`backends` 命令会把依赖就绪状态
-与所需改动列出来。
+分类/回归、文本 TF-IDF、时序、聚类、关联规则、**图节点分类**、**小规模图像分类**。
+真图神经网络、目标检测/分割/视频、语义检索与 RAG 仍是缺口；
+`backends` 命令会把依赖就绪状态与所需改动列出来。
 
 图节点分类是第二个「菜单外」后端，验证了四接线点不是只为 association 定制的。
 它同时也是 D10 的来源：Cora 真实引文网络上跑三种特征协议，最优无泄漏结果为
@@ -344,6 +346,7 @@ python auto_research.py step    --name eval --out out_web/task_0001            #
 
 **依赖就绪 ≠ 后端就绪。** torch 之所以立刻有用，是因为 `analysis_engine.py` 里
 早就写好了 `PyTorchMLP`（sklearn 兼容包装器），只差一个可导入的 torch；
+2026-11-08 又补上独立的 `engine/image_backend.py`，torch 才真正接住图像张量。
 而 torchvision / transformers 装完至今**没有任何代码路径使用它们**，
 把它们写成「已支持视觉/语义」就是本文开头批评的那种偷换。
 
@@ -393,7 +396,7 @@ python auto_research.py step    --name eval --out out_web/task_0001            #
 ### 8.2 复现清单
 
 ```bash
-python auto_research.py backends                 # 6 条后端 + 缺口 + 依赖就绪
+python auto_research.py backends                 # 7 条后端 + 缺口 + 依赖就绪
 python auto_research.py backends --probe         # 真导入一遍，测可用性与耗时
 python auto_research.py gates --out out_web/task_0001        # 11 道闸门
 python auto_research.py trace --out out_web/task_0001        # 成本结构
@@ -409,8 +412,11 @@ python auto_research.py feedback --stats         # 反馈台账与修复率
 
 1. **把「协议特征 → 模板分支」做成表**：减少补新后端时的模板返工（当前最大成本）。
 2. **逐句溯源**：正文每个数字回指 `03_experiment.json` 的具体字段，把 G04 从「事后抽查」变成「事前约束」。
-3. ~~补第二条新协议验证四接线点~~ **已完成**：图节点分类（`docs/BACKENDS.md` 第七节），
+3. ~~补新协议验证四接线点~~ **已完成**：图节点分类、小规模图像分类（各见 `docs/BACKENDS.md` 第七、八节），
    并额外带来 D10「结论的选取规则也要写进引擎」。
-4. **图像分支**：依赖已装，但需要新评估协议（DataLoader / 增广 / epoch 预算），工作量最大，放最后。
+4. ~~图像分支~~ **小规模图像分类已接线**（MNIST + torch CNN）；剩下的才是真硬骨头：
+   目标检测 / 语义分割 / 视频理解的指标与数据划分，以及真实场景图像数据。
 5. **同领域图数据**：社交网络/推荐的真实公开图，把 2 道 `proxy` 题变成真接住；
    真 GNN 的层数消融另算一条线。
+6. **语义/RAG**：这两道本质是研究方法/系统题，产出应是检索链路、消融与人工评测，
+   不该硬塞进确定性跑分流水线。

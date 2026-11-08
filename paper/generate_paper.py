@@ -352,6 +352,37 @@ def _methodology_math_block(main_metric, objective, task_type, analysis) -> str:
             "统计量 t = Δ̄ / (s_Δ / √K)，其中 Δ̄ 与 s_Δ 分别为 K 个差值的均值与标准差；"
             "本文报告的是这个配对 t 检验，不是 McNemar 检验。\n")
         return "\n".join(parts)
+    if (analysis or {}).get("image"):
+        _im = analysis["image"]
+        h, w = (_im.get("input_shape") or [1, 28, 28])[-2:]
+        n_cls = _im.get("n_classes", 10)
+        parts = [_metric_formula(main_metric, objective, task_type), ""]
+        parts.append("### 3.3.1 问题形式化")
+        parts.append(
+            f"设一张灰度图像为 X∈R^({h}×{w})，标签 y∈{{0,…,{n_cls - 1}}}；"
+            f"数据集 D 被划分为训练集与测试集（沿用 MNIST 官方划分并按固定种子分层抽样）。"
+            f"学习的目标是找到映射 f_θ，使分类的期望风险最小，"
+            f"在有限样本下以交叉熵经验风险作为代理，如式(2)所示：\n")
+        parts.append("x̃ = x / 255    (2)\n")
+        parts.append("### 3.3.2 卷积与训练")
+        parts.append(
+            "小型卷积神经网络以局部感受野与权值共享提取空间特征："
+            "第 l 层的第 j 个通道在位置 (i,k) 的响应如式(3)所示，"
+            "随后经激活与池化降维，最后由全连接层输出类别 logits：\n")
+        parts.append("z_{l,j}(i,k) = Σ_{u,v} W_{j}(u,v) · a_{l-1}(i+u, k+v) + b_j    (3)\n")
+        parts.append(
+            f"训练采用交叉熵损失 L(θ) = −(1/B) Σ_b log p_θ(y_b | x̃_b)，"
+            f"以 Adam 更新参数，共 {_im.get('epochs')} 个 epoch、batch={_im.get('batch_size')}，"
+            f"随机种子固定为 {_im.get('seed')}；三个模型共用同一份数据与同一训练预算。\n")
+        parts.append("### 3.3.3 评估口径")
+        parts.append(
+            f"主指标为 top-1 准确率，次要指标为 macro-F1；"
+            f"所有模型在 {_im.get('n_test_used')} 张测试图像上评估，如式(4)所示：\n")
+        parts.append("Accuracy = (1/N) Σ_b 1[argmax p_θ(·|x̃_b) = y_b]    (4)\n")
+        parts.append(
+            "本实验为固定划分、固定随机种子下的单次训练，报告点估计；"
+            "未做多种子复现，也未做配对显著性检验，因此不对模型间差异作统计显著性断言。\n")
+        return "\n".join(parts)
     n, d = _data_dims(analysis)
     d_txt = str(d) if d is not None else "d"
     n_txt = str(n) if n is not None else "n"
@@ -516,7 +547,8 @@ def _md_table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 def _main_metric_table(metrics: list[dict], main_metric: str, objective: str,
-                       task_type: str | None = None, is_graph: bool = False) -> str:
+                       task_type: str | None = None, is_graph: bool = False,
+                       is_image: bool = False) -> str:
     _assoc = task_type == "association"
     _default_setting = "默认阈值" if _assoc else "全部特征"
     rows = []
@@ -539,6 +571,7 @@ def _main_metric_table(metrics: list[dict], main_metric: str, objective: str,
     # 评审官判成「把规则列表包装成方法对比」。
     headers = (["规则", "阈值设置", main_metric or "指标"] if _assoc
                else ["方法×特征协议", "评估口径", main_metric or "指标"] if is_graph
+               else ["模型", "参数量 / 训练预算", main_metric or "指标"] if is_image
                else ["方法", "特征设置", main_metric or "指标"])
     return _md_table(headers, rows)
 
@@ -585,6 +618,23 @@ def _graph_variance_table(analysis: dict) -> str:
     if not rows:
         return "（无折间数据）"
     return _md_table(["方法×特征协议", "均值准确率", "折间标准差", "各折取值"], rows)
+
+
+def _image_epoch_table(analysis: dict) -> str:
+    """5.4 节图像专属：逐 epoch 训练损失与测试准确率。
+
+    图像实验没有多种子方差；把训练曲线列成表，才是这篇文章里
+    真正能支撑「稳定性」讨论的证据。
+    """
+    im = (analysis or {}).get("image") or {}
+    rows = []
+    for model, hst in (im.get("history") or {}).items():
+        for h in hst:
+            rows.append([model, str(h.get("epoch")), _fmt(h.get("train_loss"), 4),
+                         _fmt(h.get("test_accuracy"), 4)])
+    if not rows:
+        return "（无逐 epoch 记录）"
+    return _md_table(["模型", "epoch", "训练损失", "测试准确率"], rows)
 
 
 def _per_class_table(analysis: dict, prefer: str = "") -> str:
@@ -970,8 +1020,47 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
                          "这些差值由未四舍五入的逐折准确率算出，与两个四位小数均值直接相减"
                          "可能相差 0.0001；严禁自行用 0.8641−0.8515 之类方式推算差值。"
                          "逐类指标、混淆矩阵与逐折准确率只能引用事实清单中给出的数值，不得推算或补写。")
+        _im = analysis.get("image")
+        if isinstance(_im, dict) and _im:
+            lines.append("")
+            lines.append("## 图像分类实验事实（必须严格照用）")
+            lines.append(f"- 数据集：{_im.get('dataset')}（{_im.get('format')}）；"
+                         f"官方划分 {_im.get('n_train_full')}/{_im.get('n_test_full')} 张，"
+                         f"按固定种子 {_im.get('seed')} 分层抽取 "
+                         f"{_im.get('n_train_used')}/{_im.get('n_test_used')} 张用于本次实验。")
+            lines.append(f"- 输入形状 {_im.get('input_shape')}，类别数 {_im.get('n_classes')}；"
+                         f"归一化=像素值除以 255；增广={_im.get('augmentation')}；"
+                         f"设备={_im.get('device')}；预训练权重={_im.get('pretrained')}；"
+                         f"torch={_im.get('torch_version')}。")
+            lines.append(f"- 训练配置：epoch={_im.get('epochs')}，batch={_im.get('batch_size')}，"
+                         f"固定随机种子={_im.get('seed')}，三个模型合计耗时 {_im.get('total_s')}s。")
+            lines.append("- 各模型实测（四位小数与整数必须原样引用，禁止改写）：")
+            for k, v in (_im.get("models") or {}).items():
+                lines.append(f"  - {k}：accuracy={v.get('accuracy'):.4f}，"
+                             f"macro-F1={v.get('f1_macro'):.4f}，"
+                             f"参数量={v.get('params')}，epoch={v.get('epochs') or '不适用'}，"
+                             f"训练耗时={v.get('train_s')}s，框架={v.get('framework')}")
+            lines.append("- 逐 epoch 训练损失与测试准确率（实测，引用时不得改写或补算）：")
+            for k, hst in (_im.get("history") or {}).items():
+                lines.append(f"  - {k}：" + "；".join(
+                    f"epoch{h['epoch']} 损失={h['train_loss']:.4f} 准确率={h['test_accuracy']:.4f}"
+                    for h in hst))
+            _ib = _im.get("best") or {}
+            lines.append(f"- 核心结论（最优模型）：{_ib.get('name')}，"
+                         f"accuracy={_ib.get('accuracy'):.4f}，macro-F1={_ib.get('f1_macro'):.4f}")
+            lines.append(f"- 显著性检验：{analysis.get('significance') or '未做配对显著性检验'}")
+            lines.append("【重要】本实验是图像张量分类，预处理只有 /255，"
+                         "严禁写「中位数插补」「标准化」「独热编码」「特征列」等表格预处理术语；"
+                         "严禁写「5 个随机种子」「多种子方差」「按 8:2 随机划分训练集与测试集」"
+                         "（真实情况是沿用 MNIST 官方划分并按固定种子分层抽样子集）；"
+                         "严禁声称使用了预训练权重、迁移学习、GPU、数据增广或配对显著性检验。")
+            lines.append("【重要】epoch 数、参数量、训练耗时、逐 epoch 损失与准确率、"
+                         "各模型准确率与 macro-F1 只能原样引用上面清单给出的数值，"
+                         "不得自行推算、四舍五入到别的值或补写清单之外的数字；"
+                         "逐类指标与混淆矩阵也只能引用事实清单中给出的数值。")
         if analysis.get("significance") and analysis.get("task_type") != "association":
-            lines.append(f"- 显著性检验：{analysis['significance']}")
+            _sig_label = "显著性检验说明" if analysis.get("image") else "显著性检验"
+            lines.append(f"- {_sig_label}：{analysis['significance']}")
         if analysis.get("per_class"):
             lines.append("- 逐类指标：" + json.dumps(analysis["per_class"], ensure_ascii=False)[:1200])
         if analysis.get("confusion_matrix"):
@@ -1176,7 +1265,8 @@ def _strip_cliche(md: str) -> str:
 
 def _templated_summary(key: str, spec, analysis, best_method, best_value_str, dataset) -> str:
     """分章小结的确定性兜底（LLM 不可用或不返回某章时），保证「小结」计数达标且内容不空。"""
-    title = (_deep_cn(spec.get("task_type")) if key == "deep"
+    title = (_deep_cn(spec.get("task_type"), bool((analysis or {}).get("image")))
+             if key == "deep"
              else CHAPTER_BY_KEY.get(key, {}).get("cn", "本章"))
     base = (f"本章小结：本章围绕「{title}」展开，"
             f"基于真实实验素材完成了相应的分析、计算与论证，所得结论均建立在确定性的指标与证据之上。")
@@ -1194,6 +1284,13 @@ def _templated_summary(key: str, spec, analysis, best_method, best_value_str, da
                     f"在节点级分层 {_gr.get('n_splits', 5)} 折交叉验证下，无传导泄漏协议中的最优组合为 "
                     f"{best_method}（accuracy={best_value_str}）；同时用配对 t 检验量化了"
                     f"拓扑特征带来的增益与全图协议因传导泄漏产生的偏乐观幅度。")
+        elif (analysis or {}).get("image"):
+            _im = analysis["image"]
+            base = (f"本章小结：本章报告并深入分析了在 {dataset} 上的图像分类结果，"
+                    f"在固定划分、固定种子与 {_im.get('epochs')} 个 epoch 的统一预算下，"
+                    f"最优模型为 {best_method}（top-1 accuracy={best_value_str}）；"
+                    f"并依托逐 epoch 的训练损失与测试准确率曲线说明了收敛过程，"
+                    f"同时如实说明本实验未做多种子复现与配对显著性检验。")
         else:
             base = (f"本章小结：本章报告并深入分析了在 {dataset} 数据集上的实验结果，"
                     f"主指标最优为 {best_method}（{best_value_str}），并通过多种子方差与配对显著性检验"
@@ -1253,7 +1350,15 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
     is_multi = (analysis or {}).get("task_type") == "multi_dataset"
     is_assoc = (spec.get("task_type") == "association")
     is_graph = bool((analysis or {}).get("graph"))
-    if is_graph:
+    is_image = bool((analysis or {}).get("image"))
+    if is_image:
+        stability_instr = (
+            "稳定性与显著性——本实验在固定划分、固定随机种子下各训练一次，"
+            "报告的是点估计，【不存在多种子方差，也未做配对显著性检验】，严禁虚构 p 值；"
+            "请用逐 epoch 的训练损失与测试准确率曲线说明收敛过程，"
+            "并结合参数量与训练耗时讨论模型之间的差距，所有数值必须原样引用事实清单。")
+        multi_note = "本文为单数据集的小规模图像分类研究：结论只在 MNIST 子集与固定训练预算下成立。"
+    elif is_graph:
         stability_instr = (
             "稳定性与显著性——引用事实清单里各折准确率与折间标准差说明稳定性（这是【折间】波动，"
             "不是多种子方差，严禁写成随机种子）；引用配对 t 检验的真实 p 值说明"
@@ -1287,7 +1392,40 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 
     # 关联规则专属的写作指令：避免大模型套用「随机种子/显著性检验/多算法对比」等监督学习叙事。
     # 图节点分类专属写作指令：节点不独立、按节点切分、拓扑特征有传导泄漏风险。
-    if is_graph:
+    # 图像分类专属写作指令：张量输入、pixel/255、epoch 预算，不能套表格预处理叙事。
+    if is_image:
+        method_narrative_instr = (
+            "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释"
+            "图像张量 (N,C,H,W) 与表格样本的区别、MNIST 的 IDX 格式与 28×28 灰度语义、"
+            "卷积层的局部感受野与权值共享为何适合图像、池化如何降维、"
+            "扁平化全连接网络与线性模型缺少空间归纳偏置意味着什么；"
+            "说明交叉熵损失、Adam 优化器、epoch / batch 的含义，"
+            "以及为何三个模型要共用同一份划分、同一训练预算与同一个随机种子。"
+            "须严格基于事实清单，严禁编造层数、超参数、预训练权重或清单之外的数字。")
+        exp_narrative_instr = (
+            "第4章「实验设置与数据」的展开叙述（不少于700字，直接写正文，不要写章/节标题）："
+            "说明 MNIST 官方 60000/10000 划分、按固定种子分层抽取 12000/2000 张子集的原因"
+            "（控制 CPU 预算且保持各类比例）、输入形状与 10 个类别、像素除以 255 这唯一一项预处理、"
+            "为何没有中位数插补/标准化/独热编码、固定的 epoch 与 batch、"
+            "模型从头训练且不使用预训练权重与 GPU、增广接口默认关闭、"
+            "主指标 top-1 accuracy 与次要指标 macro-F1 的选取理由。严禁编造数据规模以外的数字。")
+        results_narrative_instr = (
+            "5.1 主指标对比解读（不少于400字）：解读表 1 三个模型的 top-1 准确率差值，"
+            "结合参数量与训练耗时说明卷积结构的优势是否有代价，"
+            "所有数字必须原样引用事实清单的四位小数，不得自行相减推算。")
+        results_viz_instr = (
+            "5.2 结果可视化解读（不少于200字）：描述本文三张图——训练损失与测试准确率随 epoch "
+            "变化的双子图、混淆矩阵热力图、测试集前 16 张样例及预测结果；"
+            "指出曲线在哪一 epoch 趋于平稳、混淆矩阵中哪些数字类别更容易混淆。")
+        results_stability_instr = (
+            "5.4 训练过程与稳定性解读（不少于250字）：逐 epoch 引用事实清单里的训练损失与"
+            "测试准确率，说明收敛趋势；明确写出本实验只跑固定种子一次，"
+            "没有多种子方差，也没有做配对显著性检验，因此不能声称模型差异具有统计显著性；"
+            "不得虚构 p 值或标准差。")
+        method_reflection_instr = (
+            "(3) 从方法论角度反思：为什么在图像任务上必须自己管 batch、epoch 与参数量，"
+            "而不能沿用表格流水线；以及点估计的对比结论为什么不能代替统计显著性判断；")
+    elif is_graph:
         method_narrative_instr = (
             "第3章「研究方法」的展开叙述（不少于1000字，直接写正文，不要写章/节标题）：依次阐释"
             "图节点分类与独立同分布样本分类的区别、Cora 引文网络的节点/边/词袋特征/7 类标签语义、"
@@ -1505,26 +1643,27 @@ def _deterministic_conclusion(spec: dict, analysis: dict, sub_evidence: dict, is
 
 
 # ── 本科毕设必备前置/后置（模板驱动，集中管理便于迭代） ──────────────
-def _deep_cn(task_type: str) -> str:
-    """第6章标题：关联规则为确定性枚举、不做假设检验，故章节名去掉「假设检验」。"""
-    return "深入分析" if task_type == "association" else "深入分析与假设检验"
+def _deep_cn(task_type: str, is_image: bool = False) -> str:
+    """第6章标题：确定性关联规则与单次训练的图像实验都不做假设检验，章节名去掉「假设检验」。"""
+    return ("深入分析" if (task_type == "association" or is_image)
+            else "深入分析与假设检验")
 
 
-def _build_toc(is_multi: bool, task_type: str = "") -> str:
+def _build_toc(is_multi: bool, task_type: str = "", is_image: bool = False) -> str:
     """生成目录（本科毕设规范：前置→各章→后置）。Markdown 无页码，仅列条目。"""
     lines = ["摘要（中文）", "Abstract（英文）"]
     for c in CHAPTERS:
         _cn = c["cn"]
-        if c["key"] == "deep" and task_type == "association":
-            _cn = _deep_cn(task_type)
+        if c["key"] == "deep" and (task_type == "association" or is_image):
+            _cn = _deep_cn(task_type, is_image)
         lines.append(f"第{c['no']}章 {_cn}")
     lines += ["参考文献", "致谢", "附录：完整指标表"]
     return "\n".join(lines)
 
 
-def _org_note(task_type: str = "") -> str:
+def _org_note(task_type: str = "", is_image: bool = False) -> str:
     """第一章末尾的「论文组织结构」段落（确定性生成，列真实章节，增强毕设真实感）。"""
-    _d = _deep_cn(task_type)
+    _d = _deep_cn(task_type, is_image)
     return (f"本文后续章节组织结构如下：第二章综述国内外研究现状并定位本文贡献；"
             f"第三章阐述研究方法与实验协议；第四章说明实验设置与数据预处理；"
             f"第五章报告并分析实验结果；第六章进行深入的机理分析（{_d}）；"
@@ -1544,6 +1683,12 @@ def _future_work_note(spec: dict, analysis: dict, is_multi: bool) -> str:
                 "也可把折内特征构造推广到严格的归纳式设定（新节点加入时才可见其连边），"
                 "在更大的引文网络与社交网络上复现本文的泄漏检查流程，"
                 "以验证结论是否只属于 Cora 这一特定图结构。")
+    if (analysis or {}).get("image"):
+        return ("本文只在 MNIST 子集上完成小规模图像分类，后续可在同一套事实契约下"
+                "引入数据增广、更深的卷积网络与完整的超参数搜索，"
+                "并用多个随机种子复现来估计方差、用逐折配对检验判断模型差异是否显著；"
+                "更进一步可接入预训练权重与迁移学习，把任务扩展到目标检测、"
+                "语义分割与视频理解，并在真实场景图像（车辆、交通标志、收银台）上验证外推性。")
     return ("本文仅在有限的数据集与随机种子（5 个）下验证结论，后续可在更大规模、"
             "更多分布的数据集上复现，以检验结论的外推性；亦可引入更多候选方法与更宽的"
             "超参数搜索空间，并借助 GPU 加速扩展实验规模，进一步压缩多种子方差估计的不确定性。")
@@ -1679,6 +1824,12 @@ def main() -> int:
         _gb = (analysis["graph"].get("best") or {})
         best_method = _gb.get("key") or analysis.get("best_method")
         best_value = _gb.get("accuracy", analysis.get("best_value"))
+    elif (analysis or {}).get("image"):
+        # 图像实验的 best 由图像引擎给出；避免 _best_method 对带中文名的
+        # metrics 做排序时出现与产物不一致的取值。
+        _ib = (analysis["image"].get("best") or {})
+        best_method = _ib.get("name") or analysis.get("best_method")
+        best_value = _ib.get("accuracy", analysis.get("best_value"))
     else:
         best_method, best_value = _best_method(metrics, main_metric, objective)
     if is_multi:
@@ -1794,6 +1945,14 @@ def main() -> int:
                    "因此结论不能等同于严格归纳式（新节点到来）场景下的泛化能力。")
         lim.append("折数有限，折间标准差与配对 t 检验的统计功效有限；"
                    "且结论只在 Cora 这一引文网络上验证，向社交网络、推荐系统等其他图域外推需重新验证。")
+    elif (analysis or {}).get("image"):
+        lim.append("本实验在固定划分与固定随机种子下各训练一次，报告点估计；"
+                   "既没有多种子复现，也没有配对显著性检验，"
+                   "因此模型间准确率差值的统计稳健性尚未验证。")
+        lim.append("为控制 CPU 预算，实验只从 MNIST 官方划分中分层抽取了子集，"
+                   "且训练轮数有限；结论不能直接外推到全量数据或更深的网络。")
+        lim.append("预处理只做像素除以 255，未使用数据增广、预训练权重或超参数搜索；"
+                   "本文实现的是小规模图像分类，不含目标检测、语义分割与视频理解链路。")
     elif (analysis or {}).get("seed_variance"):
         lim.append("多种子实验虽已报告均值±标准差并做显著性检验，但种子数有限（5 个），方差估计本身仍不够精确。")
     else:
@@ -1863,7 +2022,8 @@ def main() -> int:
         "（此处须本人亲笔签名并注明日期）\n\n"
     )
     parts.append("## 目录\n")
-    parts.append(_build_toc(is_multi, spec.get("task_type")) + "\n")
+    parts.append(_build_toc(is_multi, spec.get("task_type"),
+                            bool((analysis or {}).get("image"))) + "\n")
     parts.append("## 摘要\n")
     parts.append(written.get("abstract", "").strip() + "\n")
     parts.append(f"**关键词：** {written.get('keywords','')}\n")
@@ -1876,7 +2036,8 @@ def main() -> int:
             parts.append(f"**Keywords:** {_kw_en}\n")
     parts.append(chapter_heading("intro") + "\n")
     parts.append(written.get("intro", "").strip() + "\n")
-    parts.append(_org_note(spec.get("task_type")) + "\n")
+    parts.append(_org_note(spec.get("task_type"),
+                           bool((analysis or {}).get("image"))) + "\n")
     parts.append(chapter_heading("related") + "\n")
     parts.append(written.get("related", "").strip() + "\n")
     # 确定性「按角色归类」引用块：保证所有入选文献均被正文引用（满足 EvalAgent 引用对应硬要求），
@@ -1939,6 +2100,14 @@ def main() -> int:
                      f"节点特征，存在传导泄漏，故其结果仅作上界对照，不参与最优组合的选取；"
                      f"核心结论只从其余两种无泄漏协议中产生。稳定性以各折准确率的折间标准差"
                      f"刻画，显著性采用逐折配对 t 检验。\n")
+    elif (analysis or {}).get("image"):
+        _im = analysis["image"]
+        parts.append(f"主要评价指标为 {main_metric}（越大越好），次要指标为 macro-F1。"
+                     f"三个模型共用同一份训练/测试划分、同一个随机种子 {_im.get('seed')} "
+                     f"与同一训练预算（{_im.get('epochs')} 个 epoch、batch={_im.get('batch_size')}）；"
+                     f"图像张量只做像素除以 255，不做列级标准化、缺失值插补或独热编码。"
+                     f"本实验为固定划分下的单次训练，报告点估计，"
+                     f"未做多种子复现与配对显著性检验，因此不对模型间差异作统计显著性断言。\n")
     else:
         parts.append(f"主要评价指标为 {main_metric}（{'越大越好' if objective=='maximize' else '越小越好'}），"
                      f"次要指标为 {_sec_txt}。"
@@ -1966,6 +2135,9 @@ def main() -> int:
     elif (analysis or {}).get("graph"):
         round_txt = ("最终以无传导泄漏协议中准确率最高的「方法×特征协议」组合作为核心结论，"
                      "含泄漏的全图协议仅作上界对照。")
+    elif (analysis or {}).get("image"):
+        round_txt = ("最终以固定划分、固定种子与统一训练预算下 top-1 准确率最高的模型作为核心结论，"
+                     "该结论为点估计，不涉及多种子复现或轮次优选。")
     elif is_multi:
         round_txt = "各数据集均取主指标最优的一轮作为报告结果。"
     else:
@@ -2023,6 +2195,7 @@ def main() -> int:
                     f"最小置信度阈值下，对全部交易完整枚举频繁项集并派生关联规则，{round_txt}\n")
             else:
                 _gr = (analysis or {}).get("graph") or {}
+                _im = (analysis or {}).get("image") or {}
                 if _gr:
                     parts.append(
                         f"实验数据为{dataset}（共 {_gr.get('n_nodes')} 个节点、"
@@ -2030,6 +2203,16 @@ def main() -> int:
                         f"{_gr.get('n_classes')} 类）。图数据不做列级标准化或插补，"
                         f"实验按节点级分层 {_gr.get('n_splits', 5)} 折交叉验证执行，"
                         f"拓扑信息以一跳邻居均值方式压缩进节点特征，{round_txt}\n")
+                elif _im:
+                    parts.append(
+                        f"实验数据为{dataset}（官方划分 {_im.get('n_train_full')}/"
+                        f"{_im.get('n_test_full')} 张，按固定种子分层抽取 "
+                        f"{_im.get('n_train_used')}/{_im.get('n_test_used')} 张；"
+                        f"输入形状 {_im.get('input_shape')}、{_im.get('n_classes')} 类）。"
+                        f"图像张量只做像素除以 255，不做列级标准化或插补；"
+                        f"三个模型在 CPU 上从头训练，共用 {_im.get('epochs')} 个 epoch、"
+                        f"batch={_im.get('batch_size')} 与随机种子 {_im.get('seed')}，"
+                        f"未使用预训练权重与数据增广，{round_txt}\n")
                 else:
                     parts.append(f"实验数据为{'多个数据集' if is_multi else dataset}。"
                                  f"数据经标准化等必要预处理后按固定比例划分训练集与测试集。"
@@ -2060,10 +2243,13 @@ def main() -> int:
         parts.append("**表 1 关联规则三项指标（按提升度降序）**\n" if _assoc
                      else "**表 1 各方法×特征协议主指标对比（节点级分层 K 折）**\n"
                      if (analysis or {}).get("graph")
+                     else "**表 1 各模型主指标对比（固定划分与统一训练预算）**\n"
+                     if (analysis or {}).get("image")
                      else "**表 1 各方法主指标对比**\n")
         parts.append(_main_metric_table(metrics, main_metric, objective,
                                        spec.get("task_type"),
-                                       bool((analysis or {}).get("graph"))) + "\n")
+                                       bool((analysis or {}).get("graph")),
+                                       bool((analysis or {}).get("image"))) + "\n")
         if (analysis or {}).get("graph"):
             parts.append("注：表中「全图邻居均值（传导设定）」各行是在划分前使用了测试折的"
                          "节点特征，存在传导泄漏，数值仅作上界对照；本文的核心结论只从"
@@ -2091,6 +2277,15 @@ def main() -> int:
                          f"{_gr.get('best_selection_note')}\n")
             if (analysis or {}).get("significance"):
                 parts.append(f"配对 t 检验结论：{analysis['significance']}\n")
+            parts.append(written.get("results_stability", "").strip() + "\n")
+        elif (analysis or {}).get("image"):
+            parts.append("### 5.4 训练过程与稳定性\n")
+            parts.append(_image_epoch_table(analysis) + "\n")
+            parts.append("本实验在固定划分与固定随机种子下各训练一次，报告点估计；"
+                         "未做多种子复现，也未做配对显著性检验，"
+                         "因此不能把模型之间的准确率差值断言为统计显著。"
+                         "稳定的证据来自逐 epoch 的损失下降与测试准确率上升，"
+                         "而非多次随机运行的方差。\n")
             parts.append(written.get("results_stability", "").strip() + "\n")
         else:
             parts.append("### 5.4 稳定性与显著性\n")
@@ -2131,7 +2326,7 @@ def main() -> int:
                              f"集成模型平均 gap = {h1.get('ensemble_mean_gap','?'):.4f}。"
                              f"结论：{h1.get('conclusion','')}。\n")
 
-    parts.append(f"## 第6章 {_deep_cn(spec.get('task_type'))}\n")
+    parts.append(f"## 第6章 {_deep_cn(spec.get('task_type'), bool((analysis or {}).get('image')))}\n")
     parts.append(written.get("deep_analysis", "").strip() + "\n")
     if sub_rows:
         parts.append("**表 2 子假设裁决**\n")
@@ -2191,6 +2386,25 @@ def main() -> int:
             "严格区分本文实验结论与所引文献的已有结论：本文所有准确率、折间标准差与 p 值"
             "均来自本地确定性分析引擎的实测，未引入素材以外的数值或事实；"
             "本文采用的是图特征加表格分类器，不声称提出图神经网络或新算法。")
+    elif (analysis or {}).get("image"):
+        _im = analysis["image"]
+        _innov = [
+            f"在 {dataset} 上把图像张量接入原有的论文流水线：新增独立的图像分支，"
+            f"自行管理 batch、epoch 与参数量统计，使 top-1 准确率、macro-F1、"
+            f"训练耗时和逐 epoch 曲线都能进入统一的事实契约，而不必把图像伪装成表格列。",
+        ]
+        if best_method:
+            _innov.append(
+                f"在固定划分、固定随机种子与统一训练预算（{_im.get('epochs')} 个 epoch）下，"
+                f"对小型卷积神经网络、扁平化多层感知机与像素线性基线做同口径比较，"
+                f"得到最优模型 {best_method}（accuracy={best_value_str}），"
+                f"并结合参数量与训练耗时讨论卷积归纳偏置的代价。")
+        _innov.append(
+            "如实标注实验边界：只做像素除以 255、不使用预训练权重与数据增广、"
+            "不虚构多种子方差与显著性检验，把点估计的结论限定在本次训练预算内。")
+        _innov.append(
+            "严格区分本文实验结论与所引文献的已有结论：所有准确率、参数量、"
+            "逐 epoch 损失与耗时均来自本地确定性训练，未引入素材以外的数值或事实。")
     else:
         _innov = [
             f"在统一随机种子（5 个）框架下系统对比了 {methods} 在 {dataset} 上的精度与稳定性，"
