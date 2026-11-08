@@ -29,9 +29,11 @@
 
 ## 授权：当前唯一待办
 
-本机 Git Credential Manager 2.9.0 在**无界面会话里弹不出可用的授权窗口**，
-设备码模式也没有吐出码（已实测：browser / device 两种都挂起，系统凭据为空）。
-所以最稳的是在 GitHub 网页生成一次 PAT，让我把它存进系统凭据管理器。
+本机 Git Credential Manager 2.9.0 在**无界面会话里弹不出可用的授权窗口**。
+实测三次：默认 browser OAuth（`PUSH_EXIT=124`，300 秒超时）、强制
+`credential.gitHubAuthModes=device`（不吐设备码）、`GIT_TERMINAL_PROMPT=0`
+非交互探测（同样挂起）；`cmdkey /list` 里始终没有 github.com 条目。
+所以自动化这边能做的都做完了，**认证这一步必须本人做一次**。
 
 **你只需在网页做三步：**
 
@@ -59,6 +61,11 @@ python scripts/github_sync.py            # 首次推送，并验证远端 main �
 >
 > SSH 也可以（生成密钥对、把公钥贴到 GitHub 网页），但国内网络到
 > `github.com:22` 常被挡，HTTPS + PAT 是已验证可走通的路径。
+>
+> 不想把 token 贴出来也行：自己在**交互式终端**里跑
+> `python scripts/github_sync.py`，GCM 会在你自己的桌面上弹 GitHub 授权页，
+> 点一次 Authorize 后凭据同样进 Windows 凭据管理器；之后回来跑
+> `python scripts/github_sync.py --status` 核对「落后 领先」为 `0 0` 即可。
 
 ## 一次性配置（已完成，留档）
 
