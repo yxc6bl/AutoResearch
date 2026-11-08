@@ -404,12 +404,26 @@ def _methodology_math_block(main_metric, objective, task_type, analysis) -> str:
     parts.append(f"m* = {sel}_{{ m ∈ M }} M(f_m; D_test)    (3)\n")
     parts.append("M(·) 为本文主指标，D_test 为测试集；所有方法共享同一数据划分与评估协议以保证可比性。\n")
     parts.append("### 3.3.3 差异显著性检验")
-    parts.append(
-        "为判断最优与次优方法在主指标上的差异是否由随机划分偶然导致，"
-        "对两者逐样本预测做 McNemar 配对检验，统计量如式(4)所示：\n")
-    parts.append("χ² = (|b − c| − 1)² / (b + c)    (4)\n")
-    parts.append("其中 b、c 分别为一个方法预测正确而另一方法预测错误的样本数（discordant 对），"
-                 "χ² 服从自由度 1 的卡方分布；χ²>3.84（α=0.05）时认为差异显著。\n")
+    _sig = str((analysis or {}).get("significance") or "")
+    if "McNemar" in _sig:
+        parts.append(
+            "为判断最优与次优方法在主指标上的差异是否由随机划分偶然导致，"
+            "对两者逐样本预测做 McNemar 配对检验，统计量如式(4)所示：\n")
+        parts.append("χ² = (|b − c| − 1)² / (b + c)    (4)\n")
+        parts.append("其中 b、c 分别为一个方法预测正确而另一方法预测错误的样本数，"
+                     "χ² 服从自由度 1 的卡方分布；χ²>3.84（α=0.05）时认为差异显著。\n")
+    else:
+        # 表格回归/分类默认走多种子配对 t 检验。此前这里硬编码 McNemar，
+        # 在回归任务上写出「预测正确/错误的样本数」是纯粹的分类叙事，
+        # 且与 03_experiment.json 的 significance 直接矛盾，已被评审官抓到。
+        parts.append(
+            "为判断最优与次优方法在主指标上的差异是否由随机划分偶然导致，"
+            "在相同的多个随机种子下对两者的主指标取值做配对 t 检验，统计量如式(4)所示：\n")
+        parts.append("t = Δ̄ / (s_Δ / √K)    (4)\n")
+        parts.append("其中 Δ_k = M(f_opt; D_k) − M(f_2nd; D_k) 为第 k 个随机种子上"
+                     "最优与次优方法主指标之差，K 为种子数，Δ̄ 与 s_Δ 分别为 K 个差值的"
+                     "均值与标准差；在 α=0.05 下按自由度 K−1 的 t 分布判定。"
+                     "本文报告的是多种子配对 t 检验，不是 McNemar 检验。\n")
     return "\n".join(parts)
 
 
@@ -905,6 +919,15 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
         lines.append("- 第 3.1 节（数据来源）与第 8.1 节（研究局限）都要明确说明这一点，"
                      "并写明结论只在代理数据的意义上成立。")
 
+    _pp_f = (analysis or {}).get("preprocessing") or {}
+    if _pp_f.get("n_samples") is not None:
+        _n_f, _d_f = _pp_f.get("n_samples"), _pp_f.get("n_raw_features")
+        lines.append(f"- 数据规模（实测）：样本量 {_n_f}，原始特征维度 {_d_f}，"
+                     f"缺失值合计 {_pp_f.get('n_missing_total', 0)} 个")
+        lines.append(f"【重要】正文任何位置描述样本量与特征维度时只能写 {_n_f} 与 {_d_f}；"
+                     f"严禁写成其它数字（例如把特征维度写成 30），也不得把"
+                     f"「配置了插补」写成「本数据有大量缺失值」。")
+
     lines.append("")
     lines.append("## 真实实验指标（确定性分析引擎计算）")
     for m in metrics:
@@ -1063,6 +1086,10 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
         if analysis.get("significance") and analysis.get("task_type") != "association":
             _sig_label = "显著性检验说明" if analysis.get("image") else "显著性检验"
             lines.append(f"- {_sig_label}：{analysis['significance']}")
+            if "McNemar" not in str(analysis.get("significance")):
+                lines.append("【重要】事实清单中的显著性检验不是 McNemar；正文严禁出现 "
+                             "McNemar、卡方统计量 χ²、discordant 对或「预测正确/错误样本数」"
+                             "这类分类检验表述，只能按上面的配对 t 检验描述。")
         if analysis.get("per_class"):
             lines.append("- 逐类指标：" + json.dumps(analysis["per_class"], ensure_ascii=False)[:1200])
         if analysis.get("confusion_matrix"):

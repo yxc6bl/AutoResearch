@@ -666,7 +666,8 @@ def cmd_plan(args) -> int:
         # 当成普通 sklearn 数据集，绑定出来的 spec 根本加载不了。
         try:
             from engine.topic_parser import detect_task_type as _dtt, assemble_title_spec as _ats
-            if (_dtt(args.topic) == "association"
+            if (getattr(args, "catalog_key", "")
+                    or _dtt(args.topic) == "association"
                     or data_override.get("source") in
                     ("graph", "timeseries", "association", "image")):
                 spec = _ats(args.topic, data_override=data_override)
@@ -990,6 +991,21 @@ def cmd_gates(args) -> int:
                       args.who, args.why)
         print("[闸门] 人工放行：" + json.dumps(r, ensure_ascii=False))
     rep = G.report(out, strict=not args.no_strict)
+    # 交付状态必须与闸门裁决同源：step write 会先写一份「可交付」，
+    # 之后 step eval 可能判 hard_fail。不回写就会出现两份文件互相矛盾。
+    _ds = out / "06_paper" / "DELIVERY_STATUS.json"
+    if _ds.exists():
+        try:
+            _d = json.loads(_ds.read_text(encoding="utf-8"))
+            _d["deliverable"] = bool(rep["decision"]["deliverable"])
+            _d["gate_decision"] = {
+                "deliverable": rep["decision"]["deliverable"],
+                "basis": rep["decision"].get("basis"),
+                "report": "07_gate_report.json",
+            }
+            _ds.write_text(json.dumps(_d, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     print(json.dumps(rep, ensure_ascii=False, indent=2) if args.json else G.render(rep))
     if args.exit_code and not rep["decision"]["deliverable"]:
         return 3

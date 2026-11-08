@@ -50,13 +50,24 @@
 非交互探测（同样挂起）；`cmdkey /list` 里始终没有 github.com 条目。
 所以自动化这边能做的都做完了，**认证这一步必须本人做一次**。
 
-**你只需在网页做三步：**
+### 生成令牌：逐屏操作（全程在 GitHub 网页，不用装任何软件）
 
-1. 打开 `https://github.com/settings/tokens`（GitHub 网页，Settings →
-   Developer settings → Personal access tokens → Tokens (classic)）。
-2. Generate new token (classic)，勾 **`repo`**，过期时间随意，生成后复制那串
-   `ghp_...`。
-3. 把它贴给我。
+1. 打开 `https://github.com/settings/tokens`。找不到就直接点这个链接；
+   或者走菜单：右上角**头像 → Settings → 左侧最底部 Developer settings →
+   Personal access tokens → Tokens (classic)**。
+2. 点 **Generate new token (classic)**（不是那个带 "(fine-grained)" 的）。
+   可能会让你再输一次账号密码。
+3. **Note** 随便填，比如 `AutoResearch`；**Expiration** 选 `7 days`
+   （够用，过期自动失效更安全）。
+4. 往下找到勾选区，**只勾 `repo` 这一大项**（第一项，Full control of private
+   repositories），它下面的小项会自动带上。别的一个都不用勾。
+5. 拉到页面最底，点 **Generate token**。
+6. 页面会出现一串以 `ghp_` 开头的字符，**只显示这一次**，点旁边的复制按钮。
+7. 直接粘到对话框发给我，就这一步，后面不用你管。
+
+> 如果推送报 `403`，通常是没勾 `repo`、令牌过期，或者你在这个仓库只是协作者
+> 但邀请还没接受——重新生成一个、或先在邀请页点 Accept 即可。
+> 令牌不要发到群里、不要截图公开；用完在**同一个网页**点 `Revoke` 立刻作废。
 
 我这边会执行：
 

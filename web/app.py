@@ -81,6 +81,9 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
     elif dataset:
         if dataset == "market_basket":
             cmd += ["--data", str(ROOT / "data" / "market_basket.csv")]
+        elif dataset == "fetch_california_housing":
+            # sklearn 的 fetch_* 需联网下载（实测 403），改绑本地 CSV 快照。
+            cmd += ["--catalog-key", "california_housing"]
         elif dataset == "cora_graph":
             # 图数据要 nodes + edges 两个文件，不能走 --data/--dataset 的单表入口。
             cmd += ["--catalog-key", "cora"]

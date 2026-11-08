@@ -676,7 +676,20 @@ def _ground_truth(analysis: dict) -> str:
                      if analysis.get("graph") else "多种子方差")
         # 上限放宽到 2000：以前截到 200 字，只露出第一个方法的折值，
         # 评审官会把正文里其余真实折值判成「事实清单未提供」的编造。
-        bits.append(f"{_sv_label}：{str(analysis['seed_variance'])[:2000]}")
+        # 逐条列出并写明方法名，不能用 str(dict)[:N] 挤成一团：
+        # 实测评审官曾把「随机森林_r2」的 std / seeds 当成「梯度提升树_r2」的，
+        # 反过来把正文里完全正确的数字判成编造。结构化之后可按名字逐条核对。
+        bits.append(f"{_sv_label}（每行都带方法名，请按方法名逐条核对，"
+                    f"不要把相邻两行的数据串行）：")
+        for _k, _v in analysis["seed_variance"].items():
+            if isinstance(_v, dict):
+                _seeds = "、".join(f"{float(x):.4f}"
+                                  for x in (_v.get("seeds") or [])[:5])
+                bits.append(f"  - {_k}：均值={float(_v.get('mean') or 0):.4f}，"
+                            f"标准差={float(_v.get('std') or 0):.4f}，"
+                            f"各次取值=[{_seeds}]")
+            else:
+                bits.append(f"  - {_k}：{_v}")
     _gr = analysis.get("graph")
     if isinstance(_gr, dict) and _gr:
         bits.append(f"图节点分类：{_gr.get('n_nodes')} 个节点、{_gr.get('n_edges')} 条边、"

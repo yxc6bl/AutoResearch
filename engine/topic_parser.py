@@ -43,7 +43,8 @@ _METHOD_DEFS = {
     },
     "lr": {
         "cn": "逻辑回归",
-        "aliases": ["逻辑回归", "logistic", "logisticregression", "逻辑斯蒂"],
+        "aliases": ["逻辑回归", "线性回归", "linear regression", "多元线性回归",
+                    "logistic", "logisticregression", "逻辑斯蒂"],
         "clf": "sklearn.linear_model.LogisticRegression",
         "reg": "sklearn.linear_model.LinearRegression",
         "params_clf": {"max_iter": 3000, "random_state": "<seed>"},
@@ -320,15 +321,17 @@ DATASET_CATALOG = [
     # ── 扩展数据集：覆盖更多真实毕设高频主题（房价 / 图像 / 文本 / 信用 / 营销） ──
     {
         "key": "california_housing",
-        "label": "加州房价数据集（sklearn 内置）",
-        "source": "sklearn",
-        "name": "fetch_california_housing",
+        "label": "加州房价数据集（1990 年加州普查街区，本地 CSV 快照）",
+        "source": "csv",
+        "path": str(DATA_DIR / "california_housing.csv"),
+        "target": "MedHouseVal",
         "task": "regression",
         "modality": "tabular",
         "domain_kw": ["房价", "housing", "california", "房地产", "价格预测",
                       "回归预测", "地产"],
         "lit_query": "california housing price prediction regression machine learning",
-        "desc_cn": "加州房价预测",
+        "desc_cn": "加州街区房价预测（Pace & Barry 1990 年普查数据，20640 个街区，"
+                   "8 个数值特征由房间数、卧室数、人口与户数换算得到）",
         "target_cn": "街区房价中位数（万美元）",
         "n": 20640, "feat": 8,
     },
@@ -637,7 +640,10 @@ def build_candidate_methods(task_type: str, method_hints: list[str],
             continue
         seen_est.add(est)
         params = (d["params_reg"] if (is_reg and d["reg"]) else d["params_clf"]).copy()
-        out.append({"name": d["cn"], "estimator": est, "params": params})
+        # 同一个 key 在回归任务里是 LinearRegression。写成「逻辑回归」会让正文
+        # 出现「用逻辑回归预测连续房价」这种方法与任务不符的话，评审官会判编造。
+        cn = "线性回归" if (k == "lr" and is_reg) else d["cn"]
+        out.append({"name": cn, "estimator": est, "params": params})
     return out
 
 

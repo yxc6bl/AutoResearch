@@ -129,3 +129,51 @@ for name, items in sorted(_buckets.items(), key=lambda kv: -len(kv[1])):
     print(f"   [{name}] {len(items)} 题")
     for t in items:
         print("      ×", t)
+
+# ─────────────────────────────────────────────────────────────────────────
+# 严格复核（2026-11-09）
+# 上面的 21/33 是「技术上能跑」的宽口径。用户指出这像「射标找靶」：
+# 自己出题自己考，且只查模态一致性、不查任务语义，于是「RGBD 分割」
+# 绑到人脸分类、「去雨」绑到人脸分类、「句法相似性」绑到新闻组分类，
+# 仍被算成可执行。这里不改原判定，只补三层扣减，给出诚实口径。
+# ─────────────────────────────────────────────────────────────────────────
+_REAL_TITLES = [(s, t) for s, t in TITLES if s != "自测"]
+_SELF_TITLES = [(s, t) for s, t in TITLES if s == "自测"]
+
+# (题目里出现这些词, 题目主张的任务, 绑到的数据集实际只支持)
+_CLAIM_CONFLICTS = [
+    (("分割", "去雨", "持续学习", "RGBD", "检测"), "像素级分割 / 检测 / 持续学习", "整图分类"),
+    (("句法", "语义相似性", "相似度度量", "因果表示"), "语义度量 / 因果表示建模", "主题分类或表格回归"),
+    (("信用评分",), "信用违约风险评分", "年收入是否超过 5 万美元的二分类"),
+]
+
+
+def _semantic_conflict(title: str):
+    for kws, claim, actual in _CLAIM_CONFLICTS:
+        if any(k in title for k in kws):
+            return claim, actual
+    return None
+
+
+print("\n================ 严格复核（扣掉射标找靶的水分） ================")
+print(f"题库 {len(TITLES)} 道 = 真实高校题 {len(_REAL_TITLES)} 道 + 自测题 {len(_SELF_TITLES)} 道")
+print(f"宽口径「可执行」: {len(OK)}/{len(TITLES)}")
+_self_ok = sum(1 for _, t in _SELF_TITLES if t in OK)
+print(f"  − 自测题（自己出的题自己考）: {_self_ok} 道 "
+      f"→ 真实高校题可执行 {len(OK) - _self_ok}/{len(_REAL_TITLES)}")
+
+_conf = []
+for src, t in _REAL_TITLES:
+    if t in OK and _semantic_conflict(t):
+        _conf.append((src, t, *_semantic_conflict(t)))
+print(f"  − 语义明显不符: {len(_conf)} 道（技术上能跑，但题目要的事数据做不了）")
+for src, t, claim, actual in _conf:
+    print(f"      [{src}] {t}")
+    print(f"          题目要「{claim}」，数据只支持「{actual}」")
+
+_n_proxy_real = sum(1 for _, t in _REAL_TITLES if t in PROXY)
+print(f"  − 代理数据（领域数据不同）: {_n_proxy_real} 道")
+_strict = len(OK) - _self_ok - len(_conf) - _n_proxy_real
+print(f"严格口径：真实高校题里「同领域真实数据 + 语义相符」= "
+      f"{_strict}/{len(_REAL_TITLES)}（{_strict / len(_REAL_TITLES) * 100:.1f}%）")
+print("说明：这是题库命中率，不是系统能做的任务类型数；两者不能混为一谈。")
