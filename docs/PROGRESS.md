@@ -447,3 +447,35 @@ batch/epoch/参数量/耗时），`run_analysis` 按 `data.source=="image"` 早�
 复评：**hard_pass / 综合 99.2 / 评审官 78 分 / 0 幻觉**，16415 汉字，
 `gates` P0 四项全通过「可交付」。第 6 章标题改为「深入分析」，三张图嵌入正文与 Word。
 网站 `/api/open?dir=out_image_cli` 返回 40625 字符 HTML 与三张图路径。
+
+---
+
+## 13. 能力盘点 + 可直接交付的共享包（2026-11-08/09）
+
+### 13.1 问题定位
+
+`https://github.com/yxc6bl/AutoResearch/invitations` 是邀请页，仓库根为
+`yxc6bl/AutoResearch`。**拉取没有问题**（fetch 成功、匿名可读、远端 `435d25a`）。
+卡住的是**推送需要本人授权一次**：本机 GCM 在无界面会话里 browser / device /
+非交互三种都挂起，系统凭据管理器始终没有 github.com 条目。
+不是仓库问题、不是代码问题、也不是网络问题（`git ls-remote` 曾成功；
+偶发 `schannel: server closed abruptly` 属 TLS 抖动）。
+
+### 13.2 已就绪
+
+origin 已配、本地分支改 `main`、无关历史用 `-s ours` 合并（保留远端旧快照、
+工作树用最新工程、无强推、可快进）。post-commit 自动推送 hook 已装。
+本地领先 46 个提交，工作区干净。补 `--store-token` 走 PAT 持久化授权。
+
+### 13.3 不依赖 GitHub 的交付路径
+
+新增 `docs/CAPABILITY.md`（七条后端 / 五篇实测论文 / 11 道闸门 / 网站 / 依赖 /
+明确做不到的六类），以及 `scripts/make_share_package.py`。
+
+生成 `dist/AutoResearch_share_20261109.zip`：12.6MB / 120 文件 / 三篇示例共 38 个产物，
+含 `start_web.py`、`使用说明.md`、`memory/store.py`（四个子代理依赖它，不能漏）、
+Cora 与 MNIST 全量数据、`.env.example`。排除 `.git/`、`out_*/`、密钥、日志、本地台账。
+
+**干净目录实测**：解压后 `backends --check` 通过、图像后端重新训练成功并出三张图、
+独立起服务 5055 返回首页 200 与 9 个数据集、`/api/open` 三篇示例分别为
+`hard_pass 98.3 / 94.8 / 99.2`。临时目录已清理。
