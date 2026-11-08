@@ -7,59 +7,73 @@
 
 | 项 | 状态 |
 |---|---|
-| 本地仓库 | 已初始化，40+ 次提交，工作区干净，HEAD `51b1ceb` |
-| `origin` | **未配置** —— 缺你 GitHub 上那个仓库的地址 |
-| 推送凭据 | 仓库级 `credential.helper=manager` **已配置**；尚未授权（首次推送会弹 GitHub 网页登录一次） |
-| 网络 | 通（`git ls-remote https://github.com/git/git.git` 实测成功） |
-| 自动推送 hook | 脚本已写好，**执行 `--setup` 后才安装** |
-| 仓库体积 | 37MB / 59 个跟踪文件，最大单文件 148KB；`out_*/`、`.env`、`*.docx`、`corpus/` 已被 `.gitignore` 排除 |
+| 仓库 | `https://github.com/yxc6bl/AutoResearch.git`（用户给的是 `/invitations` 邀请页，已还原成仓库根地址） |
+| `origin` | **已配置并 fetch 成功** |
+| 远端默认分支 | `main`（本地已由 `master` 改名为 `main`） |
+| 本地 HEAD | `f0315eb` —— 合并远端初始快照后的提交，待推送 |
+| 网络 | 通（`git ls-remote` 匿名可读，远端 `435d25a`） |
+| 推送凭据 | **尚未完成授权**；系统凭据管理器里没有 github.com 条目 |
+| 自动推送 hook | 已安装 `.git/hooks/post-commit` |
+| 仓库体积 | ~52MB（含 MNIST 15MB），`out_*/`、`.env`、`*.docx`、`corpus/` 已被 `.gitignore` 排除 |
 
-也就是说：代码这边全准备好了，只差**仓库 URL**和**一次授权**。
+### 远端历史怎么接的
 
-## 一次性配置
+远端是网页上传的旧版快照（两个 `Add files via upload`，含 `AutoResearch.zip`、
+`out_cross_v3/` 等），与本地 40+ 次提交**没有共同祖先**。直接推会被拒绝。
 
-把你在 GitHub 网页上建好的仓库地址贴过来（形如
-`https://github.com/<用户名>/<仓库名>.git`），然后：
+处理方式是 `git merge -s ours --allow-unrelated-histories origin/main`：
+
+- 远端两个提交成为祖先，推送是正常 fast-forward（**没有用 force push**）；
+- 工作树保持本地最新工程，旧 zip / 旧结果目录不会覆盖新代码；
+- 旧快照仍留在历史里，随时可以 `git show` 回溯。
+
+## 授权：当前唯一待办
+
+本机 Git Credential Manager 2.9.0 在**无界面会话里弹不出可用的授权窗口**，
+设备码模式也没有吐出码（已实测：browser / device 两种都挂起，系统凭据为空）。
+所以最稳的是在 GitHub 网页生成一次 PAT，让我把它存进系统凭据管理器。
+
+**你只需在网页做三步：**
+
+1. 打开 `https://github.com/settings/tokens`（GitHub 网页，Settings →
+   Developer settings → Personal access tokens → Tokens (classic)）。
+2. Generate new token (classic)，勾 **`repo`**，过期时间随意，生成后复制那串
+   `ghp_...`。
+3. 把它贴给我。
+
+我这边会执行：
 
 ```bash
-python scripts/github_sync.py --setup https://github.com/OWNER/REPO.git
+GITHUB_TOKEN=ghp_xxx python scripts/github_sync.py --store-token
+python scripts/github_sync.py            # 首次推送，并验证远端 main 与本地一致
+```
+
+`--store-token` 通过 `git credential approve` 把凭据交给 GCM 存进
+**Windows 凭据管理器**：不写项目文件、不写 `.git/config`、不进日志、不入库。
+之后普通 `git push` 和 post-commit hook 都免密，你也不用再管它。
+用完随时可以在同一个网页 Revoke 掉。
+
+> 另一种一次性的用法：`GITHUB_TOKEN=ghp_xxx python scripts/github_sync.py`，
+> token 只用 `git -c http.extraheader=...` 临时传给本次 push 进程，
+> 进程结束就没了；但这样 hook 的自动推送仍然没有凭据，所以推荐 `--store-token`。
+>
+> SSH 也可以（生成密钥对、把公钥贴到 GitHub 网页），但国内网络到
+> `github.com:22` 常被挡，HTTPS + PAT 是已验证可走通的路径。
+
+## 一次性配置（已完成，留档）
+
+```bash
+python scripts/github_sync.py --setup https://github.com/yxc6bl/AutoResearch.git
 ```
 
 这条命令做四件事：
 
 1. 配置 / 替换 `origin`（若 URL 里带了 token，会先剥掉再写入，避免明文落在 `.git/config`）；
-2. 仓库级设置 `credential.helper=manager`，用本机 GCM 存凭据（不动全局 git 配置）；
+2. 仓库级设置 `credential.helper=manager`（不动全局 git 配置）；
 3. 安装 `.git/hooks/post-commit`：**此后每次 commit 自动 push**；
 4. 打印结果，可用 `--status` 复核。
 
 不想自动推就加 `--no-hook`，之后手动跑同步命令。
-
-## 授权（三选一，按省事程度排）
-
-**A. 让 GCM 弹网页授权（推荐，一劳永逸，也最适合只在网页上用 GitHub 的人）**
-
-```bash
-python scripts/github_sync.py
-```
-
-首次推送会弹出 **GitHub 的网页授权窗口**，用你平时的网页账号登录、点一次
-Authorize 就行，不需要记 token、不需要装命令行工具。登录后凭据由
-Git Credential Manager 存进 Windows 凭据管理器，以后所有推送都不再问。
-
-**B. Personal Access Token（无图形界面 / 弹窗被挡时用）**
-
-在 GitHub → Settings → Developer settings → Personal access tokens 生成一个
-`repo` 权限的 token，然后只在当前会话注入：
-
-```bash
-GITHUB_TOKEN=ghp_xxx python scripts/github_sync.py
-```
-
-脚本用 `git -c http.extraheader=...` 临时传给 push 进程，**不写 remote URL、
-不写 .git/config、不写 hook 文件**，进程结束就没了。
-
-**C. SSH key**（若你习惯 SSH）：自行生成 key、把公钥加到 GitHub，
-再用 `git@github.com:OWNER/REPO.git` 跑 `--setup`。脚本不做任何改动。
 
 ## 日常使用
 
@@ -86,17 +100,17 @@ python scripts/github_sync.py --status         # 看 origin / 领先落后 / 未
 ```bash
 python scripts/github_sync.py --status
 cat .git/sync.log | tail -20
-git ls-remote origin HEAD       # 单纯测连通性，不需要本地提交
+git ls-remote origin HEAD       # 单纯测连通性，不需要凭据
 ```
 
 常见情况：
 
-- `remote: Repository not found` → 地址写错，或仓库是私有的但没授权；
-- `Authentication failed` → 走上面的 A 或 B；
+- `remote: Repository not found` → 地址写错，或私有仓库没授权；
+- `Authentication failed` → 系统凭据里没有 github.com 条目，重跑 `--store-token`；
+- `non-fast-forward` → 远端有新提交，先 `git fetch origin main && git merge origin/main`；
 - hook 没生效 → 检查 `.git/hooks/post-commit` 是否存在、里面 python 路径是否正确，
   重跑一次 `--setup` 即可；
-- 想关掉自动推送 → `git config --local --unset credential.helper` 不解决，
-  直接删 `.git/hooks/post-commit` 文件。
+- 想关掉自动推送 → 直接删 `.git/hooks/post-commit` 文件。
 
 ## 想更自动
 

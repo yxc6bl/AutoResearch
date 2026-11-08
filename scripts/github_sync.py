@@ -17,6 +17,8 @@
     python scripts/github_sync.py -m "修了某处"        # 指定提交信息
     python scripts/github_sync.py --status             # 看远端/领先落后
     python scripts/github_sync.py --auto               # hook 内部调用，只推不提交
+    GITHUB_TOKEN=ghp_xxx python scripts/github_sync.py --store-token
+        # 把 PAT 存进系统凭据管理器（GCM 弹窗不可用时用），之后免密
     python scripts/github_sync.py --no-hook            # 不装自动推送 hook
 """
 from __future__ import annotations
@@ -106,6 +108,29 @@ def setup(url: str, install_hook: bool = True) -> int:
     return 0
 
 
+def store_token(token: str | None = None) -> int:
+    """把 PAT 交给 Git Credential Manager 持久化，之后所有推送免密。
+
+    GCM 的浏览器弹窗 / 设备码在某些无界面环境里不吐码也弹不出窗口，
+    这时用网页生成一次 classic PAT 最稳。token 只经 stdin 传给
+    `git credential approve`，不写项目文件、不入库、不进日志。
+    """
+    tok = (token or os.environ.get("GITHUB_TOKEN")
+           or os.environ.get("GH_TOKEN") or "").strip()
+    if not tok:
+        print("[store-token] 没拿到 token：设 GITHUB_TOKEN 环境变量或传 --token")
+        return 1
+    payload = (f"protocol=https\nhost=github.com\n"
+               f"username=x-access-token\npassword={tok}\n\n")
+    r = subprocess.run(["git", "-C", str(ROOT), "credential", "approve"],
+                       input=payload, text=True, capture_output=True)
+    if r.returncode != 0:
+        print("[store-token] 存入失败：", r.stderr.strip()[:200])
+        return 1
+    print("[store-token] 凭据已存入 Windows 凭据管理器（GCM），之后推送不再需要 token")
+    return 0
+
+
 def status() -> int:
     url = git("remote", "get-url", "origin")
     branch = git("branch", "--show-current").stdout.strip()
@@ -173,11 +198,16 @@ def main() -> int:
     ap.add_argument("--no-hook", action="store_true", help="--setup 时不装 hook")
     ap.add_argument("--status", action="store_true", help="查看远端与本地差异")
     ap.add_argument("--auto", action="store_true", help="post-commit hook 内部调用")
+    ap.add_argument("--store-token", action="store_true",
+                    help="把 GITHUB_TOKEN / --token 存进系统凭据管理器，之后免密推送")
+    ap.add_argument("--token", default="", help="配合 --store-token；也可只用环境变量")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("-m", "--message", default="", help="提交信息")
     args = ap.parse_args()
     if args.setup:
         return setup(args.setup, install_hook=not args.no_hook)
+    if args.store_token:
+        return store_token(args.token)
     if args.status:
         return status()
     return sync(args.message or None, args.auto, args.dry_run)
