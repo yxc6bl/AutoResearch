@@ -404,6 +404,7 @@ python auto_research.py feedback --stats         # 反馈台账与修复率
 ```
 
 对应产物：`out_assoc/`（关联规则，98.3 分）、`out_web/task_0001/`（网站端到端，98.7 分）、
+`out_graph_cli/`（图节点分类，94.8 分）、`out_image_cli/`（图像分类，99.2 分）、
 `out_gate_real/`（99.5 分但被拒的反例）。
 
 ---

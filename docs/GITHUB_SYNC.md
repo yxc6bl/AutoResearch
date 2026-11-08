@@ -9,7 +9,7 @@
 |---|---|
 | 本地仓库 | 已初始化，40+ 次提交，工作区干净，HEAD `51b1ceb` |
 | `origin` | **未配置** —— 缺你 GitHub 上那个仓库的地址 |
-| 推送凭据 | **未配置** —— 本机有 Git Credential Manager 2.9.0，但没有存过 github.com 凭据 |
+| 推送凭据 | 仓库级 `credential.helper=manager` **已配置**；尚未授权（首次推送会弹 GitHub 网页登录一次） |
 | 网络 | 通（`git ls-remote https://github.com/git/git.git` 实测成功） |
 | 自动推送 hook | 脚本已写好，**执行 `--setup` 后才安装** |
 | 仓库体积 | 37MB / 59 个跟踪文件，最大单文件 148KB；`out_*/`、`.env`、`*.docx`、`corpus/` 已被 `.gitignore` 排除 |
@@ -36,14 +36,15 @@ python scripts/github_sync.py --setup https://github.com/OWNER/REPO.git
 
 ## 授权（三选一，按省事程度排）
 
-**A. 让 GCM 弹窗登录（推荐，一劳永逸）**
+**A. 让 GCM 弹网页授权（推荐，一劳永逸，也最适合只在网页上用 GitHub 的人）**
 
 ```bash
 python scripts/github_sync.py
 ```
 
-首次推送会弹 GitHub 授权窗口，登录一次后凭据存进 Windows 凭据管理器，
-以后所有推送都不再问。
+首次推送会弹出 **GitHub 的网页授权窗口**，用你平时的网页账号登录、点一次
+Authorize 就行，不需要记 token、不需要装命令行工具。登录后凭据由
+Git Credential Manager 存进 Windows 凭据管理器，以后所有推送都不再问。
 
 **B. Personal Access Token（无图形界面 / 弹窗被挡时用）**
 

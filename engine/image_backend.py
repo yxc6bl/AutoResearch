@@ -276,7 +276,7 @@ def run_image(spec: dict, out_path: Path) -> dict:
         results["像素逻辑回归"] = {
             "params": int(np.prod(lr.coef_.shape) + lr.intercept_.size),
             "framework": "sklearn", "epochs": None, "train_s": round(time.time() - t0, 2),
-            "augment": False,
+            "augment": False, "solver": str(lr.solver), "max_iter": int(lr.max_iter),
         }
     except Exception as e:  # noqa: BLE001
         results["像素逻辑回归"] = {"error": str(e)}

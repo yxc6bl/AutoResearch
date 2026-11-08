@@ -1036,10 +1036,12 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
                          f"固定随机种子={_im.get('seed')}，三个模型合计耗时 {_im.get('total_s')}s。")
             lines.append("- 各模型实测（四位小数与整数必须原样引用，禁止改写）：")
             for k, v in (_im.get("models") or {}).items():
+                extra = (f"，求解器={v.get('solver')}，最大迭代={v.get('max_iter')}"
+                         if v.get("solver") else "")
                 lines.append(f"  - {k}：accuracy={v.get('accuracy'):.4f}，"
                              f"macro-F1={v.get('f1_macro'):.4f}，"
                              f"参数量={v.get('params')}，epoch={v.get('epochs') or '不适用'}，"
-                             f"训练耗时={v.get('train_s')}s，框架={v.get('framework')}")
+                             f"训练耗时={v.get('train_s')}s，框架={v.get('framework')}{extra}")
             lines.append("- 逐 epoch 训练损失与测试准确率（实测，引用时不得改写或补算）：")
             for k, hst in (_im.get("history") or {}).items():
                 lines.append(f"  - {k}：" + "；".join(
@@ -1053,7 +1055,7 @@ def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):
                          "严禁写「中位数插补」「标准化」「独热编码」「特征列」等表格预处理术语；"
                          "严禁写「5 个随机种子」「多种子方差」「按 8:2 随机划分训练集与测试集」"
                          "（真实情况是沿用 MNIST 官方划分并按固定种子分层抽样子集）；"
-                         "严禁声称使用了预训练权重、迁移学习、GPU、数据增广或配对显著性检验。")
+                         "严禁声称【本文】使用了预训练权重、迁移学习、GPU、数据增广或配对显著性检验。")
             lines.append("【重要】epoch 数、参数量、训练耗时、逐 epoch 损失与准确率、"
                          "各模型准确率与 macro-F1 只能原样引用上面清单给出的数值，"
                          "不得自行推算、四舍五入到别的值或补写清单之外的数字；"
@@ -1684,11 +1686,12 @@ def _future_work_note(spec: dict, analysis: dict, is_multi: bool) -> str:
                 "在更大的引文网络与社交网络上复现本文的泄漏检查流程，"
                 "以验证结论是否只属于 Cora 这一特定图结构。")
     if (analysis or {}).get("image"):
-        return ("本文只在 MNIST 子集上完成小规模图像分类，后续可在同一套事实契约下"
+        return ("本文只在 MNIST 子集上完成小规模图像分类，后续可在同一套评估口径下"
                 "引入数据增广、更深的卷积网络与完整的超参数搜索，"
-                "并用多个随机种子复现来估计方差、用逐折配对检验判断模型差异是否显著；"
-                "更进一步可接入预训练权重与迁移学习，把任务扩展到目标检测、"
-                "语义分割与视频理解，并在真实场景图像（车辆、交通标志、收银台）上验证外推性。")
+                "并用多个随机种子复现来估计方差、用配对检验判断模型差异是否显著；"
+                "更进一步可在真实场景图像（车辆、交通标志、收银台）上验证外推性，"
+                "并把任务扩展到目标检测、语义分割与视频理解。"
+                "上述内容均为后续工作，本文未使用预训练权重、迁移学习与检测链路。")
     return ("本文仅在有限的数据集与随机种子（5 个）下验证结论，后续可在更大规模、"
             "更多分布的数据集上复现，以检验结论的外推性；亦可引入更多候选方法与更宽的"
             "超参数搜索空间，并借助 GPU 加速扩展实验规模，进一步压缩多种子方差估计的不确定性。")
@@ -2389,9 +2392,9 @@ def main() -> int:
     elif (analysis or {}).get("image"):
         _im = analysis["image"]
         _innov = [
-            f"在 {dataset} 上把图像张量接入原有的论文流水线：新增独立的图像分支，"
-            f"自行管理 batch、epoch 与参数量统计，使 top-1 准确率、macro-F1、"
-            f"训练耗时和逐 epoch 曲线都能进入统一的事实契约，而不必把图像伪装成表格列。",
+            f"在 {dataset} 上采用独立的图像分类流程：图像以张量形式进入训练，"
+            f"按 batch 与 epoch 组织，并如实记录各模型的参数量与训练耗时，"
+            f"使 top-1 准确率、macro-F1 与逐 epoch 曲线都成为可核对的实验结果。",
         ]
         if best_method:
             _innov.append(

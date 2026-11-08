@@ -716,9 +716,11 @@ def _ground_truth(analysis: dict) -> str:
                     f"合计耗时={_im.get('total_s')}s。")
         bits.append("各模型实测（四位小数，论文引用时不得改写）：")
         for k, v in (_im.get("models") or {}).items():
+            extra = (f"，求解器={v.get('solver')}，最大迭代={v.get('max_iter')}"
+                     if v.get("solver") else "")
             bits.append(f"  - {k}：accuracy={v.get('accuracy'):.4f}，"
                         f"macro-F1={v.get('f1_macro'):.4f}，参数量={v.get('params')}，"
-                        f"epoch={v.get('epochs') or '不适用'}，训练耗时={v.get('train_s')}s")
+                        f"epoch={v.get('epochs') or '不适用'}，训练耗时={v.get('train_s')}s{extra}")
         bits.append("逐 epoch 训练损失与测试准确率（实测，论文可原样引用）：")
         for k, hst in (_im.get("history") or {}).items():
             bits.append(f"  - {k}：" + "；".join(
@@ -728,8 +730,9 @@ def _ground_truth(analysis: dict) -> str:
         bits.append(f"核心结论（最优模型）：{_ib.get('name')} "
                     f"accuracy={_ib.get('accuracy'):.4f}，macro-F1={_ib.get('f1_macro'):.4f}")
         bits.append("本实验固定划分、固定种子、单次训练，未做多种子复现与配对显著性检验；"
-                    "正文若声称多种子标准差、p 值、预训练权重、迁移学习、GPU、"
-                    "数据增广、标准化/中位数插补/独热编码，均为编造。")
+                    "正文若声称【本文】使用了多种子标准差、p 值、预训练权重、迁移学习、GPU、"
+                    "数据增广、标准化/中位数插补/独热编码，均为编造（第 8.2 节作为"
+                    "未来展望提及这些方向不算编造）。")
     # 逐类指标与混淆矩阵都是分析引擎实测的，必须完整进事实清单。
     # 早期版本只把它们塞进写作端的事实包、没给评审官，结果正文里每一个
     # 真实的逐类数字都被判成「事实清单未提供」的幻觉。
