@@ -644,6 +644,11 @@ CONNECT tunnel failed 等网络错误，`git()` 统一加 120 秒超时。
 
 ### 16.2 推送状态
 
-本轮改动已提交；代理对 github.com 仍返回 `CONNECT tunnel failed, response 502`
-（直连 `github.com:443` 也超时），提交暂留本地。网络恢复后跑一次
-`python scripts/github_sync.py` 即可补推，或任意一次新提交由 post-commit hook 带走。
+15:43 那次提交触发 hook 时，代理对 github.com 仍返回 `CONNECT tunnel failed,
+response 502`（直连 `github.com:443` 也超时），`d6a490d` 暂留本地。16:24 提交本轮
+改动时链路恢复，post-commit hook 把积压的 `d6a490d` 与 `dde2c02` 一次推走，
+`git ls-remote` 确认远端 `refs/heads/main` 已是 `dde2c02`，本地与远端一致。
+
+结论：同步是**提交即推**，不是定时；代理偶发 502 会让某次提交滞后，下一次成功
+的推送会把积压一起带走。要立刻确认，跑 `git status -sb`（无 ahead 即已同步）
+或 `python scripts/github_sync.py --status`。
