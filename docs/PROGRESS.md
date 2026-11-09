@@ -596,3 +596,9 @@ CONNECT tunnel failed 等网络错误，`git()` 统一加 120 秒超时。
 `python scripts/github_sync.py`。远端 `b592740` 已包含完整工程、全部数据与文档，
 只是同步状态记录与 hook 重试修复这两处文本不是最新版；
 最新代码同时已打进 `dist/AutoResearch_share_<日期>.zip`，不依赖 GitHub 也能交付。
+
+### 15.4 自动同步最终验证
+
+12:36 代理恢复，`git push` 把积压提交一次推走（`12d7dc5..0a59641`），
+`--status` 回到 `0 0`。本节改动**只提交、不手动执行任何推送命令**，
+用于确认 post-commit hook 会自己把改动同步到 GitHub。
