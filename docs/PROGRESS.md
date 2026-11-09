@@ -573,3 +573,11 @@ post-commit hook 已装（提交后异步 push，失败写 `.git/sync.log`、不
 修法：hook 改为同步执行 `--auto` 并 `exit 0`（推送失败只留日志、不打断 commit）；
 `setup()` 生成 hook 的模板同步改掉；`git()` 给所有子进程加 `timeout=120`，
 避免网络挂起把 commit 卡死。本节改动即用于验证「提交后无需任何手动操作即推送」。
+
+### 15.2 网络抖动重试（自动推送最后一环）
+
+修好 hook 后的首次自动推送仍遇到一次 `schannel: server closed abruptly
+(missing close_notify)`，日志有记录但远端没更新——国内访问 GitHub 的偶发 TLS 中断
+会让某次提交漏推。现给 `--auto` 加最多 3 次重试（仅对网络类错误重试，间隔 2 秒；
+认证/权限类错误立即报错），并给 `git()` 子进程统一加 120 秒超时。
+本次提交用于验证：一次普通 commit 后无需任何手动操作，远端 HEAD 自动追平。

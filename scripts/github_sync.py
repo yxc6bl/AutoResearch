@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -184,13 +185,31 @@ def sync(message: str | None, auto: bool, dry_run: bool) -> int:
         return 0 if auto else 1
 
     cfg = _token_args()
-    p = git("push", "-u", "origin", f"HEAD:{branch}", extra_config=cfg)
-    if p.returncode == 0:
-        msg = f"推送成功 → {url.stdout.strip()} ({branch})"
-        log(msg)
-        print(f"[sync] {msg}")
-        return 0
-    err = (p.stderr or p.stdout or "").strip()
+    # GitHub 在国内访问偶发 TLS / schannel 中断，自动推送必须自带重试，
+    # 否则一次抖动就漏推，要等下次提交才把两次一起带走。
+    _retryable = ("schannel", "closed abruptly", "timed out", "timeout",
+                  "could not resolve", "unable to access", "ssl", "tls",
+                  "connection reset", "early eof")
+    err, p = "", None
+    for attempt in range(1, 4):
+        try:
+            p = git("push", "-u", "origin", f"HEAD:{branch}", extra_config=cfg)
+        except subprocess.TimeoutExpired:
+            p, err = None, "git push 超过 120 秒超时"
+        if p is not None and p.returncode == 0:
+            msg = f"推送成功 → {url.stdout.strip()} ({branch})"
+            if attempt > 1:
+                msg += f"（第 {attempt} 次尝试）"
+            log(msg)
+            print(f"[sync] {msg}")
+            return 0
+        if p is not None:
+            err = (p.stderr or p.stdout or "").strip()
+        if not any(k in err.lower() for k in _retryable):
+            break  # 认证 / 权限类错误重试没意义
+        if attempt < 3:
+            log(f"第 {attempt} 次遇到网络抖动，2 秒后重试：{err[-160:]}")
+            time.sleep(2)
     log(f"推送失败：{err[-600:]}")
     print("[sync] 推送失败：", err[-600:])
     print("        若提示认证失败：设 GITHUB_TOKEN 后重试，或首次推送时完成 GCM 弹窗授权")
