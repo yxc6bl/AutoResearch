@@ -143,3 +143,131 @@ CONTENT_QUALITY_RULES = [
 def content_quality_checklist() -> list[dict]:
     """返回 EvalAgent 评估内容严谨度时逐条核查的规则。"""
     return CONTENT_QUALITY_RULES
+
+
+# ── 6. 论文类型注册表（可插拔骨架，v3 新增） ──────────────────────────
+# 系统此前只会写「方法对比型实证研究」一种骨架（CHAPTERS）。本注册表把「章节骨架」
+# 抽成可按 paper_type 调度的配置，使同一套引擎能覆盖更多论文类型：
+#   - method_comparison：既有默认骨架（需跑实验，产生指标/对比表）
+#   - survey           ：文献综述型（纯文献，不做实验，按主题系统梳理前人工作）
+#   - system_design    ：系统/软件设计型（纯 spec 驱动，讲需求/架构/模块/验证）
+# 新增类型只需在此登记一套 chapters，并在 generate_paper.py 写对应的 builder 即可。
+PAPER_TYPES = {
+    "method_comparison": {
+        "label": "方法对比型实证研究",
+        "requires_experiment": True,
+        "default_task_type": "classification",
+        "chapters": CHAPTERS,
+    },
+    "survey": {
+        "label": "文献综述型",
+        "requires_experiment": False,
+        "default_task_type": "survey",
+        "chapters": [
+            {"key": "intro",        "no": 1, "cn": "绪论",               "en": "Introduction"},
+            {"key": "method_survey","no": 2, "cn": "文献检索与分析方法", "en": "Literature Retrieval and Analysis Method"},
+            {"key": "framework",    "no": 3, "cn": "研究主题分类框架",   "en": "Taxonomy of Research Topics"},
+            {"key": "status",       "no": 4, "cn": "各主题研究现状",     "en": "State of the Art by Topic"},
+            {"key": "trend",        "no": 5, "cn": "研究趋势与争论",     "en": "Trends and Debates"},
+            {"key": "open",         "no": 6, "cn": "开放问题与未来方向", "en": "Open Problems and Future Directions"},
+            {"key": "conclusion",   "no": 7, "cn": "结论与展望",         "en": "Conclusion and Future Work"},
+        ],
+    },
+    "system_design": {
+        "label": "系统/软件设计型",
+        "requires_experiment": False,
+        "default_task_type": "system_design",
+        "chapters": [
+            {"key": "intro",       "no": 1, "cn": "绪论",           "en": "Introduction"},
+            {"key": "requirements", "no": 2, "cn": "需求分析",       "en": "Requirements Analysis"},
+            {"key": "architecture", "no": 3, "cn": "总体架构设计",   "en": "System Architecture"},
+            {"key": "modules",      "no": 4, "cn": "核心模块设计与实现", "en": "Core Module Design and Implementation"},
+            {"key": "tech",         "no": 5, "cn": "关键技术与难点", "en": "Key Techniques and Challenges"},
+            {"key": "validation",   "no": 6, "cn": "系统验证与测试", "en": "System Validation and Testing"},
+            {"key": "conclusion",   "no": 7, "cn": "结论与展望",     "en": "Conclusion and Future Work"},
+        ],
+    },
+    "case_study": {
+        "label": "案例研究型",
+        "requires_experiment": False,
+        "default_task_type": "case_study",
+        "chapters": [
+            {"key": "intro",       "no": 1, "cn": "绪论",               "en": "Introduction"},
+            {"key": "theory",      "no": 2, "cn": "理论基础与文献回顾", "en": "Theoretical Basis and Literature Review"},
+            {"key": "design",      "no": 3, "cn": "研究设计与案例选择", "en": "Research Design and Case Selection"},
+            {"key": "context",     "no": 4, "cn": "案例背景与现状",     "en": "Case Background and Status Quo"},
+            {"key": "analysis",    "no": 5, "cn": "案例分析",           "en": "Case Analysis"},
+            {"key": "discussion",  "no": 6, "cn": "讨论与启示",         "en": "Discussion and Implications"},
+            {"key": "conclusion",  "no": 7, "cn": "结论与展望",         "en": "Conclusion and Future Work"},
+        ],
+    },
+    "technical_report": {
+        "label": "工程实践报告型",
+        "requires_experiment": False,
+        "default_task_type": "technical_report",
+        "chapters": [
+            {"key": "intro",          "no": 1, "cn": "概述",       "en": "Overview"},
+            {"key": "requirements",   "no": 2, "cn": "需求与约束", "en": "Requirements and Constraints"},
+            {"key": "architecture",   "no": 3, "cn": "方案设计",   "en": "Solution Design"},
+            {"key": "implementation", "no": 4, "cn": "实施过程",   "en": "Implementation Process"},
+            {"key": "results",        "no": 5, "cn": "结果与验证", "en": "Results and Verification"},
+            {"key": "issues",         "no": 6, "cn": "问题与改进", "en": "Problems and Improvements"},
+            {"key": "conclusion",     "no": 7, "cn": "总结与展望", "en": "Summary and Outlook"},
+        ],
+    },
+    "research_proposal": {
+        "label": "研究方案设计型（开题）",
+        "requires_experiment": False,
+        "default_task_type": "research_proposal",
+        "chapters": [
+            {"key": "intro",       "no": 1, "cn": "研究背景与意义",   "en": "Background and Significance"},
+            {"key": "status",      "no": 2, "cn": "国内外研究现状",   "en": "State of the Art"},
+            {"key": "questions",   "no": 3, "cn": "研究问题与目标",   "en": "Research Questions and Objectives"},
+            {"key": "content",     "no": 4, "cn": "研究内容与方法",   "en": "Research Content and Methods"},
+            {"key": "route",       "no": 5, "cn": "技术路线与可行性", "en": "Technical Route and Feasibility"},
+            {"key": "plan",        "no": 6, "cn": "进度安排与预期成果", "en": "Schedule and Expected Outcomes"},
+            {"key": "conclusion",  "no": 7, "cn": "结语",             "en": "Conclusion"},
+        ],
+    },
+}
+
+
+# 非实验型（只靠「素材 → 结构化成文」）的论文类型集合。
+NON_EXPERIMENTAL_TYPES = tuple(
+    k for k, v in PAPER_TYPES.items() if not v.get("requires_experiment", True)
+)
+
+
+def paper_type_registry() -> dict:
+    """返回论文类型注册表（键 → {label, requires_experiment, default_task_type, chapters}）。"""
+    return PAPER_TYPES
+
+
+def is_experimental(paper_type: str) -> bool:
+    """该论文类型是否需要跑确定性实验（产生 03_experiment.json 的指标）。"""
+    return PAPER_TYPES.get(paper_type, PAPER_TYPES["method_comparison"]).get("requires_experiment", True)
+
+
+def chapters_for(paper_type: str) -> list[dict]:
+    """返回某论文类型的章节骨架（与 CHAPTERS 同构的 dict 列表）。"""
+    return PAPER_TYPES.get(paper_type, PAPER_TYPES["method_comparison"])["chapters"]
+
+
+def chapter_heading_of(ch: dict) -> str:
+    """给定章节 dict（含 no/cn），返回「## 第N章 标题」形式的 Markdown 标题。"""
+    return f"## 第{ch['no']}章 {ch['cn']}"
+
+
+def heading_to_key(chapters: list[dict]) -> dict:
+    """构造 heading→key 映射，供章节小结插入逻辑使用。"""
+    return {chapter_heading_of(c): c["key"] for c in chapters}
+
+
+def structure_checklist_for(paper_type: str) -> list[str]:
+    """返回 EvalAgent 结构检查时必须出现的章节标题清单（按类型不同）。"""
+    chs = chapters_for(paper_type)
+    lines = ["## 摘要", "## 目录"]
+    for c in chs:
+        lines.append(chapter_heading_of(c))
+    lines.append("## 参考文献")
+    return lines

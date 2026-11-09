@@ -26,6 +26,17 @@ from pathlib import Path
 
 from engine import gates, trace  # noqa: E402
 
+try:  # 论文类型注册表（v3 可插拔骨架）
+    from paper.thesis_template import (
+        is_experimental as _is_exp,
+        paper_type_registry as _paper_types,
+    )
+    PAPER_TYPE_CHOICES = list(_paper_types().keys())
+except Exception:  # noqa: BLE001
+    def _is_exp(pt):
+        return pt in (None, "", "method_comparison")
+    PAPER_TYPE_CHOICES = ["method_comparison"]
+
 ROOT = Path(__file__).resolve().parent
 ANALYSIS_ENGINE = ROOT / "engine" / "analysis_engine.py"
 GEN_PAPER = ROOT / "paper" / "generate_paper.py"
@@ -321,19 +332,39 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     _t_stage = time.time()
 
     # 3) 确定性分析（ExperimentAgent 封装，写 project memory）
+    #    非实验型论文（survey / system_design）跳过实验引擎，写一份标记 paper_type 的桩
+    #    产物，使下游闸门/评审按类型豁免「实验有效」硬门，且不依赖实验事实做零编造门。
+    paper_type = spec.get("paper_type", "method_comparison")
     result: dict = {"analysis": None, "out_dir": str(out_dir), "paper": None, "errors": []}
     exp_path = out_dir / "03_experiment.json"
-    try:
-        ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")
-        analysis = ea.run(spec, exp_path)
-    except Exception as e:  # noqa: BLE001
-        result["errors"].append("实验分析失败: " + str(e))
-        return result
+    if not _is_exp(paper_type):
+        analysis = {
+            "paper_type": paper_type,
+            "task_type": paper_type,
+            "note": f"非实验型论文（{paper_type}），不跑确定性实验引擎",
+            "analysis": {"seed_variance": {}},
+            "metrics": [],
+            "best_method": None,
+        }
+        try:
+            exp_path.parent.mkdir(parents=True, exist_ok=True)
+            exp_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:  # noqa: BLE001
+            result["errors"].append("实验桩写入失败: " + str(e))
+        analysis = analysis  # 下游统一按 dict 使用
+    else:
+        try:
+            ea = _load_module(ROOT / "agents" / "experiment_agent.py", "experiment_agent")
+            analysis = ea.run(spec, exp_path)
+        except Exception as e:  # noqa: BLE001
+            result["errors"].append("实验分析失败: " + str(e))
+            return result
 
-    result: dict = {"analysis": analysis, "out_dir": str(out_dir), "paper": None, "errors": []}
-    if analysis.get("error"):
-        result["errors"].append("分析失败: " + str(analysis["error"]))
-        return result
+        if analysis.get("error"):
+            result["errors"].append("分析失败: " + str(analysis["error"]))
+            return result
+
+    result = {"analysis": analysis, "out_dir": str(out_dir), "paper": None, "errors": []}
 
     trace.record(out_dir, "analysis", time.time() - _t_stage,
                  status=("error" if result["analysis"].get("error") else "ok"),
@@ -546,6 +577,17 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     return result
 
 
+def _paper_type_of_out(out_dir) -> str:
+    """从产物目录的 task_spec.json 读取论文类型（读不到按方法对比型处理）。"""
+    try:
+        _p = Path(out_dir) / "task_spec.json"
+        if _p.exists():
+            return json.loads(_p.read_text(encoding="utf-8")).get("paper_type", "method_comparison")
+    except Exception:
+        pass
+    return "method_comparison"
+
+
 def _strict_gate_exit(res: dict, allow_degraded: bool, make_paper: bool):
     """严格模式的收尾裁决：返回需要提前退出的码；None 表示继续。
 
@@ -578,8 +620,49 @@ def _strict_gate_exit(res: dict, allow_degraded: bool, make_paper: bool):
     return None
 
 
+def _merge_spec_extra(spec: dict, path: str | None) -> dict:
+    """把用户提供的 JSON 素材合并进 spec。
+
+    约定：文件里若含 ``material`` 字段（dict），则视为「论文类型素材」，
+    按 paper_type 声明的 spec_block（system_spec / case_spec / project_spec /
+    proposal_spec）挂载；其余顶层键直接覆盖 spec。
+    """
+    if not path:
+        return spec
+    fp = Path(path)
+    if not fp.exists():
+        print(f"[warn] --spec-extra 文件不存在：{path}")
+        return spec
+    try:
+        extra = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[warn] --spec-extra 解析失败：{e}")
+        return spec
+    if not isinstance(extra, dict):
+        return spec
+    mat = extra.pop("material") if isinstance(extra.get("material"), dict) else None
+    for k, v in extra.items():
+        if k != "paper_type":
+            spec[k] = v
+    if mat:
+        pt = spec.get("paper_type") or "method_comparison"
+        try:
+            from paper.paper_type_specs import TYPE_SPECS
+            block_key = (TYPE_SPECS.get(pt) or {}).get("spec_block")
+        except Exception:  # noqa: BLE001
+            block_key = None
+        if block_key:
+            spec[block_key] = mat
+            print(f"[spec-extra] 已挂载 {len(mat)} 个字段到 {block_key}（paper_type={pt}）")
+        else:
+            print(f"[warn] paper_type={pt} 不消费类型素材，已忽略 material")
+    return spec
+
+
 def cmd_run(args) -> int:
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    spec["paper_type"] = args.paper_type
+    spec = _merge_spec_extra(spec, getattr(args, "spec_extra", ""))
     res = run_task(spec, args.out, make_paper=not args.no_paper, mode=args.mode)
     # 中途断网的情形：开跑时模型可用，跑到写作时挂了 → 产物已生成但不可交付。
     # 严格模式下这里必须失败退出，避免「悄悄给你一份半成品」。
@@ -603,7 +686,9 @@ def cmd_run(args) -> int:
     if a.get("error"):
         print("分析层报错：", a["error"])
         return 1
-    if a.get("task_type") != "multi_dataset" and (not a.get("metrics") or a.get("best_method") is None):
+    _pt = _paper_type_of_out(res.get("out_dir"))
+    if (_is_exp(_pt) and a.get("task_type") != "multi_dataset"
+            and (not a.get("metrics") or a.get("best_method") is None)):
         print("分析未产生有效结果。")
         return 1
     return 0
@@ -652,6 +737,7 @@ def cmd_plan(args) -> int:
     if client is None:
         print("[warn] 未检测到 API Key（.env 中 OPENAI_API_KEY），使用模板 spec 降级运行。")
     spec = None
+    _pt = args.paper_type
     if data_override is None:
         try:
             from engine.topic_parser import match_dataset as _match_ds, assemble_title_spec as _ats
@@ -678,6 +764,9 @@ def cmd_plan(args) -> int:
         dataset_meta = _dataset_meta(data_override)
         pa = _load_module(ROOT / "agents" / "planning_agent.py", "planning_agent")
         spec = pa.run(args.topic, client, model, extra, data_override, dataset_meta=dataset_meta)
+    if spec is not None:
+        spec["paper_type"] = _pt
+        spec = _merge_spec_extra(spec, getattr(args, "spec_extra", ""))
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "task_spec.json").write_text(
@@ -1208,7 +1297,9 @@ def cmd_from_title(args) -> int:
 
     spec = tp.assemble_title_spec(title, direction, data_override=data_override,
                                  method_hints=method_hints)
-    if spec.get("data") is None:
+    spec["paper_type"] = args.paper_type
+    spec = _merge_spec_extra(spec, getattr(args, "spec_extra", ""))
+    if _is_exp(args.paper_type) and spec.get("data") is None:
         print("[错误] 无法确定数据集绑定。")
         return 1
     print(f"[绑定] {spec['_match_note']}")
@@ -1268,7 +1359,9 @@ def cmd_from_title(args) -> int:
     if a.get("error"):
         print("分析层报错：", a["error"])
         return 1
-    if a.get("task_type") != "multi_dataset" and (not a.get("metrics") or a.get("best_method") is None):
+    _pt = _paper_type_of_out(res.get("out_dir"))
+    if (_is_exp(_pt) and a.get("task_type") != "multi_dataset"
+            and (not a.get("metrics") or a.get("best_method") is None)):
         print("分析未产生有效结果。")
         return 1
     # 入口只查了网关；中途写挂/评审发现幻觉，这里必须同样失败退出。
@@ -1291,6 +1384,13 @@ def main() -> int:
     rp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     rp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
+    rp.add_argument("--paper-type", default="method_comparison",
+                    choices=PAPER_TYPE_CHOICES,
+                    help="论文类型：method_comparison（默认，方法对比型实证）/ survey（文献综述型）/ "
+                         "system_design（系统·软件设计型）/ case_study（案例研究型）/ "
+                         "technical_report（工程实践报告型）/ research_proposal（研究方案·开题型）")
+    rp.add_argument("--spec-extra", default="",
+                    help="论文类型素材 JSON（含 material 字段时按类型挂到对应 spec_block）")
     rp.set_defaults(func=cmd_run)
 
     pp = sub.add_parser("plan", help="给一句研究主题，自动规划 spec + 拉文献 + 出论文")
@@ -1308,6 +1408,11 @@ def main() -> int:
     pp.add_argument("--no-paper", action="store_true", help="只跑分析，不出论文")
     pp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
+    pp.add_argument("--paper-type", default="method_comparison",
+                    choices=PAPER_TYPE_CHOICES,
+                    help="论文类型：method_comparison（默认）/ survey（文献综述型）/ system_design（系统·软件设计型）")
+    pp.add_argument("--spec-extra", default="",
+                    help="论文类型素材 JSON（含 material 字段时按类型挂到对应 spec_block）")
     pp.set_defaults(func=cmd_plan)
 
     ip = sub.add_parser("iterate", help="给主题，Planner 多轮迭代（扩宽数据集/方法）自动出论文")
@@ -1349,6 +1454,11 @@ def main() -> int:
                     help="只预演解析结果（数据集/方法/检索式），不跑实验不出论文")
     fp.add_argument("--mode", default="general",
                     help="机构模式：general（默认，通用学术标准）或 sztu（深圳技术大学预设）")
+    fp.add_argument("--paper-type", default="method_comparison",
+                    choices=PAPER_TYPE_CHOICES,
+                    help="论文类型：method_comparison（默认）/ survey（文献综述型）/ system_design（系统·软件设计型）")
+    fp.add_argument("--spec-extra", default="",
+                    help="论文类型素材 JSON（含 material 字段时按类型挂到对应 spec_block）")
     fp.set_defaults(func=cmd_from_title)
 
     sp = sub.add_parser("step", help="只跑某一步（plan/experiment/write/eval/polish），便于单模块调用")

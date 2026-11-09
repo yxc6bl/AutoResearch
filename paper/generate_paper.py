@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -34,6 +35,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from paper.thesis_template import (  # noqa: E402
     STYLE_RULES, chapter_heading, CHAPTERS, CHAPTER_BY_KEY,
+    chapters_for, chapter_heading_of, heading_to_key,
+)
+# 非实验型论文的「类型规格」：素材来源 / 分章提示 / 兜底文案 / 附加小节。
+# 所有非实验类型共用一个构建器，类型差异全部在 TYPE_SPECS 里声明。
+from paper.paper_type_specs import (  # noqa: E402
+    build_fact_pack, batches_for, fallback_for,
+    field_alias_for, extras_for, cite_block_at, related_work_after, label_of,
+    is_pluggable,
 )
 # 统一走共享 LLM 客户端：自带网关握手探测（识别 401/限流）、指数退避重试、全局节流与熔断器；
 # 因此本模块的散文写作在网关不可用/被限流时会干净地返回 {}，由 main() 自动降级为 _fallback_sections。
@@ -496,7 +505,8 @@ def _cite_tail(r: dict) -> str:
     return tail
 
 
-def _role_citation_block(refs: list[dict]) -> str:
+def _role_citation_block(refs: list[dict], heading: str | None = "### 2.x 代表性工作的路线归类",
+                         neutral: bool = False) -> str:
     """第2章「按角色归类」的文献使用块。
 
     旧实现只输出「已有工作包括 [2]、[3]、…」——文献变成了编号清单，读者不知道
@@ -511,13 +521,22 @@ def _role_citation_block(refs: list[dict]) -> str:
         groups.setdefault(role, []).append(r)
     role_label = {"方法": "方法路线", "理论基础": "理论基础与框架",
                   "基准数据集": "基准数据集与评测", "综述": "综述与元分析"}
-    role_lead = {
-        "方法": "在方法路线上，与本文直接可比的工作包括：",
-        "理论基础": "在理论基础与框架方面，本文依托的代表性工作包括：",
-        "基准数据集": "在基准数据集与评测协议方面，可对照的工作包括：",
-        "综述": "在综述与元分析方面，可作为领域坐标的工作包括：",
-    }
-    lines = ["### 2.x 代表性工作的路线归类", ""]
+    if neutral:
+        # 非实验型（设计/工程报告）不做实验对比，措辞必须是「可参照」而不是「直接可比」
+        role_lead = {
+            "方法": "在方法路线上，可作参照的研究包括：",
+            "理论基础": "在理论基础与框架方面，可供参照的工作包括：",
+            "基准数据集": "在数据集与评测口径方面，可作为参照的工作包括：",
+            "综述": "在综述与元分析方面，可作为领域坐标的工作包括：",
+        }
+    else:
+        role_lead = {
+            "方法": "在方法路线上，与本文直接可比的工作包括：",
+            "理论基础": "在理论基础与框架方面，本文依托的代表性工作包括：",
+            "基准数据集": "在基准数据集与评测协议方面，可对照的工作包括：",
+            "综述": "在综述与元分析方面，可作为领域坐标的工作包括：",
+        }
+    lines = ([heading, ""] if heading else [])
     adjacent = [r for r in refs if r.get("tier") == "adjacent"]
     for role in ["方法", "理论基础", "基准数据集", "综述"]:
         items = [r for r in groups.get(role, []) if r.get("tier") != "adjacent"]
@@ -1752,10 +1771,12 @@ def _future_work_note(spec: dict, analysis: dict, is_multi: bool) -> str:
 
 def _acknowledgements() -> str:
     """致谢（本科生毕设必备后置部分；用户可据实自行润色）。"""
+    # 注意：致谢里不写「学校提供了计算资源/数据库权限」这类未经证实的具体事实——
+    # 零编造口径同样覆盖后置部分，宁可留白让作者据实补充。
     return ("本论文的完成得益于多方面的支持。衷心感谢指导教师在研究选题、方法设计与论文"
-            "撰写各环节给予的悉心指导；感谢同窗在实验复现与讨论中提供的帮助；同时感谢学校"
-            "提供的计算资源与文献数据库访问权限，使本研究得以顺利开展。最后，向在求学路上"
-            "始终给予理解与支持的家人与朋友致以诚挚的谢意。")
+            "撰写各环节给予的悉心指导；感谢同窗在资料整理与讨论中提供的帮助；也感谢家人"
+            "与朋友在求学路上始终给予的理解与支持。\n\n"
+            "（致谢对象与具体事由请据实补充修改。）")
 
 
 # ── Markdown → docx ───────────────────────────────────────────────
@@ -1859,6 +1880,15 @@ def main() -> int:
             spec = json.loads((base / "task_spec.json").read_text(encoding="utf-8"))
         except Exception:
             spec = {}
+
+    # 论文类型分流：非「方法对比型」走独立 builder（不依赖实验产物），
+    # method_comparison 沿用下方既有实现，保证已验证路径不被改动。
+    _pt = spec.get("paper_type", "method_comparison")
+    # 非实验型：全部走统一的可插拔构建器（survey / system_design / case_study /
+    # technical_report / research_proposal ……以后新增的类型也自动落在这里）
+    if _pt != "method_comparison" and is_pluggable(_pt):
+        return _build_non_experimental(base, args, _pt)
+    # 其余（含未声明）视为 method_comparison
 
     metrics = exp.get("metrics") or []
     analysis = exp.get("analysis") or exp
@@ -2573,6 +2603,359 @@ def main() -> int:
         pass
     print("@@WRITE_STATUS@@ " + json.dumps(status, ensure_ascii=False))
     return 0
+
+
+# ───────────────────────────────────────────────────────────────────────
+# 可插拔论文类型：文献综述型 / 系统·软件设计型（v3 新增）
+#
+# 设计约束（与 method_comparison 完全一致）：零编造。所有事实来自流水线真实
+# 产物（01_literature.json / task_spec.json），LLM 只基于这些素材撰写，禁止引入
+# 素材外的文献、数字或结论。method_comparison 既有路径不动，本段为独立 builder。
+# ───────────────────────────────────────────────────────────────────────
+
+def _build_references_block(lit: dict) -> str:
+    """复用 main() 的参考文献渲染逻辑：把 01_literature.json 渲染成 [编号] 引用块。"""
+    refs = build_references(lit)
+    if not refs:
+        return "（本次生成未包含文献数据：未执行文献检索，或检索结果为空。该章节需在补全文献后重新生成。）"
+    lines = []
+    for r in refs:
+        line = f"[{r['num']}] {r['authors']}. {r['title']}"
+        if r["venue"]:
+            line += f"[J]. {r['venue']}"
+        if r["year"]:
+            line += f", {r['year']}"
+        if r["url"]:
+            line += f". {r['url']}"
+        lines.append(line + ".")
+    return "\n".join(lines)
+
+
+def _insert_summaries_for(paper: str, chapters: list[dict], summaries: dict) -> str:
+    """把各章「本章小结」插入到对应章标题之后（结论章除外）。"""
+    h2k = heading_to_key(chapters)
+    out = []
+    for line in paper.split("\n"):
+        out.append(line)
+        if line.strip() in h2k:
+            key = h2k[line.strip()]
+            if key != "conclusion" and summaries.get(key):
+                out.append("")
+                out.append(f"**本章小结：** {summaries[key]}")
+    return "\n".join(out)
+
+
+def _generic_summary(key: str, spec: dict) -> str:
+    """章节小结的确定性兜底（LLM 不可用 / 未覆盖某章时）。"""
+    _title = (spec.get("title") or spec.get("topic") or "本文").strip()
+    _maps = {
+        "intro": f"本章阐明了{_title}的研究背景与意义，明确了研究空白与本文的综述/设计范围。",
+        "method_survey": "本章说明了文献的检索策略、筛选标准与文献计量概况，为后续综述奠定方法基础。",
+        "framework": "本章提出了全文的分类框架，为按主题组织研究现状提供了统一维度。",
+        "status": "本章按框架系统梳理了各主题的研究现状，指出现有工作的贡献与局限。",
+        "trend": "本章归纳了研究趋势与不同阵营的方法论争论，厘清了尚未达成一致的分歧。",
+        "open": "本章列出了若干开放问题，并给出有依据的未来研究方向。",
+        "requirements": "本章分析了系统的功能性与非功能性需求，为总体架构设计提供约束。",
+        "architecture": "本章给出了系统的总体架构与模块划分，明确了各层的职责与数据流向。",
+        "modules": "本章阐述了核心模块的设计与实现要点，说明关键数据结构与接口。",
+        "tech": "本章讨论了实现中的关键技术选型与主要难点及其应对。",
+        "validation": "本章说明了系统的验证与测试策略，并以用例验证核心功能的正确性。",
+        # 案例研究型
+        "theory": "本章交代了本文所依据的理论框架，并结合文献说明了该框架在同类研究中的应用与分歧。",
+        "design": "本章说明了研究设计、资料收集方式与案例选择理由，为后文分析提供方法基础。",
+        "context": "本章描述了案例的背景与现状，界定了后续分析所依据的事实范围。",
+        "analysis": "本章按分析框架逐维度剖析了案例事实，归纳出其中的机制与成立条件。",
+        "discussion": "本章与既有研究对话，说明了本案例对理论的印证、修正与实践启示。",
+        # 工程实践报告型
+        "implementation": "本章按阶段记录了实施过程、里程碑与遇到的问题及处理方式。",
+        "results": "本章按验收标准说明了交付物与核验方式，未以推测替代实测结论。",
+        "issues": "本章分析了实施中暴露的问题、根因与已采取的改进措施。",
+        # 研究方案设计型
+        "questions": "本章界定了研究问题与目标，划定了研究边界。",
+        "content": "本章分块说明了研究内容与对应方法，明确了数据来源与处理方式。",
+        "route": "本章给出了技术路线与关键难点，并从理论、数据与条件三方面论证了可行性。",
+        "plan": "本章给出阶段安排与预期成果，说明了进度可控性与交付节点。",
+        "conclusion": "本章总结了全文工作，区分了本文工作与他人成果，并给出研究局限与未来展望。",
+    }
+    return _maps.get(key, f"本章围绕{_title}的相关内容展开，完成了对应的分析与论述。")
+
+
+def _generate_and_insert_summaries(paper: str, chapters: list[dict], spec: dict,
+                                   facts: str, paper_type: str) -> str:
+    """为各章生成「本章小结」并插入（LLM 生成 + 确定性兜底）。"""
+    summaries: dict = {}
+    if LLM.available():
+        keys = [c["key"] for c in chapters if c["key"] != "conclusion"]
+        _p = (f"{facts}\n\n请为以下各章（结论章除外）各写一句『本章小结』，"
+              f"归纳该章核心工作并指出对后文的铺垫，禁止与正文重复、禁止编造。\n"
+              f"输出 JSON，键为章节逻辑名：{json.dumps(keys, ensure_ascii=False)}")
+        try:
+            _r = LLM.chat_json(_p, system=WRITER_SYSTEM + STYLE_RULES,
+                               temperature=0.3, max_tokens=2048)
+            if isinstance(_r, dict):
+                summaries = {k: str(v).strip() for k, v in _r.items()
+                             if isinstance(v, str) and v.strip()}
+        except Exception:
+            summaries = {}
+    for c in chapters:
+        if not summaries.get(c["key"]):
+            summaries[c["key"]] = _generic_summary(c["key"], spec)
+    return _insert_summaries_for(paper, chapters, summaries)
+
+
+def _finalize_paper(base: Path, paper: str, args, meta: dict,
+                    chapters: list[dict], spec: dict, facts: str, paper_type: str) -> int:
+    """共享收尾：防重复小结 → 生成并插入章节小结 → 反 AI 腔 → 写 md/docx/WRITE_STATUS。"""
+    paper = _strip_inline_summaries(paper)
+    paper = _generate_and_insert_summaries(paper, chapters, spec, facts, paper_type)
+    paper = _merge_short_paragraphs(paper)
+    paper = _strip_cliche(paper)
+
+    out_md = base / "06_paper" / "paper_full.md"
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_md.write_text(paper, encoding="utf-8")
+
+    docx_note = ""
+    out_docx = base / "06_paper" / "paper_full.docx"
+    try:
+        md_to_docx(paper, out_docx, base)
+        docx_note = f"；已生成 Word 文档：{out_docx}"
+    except ImportError:
+        docx_note = "（未安装 python-docx，仅输出 Markdown）"
+    except Exception as e:  # noqa: BLE001
+        docx_note = f"；Word 生成失败：{e}"
+
+    _cn = len(re.findall(r"[\u4e00-\u9fff]", paper))
+    status = {
+        "status": "ok",
+        "paper_type": paper_type,
+        "markdown": str(out_md),
+        "llm_written": bool(meta.get("used_llm")),
+        "used_llm": bool(meta.get("used_llm")),
+        "llm_sections": meta.get("sections", []),
+        "model": os.environ.get("OPENAI_MODEL", "") or "",
+        "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "references_count": meta.get("n_refs", 0),
+        "chinese_chars": _cn,
+        "note": docx_note,
+    }
+    try:
+        (base / "06_paper" / "WRITE_STATUS.json").write_text(
+            json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    print("@@WRITE_STATUS@@ " + json.dumps(status, ensure_ascii=False))
+    return 0
+
+
+def _front_matter(title: str, args, sztu: bool) -> list[str]:
+    """前置结构：封面 → 诚信声明 → 目录（两种类型共用）。"""
+    parts = [f"# {title}\n"]
+    if sztu:
+        _cover_note = ("> 以下为深圳技术大学本科毕业论文（设计）封面要素；"
+                       "正式提交前请套用学校统一封面模板并打印手签。\n\n")
+        _college_line = "- 学院：（待填，如 健康与环境工程学院）\n"
+    else:
+        _cover_note = ("> 以下为本科毕业论文（设计）封面要素；"
+                       "正式提交前请套用所在学校统一封面模板并打印手签。\n\n")
+        _college_line = "- 学院：（待填，所在学院）\n"
+    parts.append(
+        "## 封面\n"
+        + _cover_note
+        + f"- 论文题目：{title}\n"
+        + _college_line
+        + "- 专业：（待填）\n"
+        + "- 学生姓名：（待填）\n"
+        + "- 学号：（待填）\n"
+        + "- 指导教师：（待填）\n"
+        + "- 提交日期：（待填，格式 YYYY 年 MM 月）\n\n"
+    )
+    parts.append(
+        "## 诚信声明\n\n"
+        "本人郑重声明：所提交的毕业论文（设计）是本人在指导教师指导下独立进行研究工作所取得的成果。"
+        "论文中凡引用他人已经发表或未发表的成果、数据、观点等，均已明确注明出处。除文中已经注明引用的内容外，"
+        "本论文不包含任何其他个人或集体已经发表或撰写过的作品成果。对本文的研究做出重要贡献的个人和集体，"
+        "均已在文中以明确方式标明。本人完全意识到本声明的法律结果由本人承担。\n\n"
+        "（此处须本人亲笔签名并注明日期）\n\n"
+    )
+    return parts
+
+
+def _toc_block(chapters: list[dict]) -> str:
+    lines = ["摘要（中文）", "Abstract（英文）"]
+    for c in chapters:
+        lines.append(f"第{c['no']}章 {c['cn']}")
+    lines += ["参考文献", "致谢"]
+    return "\n".join(lines)
+
+
+# ── 非实验型论文：统一构建器（类型规格见 paper/paper_type_specs.py） ────
+def _load_spec(base: Path) -> dict:
+    """读 task_spec.json（缺失或损坏时返回空 dict，由兜底叙述承接）。"""
+    p = base / "task_spec.json"
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _write_batches(paper_type: str, facts: str, retries: int = 1) -> dict:
+    """按类型规格分批调用 LLM 写作。
+
+    单批失败（限流 / 坏 JSON / 超时）先重试一次：否则该批章节会退化成一句话的兜底，
+    整篇会出现「前面一万字、结论一百字」的断裂。重试仍失败才回落到字段级兜底。
+    """
+    written: dict = {}
+    for i, batch in enumerate(batches_for(paper_type), 1):
+        for attempt in range(retries + 1):
+            try:
+                r = LLM.chat_json(
+                    facts + "\n\n" + batch["prompt"],
+                    system=WRITER_SYSTEM + STYLE_RULES,
+                    temperature=batch.get("temperature", 0.3),
+                    max_tokens=batch.get("max_tokens", 4096),
+                )
+            except Exception as e:  # noqa: BLE001
+                if attempt < retries:
+                    print(f"[generate_paper·{paper_type}] 第 {i} 批写作失败，重试："
+                          f"{type(e).__name__}: {str(e)[:100]}")
+                    time.sleep(3)
+                    continue
+                print(f"[generate_paper·{paper_type}] 第 {i} 批写作连续失败，该批字段转兜底："
+                      f"{type(e).__name__}: {str(e)[:120]}")
+                break
+            if isinstance(r, dict):
+                written.update({k: v.strip() for k, v in r.items()
+                                if isinstance(v, str) and v.strip()})
+            break
+    return written
+
+
+def _render_extras(parts: list, merged: dict, paper_type: str) -> None:
+    """渲染类型专属的附加小节（独立见解 / 研究局限等，按编号列表输出）。"""
+    for heading, field in extras_for(paper_type):
+        items = [p.strip().lstrip("0123456789.、）) ").strip()
+                 for p in (merged.get(field) or "").split("\n")]
+        items = [p for p in items if p]
+        if not items:
+            continue
+        parts.append(heading + "\n")
+        for i, p in enumerate(items, 1):
+            parts.append(f"{i}. {p}\n")
+
+
+def _sanitize_citations(text: str, n_refs: int) -> tuple[str, int]:
+    """确定性护栏：删掉越界引用编号（模型偶尔会「凭印象续编号」到 [31]–[40]）。
+
+    零编造口径下，一个不存在的引用比没有引用更糟：宁可让句子少一个编号，
+    也不让论文声称引用了并不存在的文献。返回（清洗后文本, 删除个数）。
+    """
+    if not text or n_refs <= 0:
+        return text, 0
+    removed = 0
+
+    def _bad(num: str) -> bool:
+        try:
+            k = int(num)
+        except ValueError:
+            return False
+        return k < 1 or k > n_refs
+
+    def _range_sub(m):
+        nonlocal removed
+        if _bad(m.group(1)) or _bad(m.group(2)):
+            removed += 1
+            return ""
+        return m.group(0)
+
+    def _one_sub(m):
+        nonlocal removed
+        if _bad(m.group(1)):
+            removed += 1
+            return ""
+        return m.group(0)
+
+    text = re.sub(r"\[(\d+)\]\s*[至\-–~—]\s*\[(\d+)\]", _range_sub, text)
+    text = re.sub(r"\[(\d+)\]", _one_sub, text)
+    return text, removed
+
+
+def _build_non_experimental(base: Path, args, paper_type: str) -> int:
+    """非实验型论文的统一构建器：素材 → 分批写作 → 字段级兜底 → 拼装 → 收尾。
+
+    各类型的差异（素材来源、分章提示、兜底文案、附加小节）全部由
+    paper/paper_type_specs.py 的 TYPE_SPECS 声明驱动，新增论文类型无需改本函数。
+    """
+    spec = _load_spec(base)
+    lit = _load(base / "01_literature.json")
+    refs = build_references(lit)
+    references_block = _build_references_block(lit)
+    chapters = chapters_for(paper_type)
+    facts = build_fact_pack(paper_type, spec, refs, references_block)
+
+    written = _write_batches(paper_type, facts) if LLM.available() else {}
+    used_llm = bool(written)
+    if not used_llm:
+        print(f"[generate_paper·{paper_type}] 网关不可用，转确定性兜底骨架")
+    # 字段级合并：LLM 写到的字段用 LLM，缺的用兜底——单批失败不会拖垮整篇
+    merged = {**fallback_for(paper_type, spec, refs, references_block), **written}
+    # 越界引用清理：模型会「凭印象」把编号续到文献池之外，必须在拼装前删掉
+    _dropped = 0
+    for _k, _v in list(merged.items()):
+        if isinstance(_v, str) and _v:
+            _clean, _n = _sanitize_citations(_v, len(refs))
+            if _n:
+                merged[_k] = _clean
+                _dropped += _n
+    if _dropped:
+        print(f"[generate_paper·{paper_type}] 已删除 {_dropped} 处越界引用编号（超出 [1]-[{len(refs)}]）")
+
+    title = (spec.get("title") or spec.get("topic")
+             or spec.get("direction") or label_of(paper_type)).strip()
+    _mode = getattr(args, "mode", None) or spec.get("institution_mode") or "general"
+    sztu = (_mode == "sztu")
+
+    parts = _front_matter(title, args, sztu)
+    parts.append("## 目录\n")
+    parts.append(_toc_block(chapters) + "\n")
+    parts.append("## 摘要\n")
+    parts.append((merged.get("abstract") or "").strip() + "\n")
+    if (merged.get("keywords") or "").strip():
+        parts.append(f"**关键词：** {merged['keywords'].strip()}\n")
+    if (merged.get("abstract_en") or "").strip():
+        parts.append("\n## Abstract\n")
+        parts.append(merged["abstract_en"].strip() + "\n")
+        if (merged.get("keywords_en") or "").strip():
+            parts.append(f"**Keywords:** {merged['keywords_en'].strip()}\n")
+
+    alias = field_alias_for(paper_type)
+    role_block = (_role_citation_block(refs, neutral=True) if refs else "")
+    cite_at = cite_block_at(paper_type)
+    related_at = related_work_after(paper_type)
+    for ch in chapters:
+        key = ch["key"]
+        parts.append(chapter_heading_of(ch) + "\n")
+        parts.append((merged.get(alias.get(key, key)) or "").strip() + "\n")
+        if role_block and key == cite_at:
+            parts.append(f"### {ch['no']}.1 代表性工作的路线归类\n")
+            parts.append(role_block + "\n")
+        if role_block and key == related_at:
+            parts.append(f"### {ch['no']}.1 相关工作\n")
+            parts.append(role_block + "\n")
+
+    _render_extras(parts, merged, paper_type)
+
+    if references_block.strip():
+        parts.append("## 参考文献\n")
+        parts.append(references_block + "\n")
+    parts.append("## 致谢\n")
+    parts.append(_acknowledgements() + "\n")
+
+    paper = "\n".join(parts)
+    meta = {"used_llm": used_llm, "sections": sorted(written.keys()), "n_refs": len(refs)}
+    return _finalize_paper(base, paper, args, meta, chapters, spec, facts, paper_type)
 
 
 if __name__ == "__main__":

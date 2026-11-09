@@ -25,8 +25,14 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
+
+# 让本模块无论从哪个工作目录被调用，都能 import 论文类型注册表（单一事实来源）
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 REPORT_FILE = "07_gate_report.json"
 APPROVALS_FILE = "07_gate_approvals.json"
@@ -108,6 +114,23 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
             return fail("03_experiment.json 无法解析")
         if isinstance(d, dict) and d.get("error"):
             return fail(f"分析层报错：{str(d['error'])[:120]}")
+        # 论文类型感知：非实验型（综述/设计/案例/工程报告/开题…）不做确定性实验，
+        # 该硬门豁免（按 n/a 通过）。以注册表 requires_experiment 为准，新增类型自动生效。
+        _pt = None
+        _specp = out / "task_spec.json"
+        if _specp.exists():
+            try:
+                _pt = (json.loads(_specp.read_text(encoding="utf-8"))
+                       .get("paper_type", "method_comparison"))
+            except Exception:
+                _pt = None
+        try:
+            from paper.thesis_template import is_experimental as _is_exp
+            _nonexp = not _is_exp(_pt or "method_comparison")
+        except Exception:  # noqa: BLE001
+            _nonexp = _pt in ("survey", "system_design")
+        if _nonexp:
+            return pass_(f"论文类型为 {_pt}（非实验型），实验产物硬门豁免", "rule", "high")
         analysis = d.get("analysis", d) if isinstance(d, dict) else {}
         n = len(analysis.get("metrics") or [])
         best = analysis.get("best_method")

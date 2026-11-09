@@ -93,16 +93,41 @@
       <option value="iterate">iterate · 多轮迭代（扩宽数据集/方法）</option>
     </select>
 
+    <label>论文类型</label>
+    <select id="paperType">
+      <option value="method_comparison">方法对比型实证研究（需跑确定性实验）</option>
+      <option value="survey">文献综述型（抓文献→写综述，不跑实验）</option>
+      <option value="system_design">系统/软件设计型（需求→架构→实现，不跑实验）</option>
+      <option value="case_study">案例研究型（理论框架→案例剖析→启示）</option>
+      <option value="technical_report">工程实践报告型（需求→方案→实施→验收）</option>
+      <option value="research_proposal">研究方案设计型（开题：问题→方法→路线）</option>
+    </select>
+    <div class="hint" id="paperTypeHint">方法对比型：系统会跑真实确定性实验（训练/评估/统计检验），用真实指标写论文，零编造。</div>
+
+    <div id="materialSection" style="display:none">
+      <label style="margin-top:10px">类型素材（JSON·可选）
+        <span style="color:var(--muted);font-weight:400">留空则由系统按题目推演，正文会更泛</span>
+      </label>
+      <textarea id="typeMaterial" spellcheck="false" style="min-height:130px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button type="button" id="fillTpl" style="flex:0 0 auto;padding:6px 12px;font-size:12px">填入示例模板</button>
+        <div class="hint" style="margin:0;flex:1">系统只按这里给出的素材写作，不会自己补造数字；素材未给出的指标一律不写。</div>
+      </div>
+    </div>
+
     <label>API Key <span style="color:var(--muted);font-weight:400">（必填·仅本次运行使用，不保存）</span></label>
     <input id="apikey" type="password" placeholder="粘贴你的 DeepSeek / 兼容网关 Key，如 sk-..." autocomplete="off">
 
     <label>研究主题</label>
     <textarea id="topic" placeholder="例：基于集成学习算法的乳腺癌良恶性诊断研究"></textarea>
 
+    <div id="datasetSection">
     <label>数据集（可选，留空由 Planner 自动选）</label>
     <select id="dataset"><option value="">— 自动选择 —</option></select>
+    </div>
 
     <hr style="border:none;border-top:1px dashed var(--line);margin:14px 0">
+    <div id="dataSection">
     <label>自定义真实数据（可选，优先于上面的内置集）</label>
     <div class="row">
       <div style="flex:1">
@@ -125,6 +150,7 @@
       </div>
     </div>
     <div class="hint">填了网址或上传文件，就优先用它喂进系统；留空才走上面的内置数据集。这就是「任意真实数据都能吃」的入口。</div>
+    </div>
 
     <div class="row" id="roundsRow">
       <div style="flex:1">
@@ -187,19 +213,67 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
 el('mode').onchange=()=>{ el('roundsRow').style.display = el('mode').value==='iterate'?'flex':'none'; };
 el('mode').dispatchEvent(new Event('change'));
 
+// 论文类型切换：更新说明，非实验型隐藏数据集相关入口
+const PT_HINTS={
+  method_comparison:'方法对比型：系统会跑真实确定性实验（训练/评估/统计检验），用真实指标写论文，零编造。',
+  survey:'文献综述型：只抓文献与分类梳理，不跑实验。填好「研究主题」即可；数据集类入口无需填写。',
+  system_design:'系统设计型：需求→架构→模块→验证，不跑实验。建议在下方「类型素材」里填技术栈/模块/验收标准，正文才贴合你的真实系统。',
+  case_study:'案例研究型：理论框架→案例剖析→启示，不跑实验。建议填案例对象、背景与可用资料，避免正文泛化。',
+  technical_report:'工程实践报告型：需求→方案→实施→验收，不跑实验。建议填项目目标、实施步骤与交付物。',
+  research_proposal:'研究方案（开题）型：问题→现状→方法→技术路线→进度，不跑实验。建议填研究问题、方法与阶段安排。'
+};
+const PT_MATERIAL={
+  survey:'',
+  system_design:'{\n  "summary": "一句话说明这套系统解决什么问题",\n  "tech_stack": ["Python", "FastAPI", "SQLite"],\n  "requirements": {\n    "functional": ["实时采集数据", "异常预警推送"],\n    "non_functional": ["端到端延迟<2s", "模块化便于二次开发"]\n  },\n  "architecture": {\n    "layers": ["采集层", "服务层", "展示层"],\n    "data_flow": "采集→服务→展示"\n  },\n  "modules": [\n    {"name": "模块A", "responsibility": "负责什么", "key_algorithms": "关键算法"}\n  ],\n  "key_techniques": ["技术1", "技术2"],\n  "validation": {\n    "strategy": "单元+接口+系统三级测试",\n    "test_cases": ["检出率>98%", "并发100连接时延<1.5s"]\n  }\n}',
+  case_study:'{\n  "subject": "案例对象（企业/学校/项目）",\n  "background": "案例背景，只写你确定的事实",\n  "phenomenon": "要解释的现象",\n  "framework": "采用的分析框架/理论",\n  "materials": ["公开年报", "访谈记录", "内部文档"],\n  "analysis_points": ["维度1", "维度2"],\n  "findings": "你已得到的初步判断（可留空）"\n}',
+  technical_report:'{\n  "background": "项目来源与业务背景",\n  "objectives": ["目标1", "目标2"],\n  "scope": "建设范围与不做什么",\n  "tech_stack": ["技术1", "技术2"],\n  "work_items": ["阶段1：环境准备", "阶段2：模块开发", "阶段3：联调验收"],\n  "deliverables": ["系统一套", "文档一份"],\n  "acceptance": ["验收标准1", "验收标准2"],\n  "issues": ["遇到的问题及处理"]\n}',
+  research_proposal:'{\n  "background": "研究背景",\n  "questions": ["研究问题1", "研究问题2"],\n  "objectives": ["目标1"],\n  "content": ["研究内容1", "研究内容2"],\n  "methods": ["文献研究", "对比实验", "问卷调查"],\n  "schedule": [{"phase": "第1-3月", "task": "文献与方案"}],\n  "expected": ["论文1篇", "原型系统1套"],\n  "feasibility": "数据与条件可行性说明"\n}'
+};
+function syncPaperTypeUI(){
+  const pt=el('paperType').value;
+  el('paperTypeHint').textContent=PT_HINTS[pt]||'';
+  // iterate 模式只支持方法对比型
+  if(el('mode').value==='iterate'){
+    el('paperType').value='method_comparison';
+  }
+  const needData = el('paperType').value==='method_comparison';
+  el('dataSection').style.display = needData ? 'block' : 'none';
+  el('datasetSection').style.display = needData ? 'block' : 'none';
+  el('materialSection').style.display = needData ? 'none' : 'block';
+  const tpl = PT_MATERIAL[el('paperType').value] || '';
+  el('typeMaterial').placeholder = tpl || '（该类型不需要额外素材，留空即可）';
+}
+el('fillTpl').onclick=()=>{
+  const tpl = PT_MATERIAL[el('paperType').value] || '';
+  if(!tpl){ el('typeMaterial').value=''; return; }
+  el('typeMaterial').value = tpl;
+};
+el('paperType').onchange=syncPaperTypeUI;
+el('mode').onchange=()=>{ el('roundsRow').style.display = el('mode').value==='iterate'?'flex':'none'; syncPaperTypeUI(); };
+syncPaperTypeUI();
+
 el('runBtn').onclick=()=>{
   const topic=el('topic').value.trim();
   const apikey=el('apikey').value.trim();
   if(!topic){alert('请填写研究主题');return;}
   if(!apikey){alert('请填入你的 API Key（仅本次运行使用，不会保存）');return;}
+  const paperType=el('paperType').value;
+  let typeMaterial=null;
+  if(paperType!=='method_comparison'){
+    const raw=el('typeMaterial').value.trim();
+    if(raw){
+      try{ typeMaterial=JSON.parse(raw); }
+      catch(e){ alert('「类型素材」不是合法 JSON：'+e.message); return; }
+    }
+  }
   const dataUrl=el('dataUrl').value.trim();
   const target=el('target').value.trim();
   const sep=el('sep').value.trim();
   const fileInput=el('dataFile');
   const onSend=(data_b64, data_filename)=>{
-    const body={mode:el('mode').value, topic, dataset:el('dataset').value,
+    const body={mode:el('mode').value, topic, paper_type:paperType, dataset:el('dataset').value,
       rounds:parseInt(el('rounds').value||'3',10), api_key:apikey,
-      data_url:dataUrl, target, sep, data_b64, data_filename};
+      data_url:dataUrl, target, sep, data_b64, data_filename, type_material:typeMaterial};
     el('runBtn').disabled=true; el('term').textContent='';
     setStatus('运行中…','running');
     fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})

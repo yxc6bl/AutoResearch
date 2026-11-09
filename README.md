@@ -34,6 +34,43 @@ python auto_research.py run --spec engine/tasks/proof/wine_sklearn_spec.json --o
 
 其他命令：`python auto_research.py plan --topic "..."`、`python auto_research.py iterate --topic "..." --rounds 3`。`plan`/`iterate` 的规划和论文润色可能调用 `.env` 中配置的 LLM；直接 `run` 的分析不需要 API Key，LLM 不可用时论文生成器可回退到模板。
 
+## 论文类型（`--paper-type`）
+
+系统支持**六种**可插拔论文类型，`plan` / `run` / `from_title` 都接受 `--paper-type`
+（默认 `method_comparison`），网页端在「论文类型」下拉里提供同样的六项：
+
+| `paper_type` | 含义 | 是否跑确定性实验 | 章节骨架 | 零编造约束 |
+|---|---|---|---|---|
+| `method_comparison` | 方法对比型实证研究 | 是（训练/评估/统计检验） | 8 章实证骨架 | 数字全部来自实验 JSON |
+| `survey` | 文献综述型 | 否（只抓文献、做分类梳理） | 绪论→检索方法→分类框架→研究现状→趋势争论→开放问题→结论 | 只引用 `01_literature.json` 真实文献 |
+| `system_design` | 系统/软件设计型 | 否（需求→架构→模块→验证） | 同左，7 章 | 只依据 `system_spec` |
+| `case_study` | 案例研究型 | 否（理论框架→案例剖析→启示） | 绪论→理论回顾→研究设计→案例背景→案例分析→讨论→结论 | 只依据 `case_spec` + 真实文献 |
+| `technical_report` | 工程实践报告型 | 否（需求→方案→实施→验收） | 概述→需求约束→方案设计→实施→结果验证→问题改进→总结 | 只依据 `project_spec` + 真实文献 |
+| `research_proposal` | 研究方案设计型（开题） | 否（问题→现状→方法→路线→进度） | 背景→现状→问题目标→内容方法→技术路线→进度→结语 | 只依据 `proposal_spec` + 真实文献 |
+
+非实验型不跑实验引擎：`run_task` 写一份带 `paper_type` 标记的 `03_experiment.json` 桩，
+闸门 G01（实验有效硬门）按注册表 `requires_experiment` 自动豁免；G04 零编造硬门仍生效——
+综述只引真实文献，设计/案例/报告只依据你给的素材，素材没给的数字一律不写。
+
+```bash
+# 文献综述：给主题即可，不用数据集
+python auto_research.py plan --topic "基于机器学习的心血管疾病风险预测研究进展" \
+    --paper-type survey --out out_survey
+
+# 系统设计：在 spec 里给 system_spec（技术栈/需求/架构/模块/验证）
+python auto_research.py run --spec my_design_spec.json --paper-type system_design --out out_design
+
+# 任意素材型类型：把素材写在单独 JSON 里，用 --spec-extra 挂载
+#   {"material": {"subject": "...", "background": "...", ...}}
+python auto_research.py plan --topic "县域中学课后服务质量提升路径" \
+    --paper-type case_study --out out_case --spec-extra my_case.json
+```
+
+**加一种新论文类型**只改两处：`paper/thesis_template.py` 的 `PAPER_TYPES` 登记章节骨架，
+`paper/paper_type_specs.py` 的 `TYPE_SPECS` 登记素材来源/分章提示/兜底文案。
+统一构建器 `_build_non_experimental`、闸门、评审都会自动适配，不用再写 builder。
+逐类型自检：`python verify_multitype.py`（加 `--eval` 连评审官一起跑）。
+
 运行结果写入 `--out`，主要包括 `03_experiment.json`、`plots/`、`06_paper/paper_full.md` 和（安装 `python-docx` 时）`paper_full.docx`。结果是否有效应以实验 JSON 中的指标、错误及跳过方法为准。
 
 ## 依赖及数据

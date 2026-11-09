@@ -1,0 +1,29 @@
+{
+  "id": "demo_concrete",
+  "direction": "基于机器学习的混凝土抗压强度预测",
+  "research_question": "在混凝土配合比数据集上，集成模型与传统回归模型对抗压强度的预测精度差异及关键配比因子是什么？",
+  "hypothesis_statement": "混凝土抗压强度可由水胶比与胶凝材料用量等少量配比因子近似线性解释，随机森林能捕捉龄期与非线性交互从而优于线性回归。",
+  "sub_hypotheses": [
+    "H1（精度）：随机森林的测试 R² 显著高于线性回归。",
+    "H2（稳定性）：集成模型多种子 R² 标准差不大于线性回归。",
+    "H3（特征贡献）：Top 特征已能逼近全量精度，说明配比因子冗余。",
+    "H4（非线性）：加入龄期等交互后集成模型相对线性模型增益显著。"
+  ],
+  "analysis_plan": "报告各方法 5 种子 R²±std、MAE、特征重要性、最优-次优配对显著性检验。",
+  "metric": "r2",
+  "secondary_metrics": ["mse", "mae"],
+  "objective": "maximize",
+  "data": {
+    "source": "csv",
+    "path": "data/concrete_strength.csv",
+    "target": "strength_mpa",
+    "task_type": "regression"
+  },
+  "candidate_methods": [
+    "LinearRegression",
+    "Ridge",
+    "RandomForestRegressor",
+    { "name": "gb", "estimator": "sklearn.ensemble.GradientBoostingRegressor",
+      "params": { "n_estimators": 300, "random_state": "<seed>" } }
+  ]
+}

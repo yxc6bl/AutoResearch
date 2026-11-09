@@ -56,6 +56,7 @@ GRADE_BANDS = [("优秀", 90), ("良好", 80), ("中等", 70), ("及格", 60)]  
 
 
 # 毕业论文章节 rubric：核心必备 vs 推荐（兼容新旧标题，按子串匹配）
+# 默认（方法对比型）核心章节：
 CORE_SECTIONS = [
     ("摘要", ["摘要"]),
     ("绪论", ["绪论"]),
@@ -68,6 +69,53 @@ CORE_SECTIONS = [
     ("结论与展望", ["结论与展望", "结论"]),
     ("参考文献", ["参考文献"]),
 ]
+# 文献综述型核心章节（不做实验，按主题梳理文献）：
+CORE_SECTIONS_SURVEY = [
+    ("摘要", ["摘要"]),
+    ("绪论", ["绪论"]),
+    ("文献检索与分析方法", ["文献检索与分析方法", "检索方法", "文献检索"]),
+    ("研究主题分类框架", ["研究主题分类框架", "分类框架", "综述框架"]),
+    ("各主题研究现状", ["各主题研究现状", "研究现状", "文献综述"]),
+    ("研究趋势与争论", ["研究趋势与争论", "研究趋势", "争论"]),
+    ("开放问题与未来方向", ["开放问题与未来方向", "开放问题"]),
+    ("结论与展望", ["结论与展望", "结论"]),
+    ("参考文献", ["参考文献"]),
+]
+# 系统/软件设计型核心章节（不做实验，讲需求/架构/模块/验证）：
+CORE_SECTIONS_DESIGN = [
+    ("摘要", ["摘要"]),
+    ("绪论", ["绪论"]),
+    ("需求分析", ["需求分析"]),
+    ("总体架构设计", ["总体架构设计", "总体架构"]),
+    ("核心模块设计与实现", ["核心模块设计与实现", "模块设计", "模块实现"]),
+    ("关键技术与难点", ["关键技术与难点", "关键技术"]),
+    ("系统验证与测试", ["系统验证与测试", "验证与测试"]),
+    ("结论与展望", ["结论与展望", "结论"]),
+    ("参考文献", ["参考文献"]),
+]
+
+
+def _paper_type_of(md: str) -> str:
+    """从论文目录反推 paper_type（读 task_spec.json；读不到时按已出现章标题推断）。"""
+    _p = Path(md).resolve().parent.parent / "task_spec.json"
+    if _p.exists():
+        try:
+            _s = json.loads(_p.read_text(encoding="utf-8"))
+            return _s.get("paper_type", "method_comparison")
+        except Exception:
+            pass
+    _heads = " ".join(re.findall(r'^#{1,4}\s+(.*)$', md, re.M))
+    if "文献检索与分析方法" in _heads or "各主题研究现状" in _heads:
+        return "survey"
+    if "需求分析" in _heads and "总体架构设计" in _heads:
+        return "system_design"
+    if "研究设计与案例选择" in _heads or "案例分析" in _heads:
+        return "case_study"
+    if "需求与约束" in _heads and "实施过程" in _heads:
+        return "technical_report"
+    if "研究问题与目标" in _heads and "技术路线与可行性" in _heads:
+        return "research_proposal"
+    return "method_comparison"
 REC_SECTIONS = [
     ("研究局限", ["局限性", "研究局限"]),
     ("附录", ["附录"]),
@@ -85,10 +133,32 @@ AI_CLICHE = [
 PARALLEL_PREFIXES = ["本文", "我们", "通过", "首先", "其次", "基于", "实验表明", "结果表明"]
 
 
+def _core_from_registry(paper_type: str):
+    """从论文类型注册表推导核心章节（新增类型无需在此登记，自动生效）。"""
+    try:
+        from paper.thesis_template import chapters_for
+    except Exception:  # pragma: no cover
+        return CORE_SECTIONS
+    core = [("摘要", ["摘要"])]
+    for c in chapters_for(paper_type):
+        core.append((c["cn"], [c["cn"]]))
+    core.append(("参考文献", ["参考文献"]))
+    return core
+
+
 def check_structure(md: str):
-    """对照 rubric 检查章节完整度（逻辑构建维度）。"""
+    """对照 rubric 检查章节完整度（逻辑构建维度）。按 paper_type 选择核心章节集。"""
+    _pt = _paper_type_of(md)
+    if _pt == "survey":
+        _core = CORE_SECTIONS_SURVEY
+    elif _pt == "system_design":
+        _core = CORE_SECTIONS_DESIGN
+    elif _pt in ("case_study", "technical_report", "research_proposal"):
+        _core = _core_from_registry(_pt)
+    else:
+        _core = CORE_SECTIONS
     heads = " ".join(re.findall(r'^#{1,4}\s+(.*)$', md, re.M))
-    missing_core = [name for name, als in CORE_SECTIONS if not any(a in heads for a in als)]
+    missing_core = [name for name, als in _core if not any(a in heads for a in als)]
     missing_rec = [name for name, als in REC_SECTIONS if not any(a in heads for a in als)]
     score = 100 - len(missing_core) * 11 - min(10, len(missing_rec) * 5)
     return max(0, score), missing_core, missing_rec
@@ -771,7 +841,138 @@ def _ground_truth(analysis: dict) -> str:
     return "\n".join(bits)
 
 
-def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "general") -> dict:
+def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
+    """按论文类型选择零编造评审的「事实基础」（供 LLM 评审官对照）。
+
+    - method_comparison：沿用实验产物 03_experiment.json 的指标/方法清单（原行为）。
+    - survey：事实基础是 01_literature.json 的文献清单（仅题名/作者/来源/年份）；
+      清单不含摘要与指标，故明确告知评审官综述只能定性，不得出现具体性能数字。
+    - system_design：事实基础是 task_spec.json 的 system_spec
+      （技术栈/需求/架构/模块/验证）；不得编造规格外技术或实测结果数字。
+    """
+    base_dir = Path(base_dir)
+    if paper_type == "survey":
+        papers = []
+        lp = base_dir / "01_literature.json"
+        if lp.exists():
+            try:
+                d = json.loads(lp.read_text(encoding="utf-8"))
+                papers = d.get("papers") or []
+            except Exception:
+                papers = []
+        bits = ["【本文为文献综述型，零编造事实基础 = 下方文献清单（且仅含题名/作者/来源/年份）】",
+                f"入选文献总数：{len(papers)} 篇",
+                "零编造约束：文献清单不含摘要与任何具体指标；正文只能定性描述各文献的方法路线、",
+                "研究问题与贡献方向，严禁出现具体性能数字（准确率/AUC/F1/敏感度/C-index/Dice 等），",
+                "也严禁编造清单之外的文献。引用编号须与清单一致；题名已点明的方法类别可定性转述，但不得补造数字。",
+                "", "文献清单（正文 [编号] 须落在此列表内）："]
+        for i, p in enumerate(papers[:60], 1):
+            _meta = "、".join(x for x in [p.get("venue", ""), str(p.get("year", ""))] if x)
+            bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》"
+                        + (f"（{_meta}）" if _meta else ""))
+        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+
+    if paper_type == "system_design":
+        ss: dict = {}
+        sp = base_dir / "task_spec.json"
+        _title = ""
+        if sp.exists():
+            try:
+                s = json.loads(sp.read_text(encoding="utf-8"))
+                ss = s.get("system_spec") or {}
+                _title = s.get("title") or s.get("topic") or ""
+            except Exception:
+                ss = {}
+        papers = []
+        lp = base_dir / "01_literature.json"
+        if lp.exists():
+            try:
+                d = json.loads(lp.read_text(encoding="utf-8"))
+                papers = d.get("papers") or []
+            except Exception:
+                papers = []
+        bits = ["【本文为系统/软件设计型，零编造事实基础 = 下方 system_spec】",
+                f"系统主题：{_title}"]
+        if ss.get("tech_stack"):
+            bits.append("技术栈：" + "、".join(ss["tech_stack"]))
+        if isinstance(ss.get("requirements"), dict):
+            rq = ss["requirements"]
+            if rq.get("functional"):
+                bits.append("功能需求：" + "；".join(rq["functional"]))
+            if rq.get("non_functional"):
+                bits.append("非功能需求：" + "；".join(rq["non_functional"]))
+        if isinstance(ss.get("architecture"), dict):
+            ar = ss["architecture"]
+            if ar.get("layers"):
+                bits.append("架构分层：" + "；".join(ar["layers"]))
+            if ar.get("data_flow"):
+                bits.append("数据流向：" + ar["data_flow"])
+        if isinstance(ss.get("modules"), list):
+            for m in ss["modules"]:
+                bits.append(f"模块[{m.get('name', '')}]：{m.get('responsibility', '')}"
+                            + (f"（关键技术：{m.get('key_algorithms')}）" if m.get("key_algorithms") else ""))
+        if ss.get("key_techniques"):
+            bits.append("关键技术：" + "；".join(ss["key_techniques"]))
+        if isinstance(ss.get("validation"), dict):
+            v = ss["validation"]
+            if v.get("strategy"):
+                bits.append("验证策略：" + v["strategy"])
+            if v.get("test_cases"):
+                bits.append("验收测试用例（目标值，非实测结果）：" + "；".join(v["test_cases"]))
+        bits.append("零编造约束：正文只能基于以上 system_spec 展开；不得编造规格之外的技术/组件，"
+                    "也不得编造实际运行得到的测试结果数字（只能写『验收目标/设计为…』，未给出的指标一律不写）。")
+        if papers:
+            bits.append("")
+            bits.append(f"【本文引用的参考文献（共 {len(papers)} 篇，编号 [1]–[{len(papers)}] 均属有效引用）】")
+            for i, p in enumerate(papers[:60], 1):
+                bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》")
+        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+
+    if paper_type in ("case_study", "technical_report", "research_proposal"):
+        # 通用：其余 spec 驱动型 —— 事实基础是 task_spec.json 里该类型声明的素材段。
+        try:
+            from paper.paper_type_specs import TYPE_SPECS, render_block as _rb
+            _bk = TYPE_SPECS[paper_type]["spec_block"]
+            _label = TYPE_SPECS[paper_type]["label"]
+        except Exception:  # pragma: no cover
+            _bk, _label = "system_spec", paper_type
+        block: dict = {}
+        _title = ""
+        sp = base_dir / "task_spec.json"
+        if sp.exists():
+            try:
+                s = json.loads(sp.read_text(encoding="utf-8"))
+                block = s.get(_bk) or {}
+                _title = s.get("title") or s.get("topic") or ""
+            except Exception:
+                block = {}
+        papers = []
+        lp = base_dir / "01_literature.json"
+        if lp.exists():
+            try:
+                papers = json.loads(lp.read_text(encoding="utf-8")).get("papers") or []
+            except Exception:
+                papers = []
+        bits = [f"【本文为{_label}，零编造事实基础 = 下方 {_bk}】", f"论文主题：{_title}"]
+        if block:
+            bits.extend(_rb(block))
+        else:
+            bits.append(f"（task_spec.json 未提供 {_bk}：正文不得虚构任何具体参数、数据或实测结果）")
+        bits.append("零编造约束：正文只能基于以上素材展开，不得引入素材外的技术、组件、数字或实测结果；"
+                    "素材给的是目标值时只能写『目标为…』『验收标准为…』；素材未给出的信息一律不写。")
+        if papers:
+            bits.append("")
+            bits.append(f"【本文引用的参考文献（共 {len(papers)} 篇，编号 [1]–[{len(papers)}] 均属有效引用）】")
+            for i, p in enumerate(papers[:60], 1):
+                bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》")
+        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+
+    # method_comparison（默认）：沿用实验产物
+    return {"gt": _ground_truth(analysis), "lit_count": (len(cands) if cands else 0)}
+
+
+def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "general",
+              gt: str | None = None) -> dict:
     """LLM 评审官：像答辩委员一样审论文，给六维分 + 找幻觉 + 给修订意见。
 
     这是「一个人写、另一个人审」里的「审」。它把论文与真实实验事实（ground truth）
@@ -790,7 +991,7 @@ def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "gener
     except Exception:
         return {"available": False, "reason": "paper_not_found"}
 
-    gt = _ground_truth(analysis)
+    gt = gt if gt is not None else _ground_truth(analysis)
     prompt = (
         f"你是本科毕业设计（论文）答辩评委。请严格审阅下面这篇论文，并对照【真实实验事实】"
         f"判断论文是否编造数字、是否与事实矛盾、是否跑题、是否夸大贡献。\n\n"
@@ -1011,7 +1212,11 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
     #     若存在幻觉或 verdict=revise 则强制不通过（人审也会这么判）。
     _lj_bad = False
     try:
-        _lj = llm_judge(str(paper_path), _aj, len(cands) if cands else 0, mode)
+        # 零编造评审的「事实基础」按论文类型选择：方法对比型用实验产物，
+        # 综述型用文献清单，设计型用 system_spec（避免把空实验桩误判为「0 篇/无事实」）。
+        _pt = _paper_type_of(md)
+        _gt_info = _ground_truth_for(_pt, Path(paper_path).resolve().parent.parent, _aj, cands)
+        _lj = llm_judge(str(paper_path), _aj, _gt_info["lit_count"], mode, gt=_gt_info["gt"])
         # 评审官缺席也必须留痕：以前 available=False 时 verdict 里连字段都没有，
         # 下游分不清「审过没发现幻觉」和「根本没审」，会把未验证当成通过。
         verdict["llm_judge"] = _lj if isinstance(_lj, dict) else {

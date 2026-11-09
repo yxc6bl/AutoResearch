@@ -1,0 +1,29 @@
+{
+  "id": "demo_heart",
+  "direction": "基于机器学习的心血管疾病风险预测",
+  "research_question": "在 UCI 心脏病数据集上，集成模型与线性模型对冠心病存在的判别力差异及关键风险因子是什么？",
+  "hypothesis_statement": "冠心病存在可由若干临床指标线性解释，随机森林能捕捉其中的非线性交互从而优于逻辑回归。",
+  "sub_hypotheses": [
+    "H1（判别力）：随机森林的准确率显著高于逻辑回归。",
+    "H2（稳定性）：集成模型多种子准确率标准差不大于逻辑回归。",
+    "H3（特征贡献）：Top 特征已能逼近全量精度，说明特征冗余。",
+    "H4（正则化）：逻辑回归加入正则后测试准确率不显著下降。"
+  ],
+  "analysis_plan": "报告各方法 5 种子准确率±std、混淆矩阵、特征重要性、最优-次优配对显著性检验。",
+  "metric": "accuracy",
+  "secondary_metrics": ["f1_macro", "auc"],
+  "objective": "maximize",
+  "data": {
+    "source": "csv",
+    "path": "data/heart_disease.csv",
+    "target": "target",
+    "task_type": "classification"
+  },
+  "candidate_methods": [
+    "LogisticRegression",
+    "RandomForestClassifier",
+    "GradientBoostingClassifier",
+    "SVC",
+    "KNeighborsClassifier"
+  ]
+}

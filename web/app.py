@@ -50,7 +50,8 @@ def _next_id() -> str:
 def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
                  out_dir: Path, api_key: str | None = None,
                  data_path: str | None = None, data_url: str | None = None,
-                 target: str = "", sep: str = ""):
+                 target: str = "", sep: str = "", paper_type: str = "method_comparison",
+                 type_material: dict | None = None):
     """在子线程里跑流水线，把 stdout/stderr 累积到 TASKS[task_id]['log']。
 
     api_key：用户在网页填入的 Key，仅注入本次子进程环境变量，不落盘、不写日志。
@@ -61,9 +62,23 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
     # 要等缓冲区写满或进程退出才刷新，用户会误以为卡死。
     cmd = [sys.executable, "-u", "auto_research.py"]
     if mode == "iterate":
+        # iterate 仅用于方法对比型扩宽数据集/方法，默认 method_comparison
         cmd += ["iterate", "--topic", topic, "--rounds", str(rounds), "--out", str(out_dir)]
     else:  # plan
         cmd += ["plan", "--topic", topic, "--out", str(out_dir)]
+        if paper_type and paper_type != "method_comparison":
+            cmd += ["--paper-type", paper_type]
+        # 论文类型素材（system_spec / case_spec / ...）：写盘后由 --spec-extra 挂载
+        if type_material:
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                _extra = out_dir / "_spec_extra.json"
+                _extra.write_text(
+                    json.dumps({"material": type_material}, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+                cmd += ["--spec-extra", str(_extra)]
+            except Exception as _e:  # noqa: BLE001
+                print(f"[server] 类型素材写入失败，忽略：{_e}")
 
     # 数据集来源优先级：网址 > 上传文件 > 内置/自动
     if data_url:
@@ -226,6 +241,24 @@ class Handler(BaseHTTPRequestHandler):
         mode = data.get("mode", "plan")
         topic = (data.get("topic") or "").strip()
         dataset = (data.get("dataset") or "").strip()
+        paper_type = (data.get("paper_type") or "method_comparison").strip()
+        # 合法类型以论文类型注册表为准（新增类型不必改这里）
+        try:
+            from paper.thesis_template import paper_type_registry
+            _valid_pt = set(paper_type_registry().keys())
+        except Exception:  # noqa: BLE001
+            _valid_pt = {"method_comparison", "survey", "system_design"}
+        if paper_type not in _valid_pt:
+            paper_type = "method_comparison"
+        # 论文类型素材：前端传 JSON 对象（或 JSON 字符串），原样转交 --spec-extra
+        type_material = data.get("type_material")
+        if isinstance(type_material, str):
+            try:
+                type_material = json.loads(type_material) if type_material.strip() else None
+            except Exception:  # noqa: BLE001
+                type_material = None
+        if not isinstance(type_material, dict) or not type_material:
+            type_material = None
         rounds = int(data.get("rounds", 3))
         api_key = (data.get("api_key") or "").strip() or None
         target = (data.get("target") or "").strip()
@@ -272,7 +305,9 @@ class Handler(BaseHTTPRequestHandler):
         tid = _next_id()
         out_dir = ROOT / "out_web" / tid
         out_dir.mkdir(parents=True, exist_ok=True)
-        log_head = f"[server] 启动流水线：mode={mode} topic={topic}"
+        log_head = f"[server] 启动流水线：mode={mode} topic={topic} paper_type={paper_type}"
+        if type_material:
+            log_head += f" | 类型素材字段={len(type_material)}"
         if data_url:
             log_head += f" | 数据集网址={data_url}"
         elif data_path:
@@ -284,7 +319,8 @@ class Handler(BaseHTTPRequestHandler):
                           "out_dir": str(out_dir), "proc": None}
         threading.Thread(
             target=run_pipeline,
-            args=(tid, mode, topic, dataset, rounds, out_dir, api_key, data_path, data_url, target, sep),
+            args=(tid, mode, topic, dataset, rounds, out_dir, api_key, data_path, data_url,
+                  target, sep, paper_type, type_material),
             daemon=True,
         ).start()
         self._json({"task_id": tid})

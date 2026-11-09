@@ -165,3 +165,82 @@ transformers 5.22.1 / networkx 3.7 / xlrd 2.0.2。
 这就是「一般毕业论文用不上」的具体含义：不是算不动，是论文的形态不一样。
 本系统目前能替人完成的是「实验 + 数据分析 + 成文」这一段，
 不是「需求、设计、实现、部署」那一段。
+
+## 十、论文类型可插拔：一种引擎，六种论文形态（2026-11-09 新增）
+
+§9.5 指出的核心痛点——「系统/设计型本科毕设做不了」——已通过可插拔论文类型解决。
+入口统一为 `--paper-type`（网页端在「论文类型」下拉里提供），所有类型共享同一套
+`plan → literature →（可选）experiment → write → eval → gates` 流水线，
+只替换「写稿」这一个节点。
+
+| `paper_type` | 形态 | 跑实验 | 章节骨架 | 零编造来源 |
+|---|---|---|---|---|
+| `method_comparison` | 方法对比型实证 | 是 | 8 章实证骨架 | 实验 JSON 的真实指标 |
+| `survey` | 文献综述型 | 否 | 绪论→检索方法→分类框架→研究现状→趋势争论→开放问题→结论 | `01_literature.json` 真实文献 |
+| `system_design` | 系统/软件设计型 | 否 | 绪论→需求→架构→模块→关键技术→验证→结论 | `system_spec` |
+| `case_study` | 案例研究型 | 否 | 绪论→理论回顾→研究设计→案例背景→案例分析→讨论启示→结论 | `case_spec` + 文献 |
+| `technical_report` | 工程实践报告型 | 否 | 概述→需求约束→方案设计→实施过程→结果验证→问题改进→总结 | `project_spec` + 文献 |
+| `research_proposal` | 研究方案设计型（开题） | 否 | 背景意义→研究现状→问题目标→内容方法→技术路线→进度成果→结语 | `proposal_spec` + 文献 |
+
+六种形态里只有 `method_comparison` 需要跑确定性实验，其余五种都是
+「作者提供素材 → 按骨架成文」，素材由 `spec` 里的对应字段承载。
+
+### 10.1 架构：类型是一份声明，不是一个函数
+
+旧做法（v3 早期）是「每加一种类型就写一个 builder」，加两种之后
+`generate_paper.py` 就开始复制粘贴。现在改成两层配置 + 一个统一构建器：
+
+1. **章节骨架**：`paper/thesis_template.py` 的 `PAPER_TYPES`
+   ——章节标题、编号、`requires_experiment`、默认 task_type。
+2. **写作规格**：`paper/paper_type_specs.py` 的 `TYPE_SPECS`
+   ——素材来源（`literature` / `spec_block`）、分批提示词、字段别名、
+   确定性兜底文案、附加小节（独立见解 / 研究局限）。
+3. **统一构建器**：`generate_paper._build_non_experimental`
+   ——读素材 → 分批调 LLM → **字段级兜底合并** → 拼装 → 收尾写 md/docx。
+
+所以现在**新增一种类型只改两处**：注册 `chapters` + 登记一份 `TYPE_SPECS`。
+不需要写 builder，不需要动 `eval_agent.py`，不需要动闸门——它们都从注册表读。
+
+### 10.2 素材从哪来：`--spec-extra`
+
+```bash
+python auto_research.py plan --topic "某高校教务数据中台建设" \
+    --paper-type technical_report --out out_t     --spec-extra my_project.json
+```
+
+`my_project.json` 形如 `{"material": {...}}`：含 `material` 字段时，按该类型声明的
+`spec_block` 挂到 `system_spec` / `case_spec` / `project_spec` / `proposal_spec`；
+其余顶层键直接并入 spec。网页端对应「类型素材（JSON）」文本框，带「填入示例模板」。
+
+### 10.3 类型感知的三处（都从注册表继承，不再硬编码）
+
+- **实验跳过**：`run_task` 对非实验型写一份标记 `paper_type` 的 `03_experiment.json`
+  桩，不调用分析引擎。
+- **闸门 G01**：按 `thesis_template.is_experimental()` 豁免实验产物硬门；
+  G04（零编造）照常生效，事实基础换成该类型声明的素材。
+- **评审**：`eval_agent.check_structure` 由 `chapters_for(paper_type)` 生成核心章节集；
+  `_ground_truth_for` 按 `spec_block` 取事实基础。新增类型自动获得正确评分口径。
+
+### 10.4 降级策略：宁可拒绝交付，也不编
+
+- LLM 不可用 → 确定性骨架（结构完整、但字数与「非模板」两道门会**正确地拒绝交付**）。
+- 某一批写作失败 → 只回填该批字段，前两批成果保留，不整篇崩。
+- 素材缺失 → 提示词明确要求「不写而不是补一个合理值」；论文里不留虚构数字。
+- **越界引用清理**（确定性护栏）：模型偶尔会「凭印象续编号」（只有 30 篇却写到 [31]–[40]）。
+  拼装前用 `_sanitize_citations` 删掉越界编号——宁可少一个编号，也不声称引用了不存在的文献。
+- **引用块中性化**：综述/设计/报告型不做实验对比，文献归类块改用「可作参照」措辞，
+  不允许出现「与本文直接可比」「在统一实验协议下对照」这类凭空声称的实验关系。
+- **数字可溯源**：提示词要求逐句自检「这个数字素材里有吗」，没有就改成
+  「以验收时实测为准」「按试点结果确定」；G04 再兜一次底。
+
+### 10.5 实测（`verify_multitype.py`）
+
+```bash
+python verify_multitype.py              # 五种非实验类型：建稿 + 闸门 + 结构核对
+python verify_multitype.py --eval       # 追加 EvalAgent（含 LLM 评审官）
+OPENAI_API_KEY= python verify_multitye.py   # 断网演练：确认走兜底仍不崩、不编造
+```
+
+验证口径：结构核对（`structure_checklist_for`）+ 闸门分级（P0 blocking）+
+汉字字数 + 评审官幻觉条数。兜底骨架下 G02/G03 报 fail 属预期，
+因为「没走 LLM 的模板稿」本来就不该被当成可交付论文。
