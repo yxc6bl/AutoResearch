@@ -2737,6 +2737,8 @@ def _finalize_paper(base: Path, paper: str, args, meta: dict,
         "model": os.environ.get("OPENAI_MODEL", "") or "",
         "generated_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
         "references_count": meta.get("n_refs", 0),
+        "abstracts_used": meta.get("abstracts_used", 0),
+        "abstracts_available": meta.get("abstracts_available", 0),
         "chinese_chars": _cn,
         "note": docx_note,
     }
@@ -3032,7 +3034,11 @@ def _build_non_experimental(base: Path, args, paper_type: str) -> int:
     refs = build_references(lit)
     references_block = _build_references_block(lit)
     chapters = chapters_for(paper_type)
-    facts = build_fact_pack(paper_type, spec, refs, references_block)
+    facts, ab_stats = build_fact_pack(paper_type, spec, refs, references_block, lit)
+    if ab_stats.get("n_used"):
+        print(f"[generate_paper·{paper_type}] 文献摘要已接入事实包："
+              f"{ab_stats['n_with_abstract']}/{ab_stats['n_total']} 篇有摘要，"
+              f"选用 {ab_stats['n_used']} 篇（{ab_stats['chars']} 字符）")
 
     # 素材完备度前置检查：缺字段时先说清楚，不要等写出一万字空话才发现。
     # 结果落 00_spec_check.json，闸门与人工复核都能看到「这篇是在什么素材密度下写的」。
@@ -3137,7 +3143,9 @@ def _build_non_experimental(base: Path, args, paper_type: str) -> int:
         }, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as _e:  # noqa: BLE001
         print(f"[generate_paper·{paper_type}] 文献反馈写入失败：{_e}")
-    meta = {"used_llm": used_llm, "sections": sorted(written.keys()), "n_refs": len(refs)}
+    meta = {"used_llm": used_llm, "sections": sorted(written.keys()), "n_refs": len(refs),
+            "abstracts_used": ab_stats.get("n_used", 0),
+            "abstracts_available": ab_stats.get("n_with_abstract", 0)}
     return _finalize_paper(base, paper, args, meta, chapters, spec, facts, paper_type)
 
 

@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 
 # ── 通用零编造条款 ─────────────────────────────────────────────────────
-_NO_FABRICATE_LITERATURE = (
+_NO_FABRICATE_LITERATURE_PLAIN = (
     "## ⚠️ 零编造硬约束（违背即判不可交付）\n"
     "你只拥有每篇文献的【题名 / 作者 / 来源(venue) / 年份 / 链接】，"
     "**没有摘要、没有正文、没有任何具体指标数字**。因此：\n"
@@ -40,6 +40,28 @@ _NO_FABRICATE_LITERATURE = (
     "4. 所有陈述必须能在下列『参考文献清单』的题名/来源/年份中找到依据或可合理推断，否则删除；\n"
     "5. 这类论文的价值在于『脉络、分歧、开放问题』的归纳，不在于列数字。"
 )
+
+_NO_FABRICATE_LITERATURE_WITH_ABSTRACTS = (
+    "## ⚠️ 零编造硬约束（违背即判不可交付）\n"
+    "你拥有每篇文献的【题名 / 作者 / 来源 / 年份 / 链接】，以及**部分文献的真实摘要节选**"
+    "（见下方「文献摘要节选」，带 [编号]）。摘要里的具体数值已脱敏为「〔数值略〕」。\n"
+    "1. **有摘要的文献**：可转述该摘要明确写出的研究问题、方法路线、数据来源与结论方向，"
+    "须用「该文献报告……」「[N] 该研究……」等带归属的句式；\n"
+    "2. **全文严禁任何具体数字**（样本量、记录数、准确率、AUC、F1、耗时、并发数等）；"
+    "摘要已脱敏，你看不到这些数字，写了即视为编造。年份与参考文献编号除外；\n"
+    "3. **无摘要的文献**：只能从题名定性推断其方法类别与应用方向，"
+    "严禁补造摘要、结论、数据集或数字；\n"
+    "4. 严禁把文献 A 的方法、数据或结论安到文献 B 或本文头上；"
+    "严禁把任何文献的结果写成「本文实验得到」「本系统实测达到」；严禁编造清单之外的文献；\n"
+    "5. 所有陈述必须能在题名或**对应编号**的摘要节选中找到依据，否则删除；\n"
+    "6. 这类论文的价值在于『脉络、分歧、开放问题』的归纳，不在于堆砌数字。"
+)
+
+
+def _no_fabricate_literature(has_abstracts: bool) -> str:
+    """零摘要的旧文献池保持原行为，避免历史产物回归。"""
+    return (_NO_FABRICATE_LITERATURE_WITH_ABSTRACTS if has_abstracts
+            else _NO_FABRICATE_LITERATURE_PLAIN)
 
 _NO_FABRICATE_SPEC = (
     "## ⚠️ 零编造硬约束（违背即判不可交付）\n"
@@ -120,13 +142,14 @@ def _spec_material(paper_type: str, spec: dict, block_key: str, label: str,
     return "\n".join(lines)
 
 
-def _literature_material(spec: dict, refs: list, references_block: str) -> str:
+def _literature_material(spec: dict, refs: list, references_block: str,
+                         abstract_text: str = "") -> str:
     topic = _topic_of(spec)
     lines = ["# 文献事实素材（零编造：以下内容均来自 01_literature.json，禁止引入素材外的文献/数字）",
              f"论文主题：{topic}",
              f"入选文献总数：{len(refs)} 篇",
              "",
-             _NO_FABRICATE_LITERATURE]
+             _no_fabricate_literature(bool(abstract_text))]
     by_role: dict[str, int] = {}
     for r in refs:
         role = (r.get("role") or "未分类")
@@ -154,16 +177,26 @@ def _topic_of(spec: dict) -> str:
 
 
 def build_fact_pack(paper_type: str, spec: dict, refs: list,
-                    references_block: str) -> str:
-    """按类型返回事实包（提示词前缀）。"""
+                    references_block: str, lit: dict | None = None) -> tuple[str, dict]:
+    """按类型返回 (事实包提示词前缀, 摘要统计)。
+
+    ``lit`` 传入 01_literature.json 的内容时，会把该文献池里**真实存在**的摘要
+    节选接进事实包。写作端与 ``eval_agent._ground_truth_for`` 共用
+    ``paper.lit_abstracts.abstract_block``，保证两边逐字同源。
+    """
+    from paper.lit_abstracts import abstract_block, enabled
+    papers = ((lit or {}).get("papers") or []) if isinstance(lit, dict) else []
+    ab_text, ab_stats = (abstract_block(papers) if enabled()
+                         else ("", {"n_total": len(papers), "n_with_abstract": 0,
+                                    "n_used": 0, "chars": 0}))
+
     s = TYPE_SPECS[paper_type]
     material = s["material"]
     if material == "literature":
-        base = _literature_material(spec, refs, references_block)
+        base = _literature_material(spec, refs, references_block, ab_text)
         if s.get("with_spec_block"):
             base += "\n\n" + _spec_material(paper_type, spec, s["with_spec_block"], s.get("spec_label", "题目"))
-        return base
-    if material == "literature+spec":
+    elif material == "literature+spec":
         base = _spec_material(paper_type, spec, s["spec_block"], s.get("spec_label", "题目"),
                               s.get("extra_rules"))
         if refs:
@@ -171,9 +204,16 @@ def build_fact_pack(paper_type: str, spec: dict, refs: list,
                      f"正文只允许出现 [1] 到 [{len(refs)}] 的编号；超出该范围即视为编造文献，"
                      "不得凭印象续编号。\n")
             base += "\n## 参考文献清单（可引用，用于文献对话；不得编造清单外文献）\n" + references_block
-        return base
-    return _spec_material(paper_type, spec, s["spec_block"], s.get("spec_label", "题目"),
-                          s.get("extra_rules"))
+    else:
+        return (_spec_material(paper_type, spec, s["spec_block"], s.get("spec_label", "题目"),
+                               s.get("extra_rules")), ab_stats)
+
+    if ab_text:
+        base += "\n\n" + ab_text
+        base += ("\n提示：以上摘要属于文献原文，撰写「国内外研究现状」「相关工作」"
+                 "「理论基础」等章节时应据此展开具体论述，而不是只按题名做空泛归类；"
+                 "但无摘要的文献仍不得补造。\n")
+    return base, ab_stats
 
 
 # ── 分章写作提示 ──────────────────────────────────────────────────────

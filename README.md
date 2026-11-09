@@ -80,6 +80,21 @@ python auto_research.py plan --topic "县域中学课后服务质量提升路径
 分发给对应的写作批次重写，再复评取最优；最优若不是最后一轮，正文/评审/docx
 一起回滚。契约与 `auto_research.py run` 的重写闭环是同一个。
 
+**文献摘要接入是可选实验能力**：`01_literature.json` 里带 abstract 的文献，其摘要
+节选本来可以进入写作事实包与评审官事实基础（两边逐字同源）。但四轮实测都没能超过
+零幻觉基线——模型一旦看到摘要里的样本量，就会给没有依据的文献也补数字。因此
+**默认关闭**，设 `AR_LIT_ABSTRACTS=1` 才启用；实测与结论见 `docs/PROGRESS.md` 第 18 节。
+这轮真正修掉的是引用块里的 `gist_cn` 数字一直没进评审事实基础，导致真实素材被误判编造。
+
+**改代码后跑一次回归**（32 个用例，不联网、约 0.05 秒）：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+覆盖零编造边界、写作端与评审端事实基础同源、重写意见分发、G03 判据不循环、
+素材完备度与网关负缓存过期。
+
 
 运行结果写入 `--out`，主要包括 `03_experiment.json`、`plots/`、`06_paper/paper_full.md` 和（安装 `python-docx` 时）`paper_full.docx`。结果是否有效应以实验 JSON 中的指标、错误及跳过方法为准。
 

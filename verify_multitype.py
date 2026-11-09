@@ -351,7 +351,9 @@ def main() -> int:
     rounds = args.rounds or (2 if args.eval else 1)
 
     print(f"LLM 可用性（子进程继承）：OPENAI_API_KEY={'set' if os.environ.get('OPENAI_API_KEY') else 'empty'}")
-    print(f"写作轮数上限：{rounds}")
+    print(f"写作轮数上限：{rounds}"
+          + ("；--skip-build 为复评历史产物，不代表当前默认路径的成文质量"
+             if args.skip_build else ""))
     rows = []
     for pt in pts:
         out = ROOT / f"out_verify_{pt}"
@@ -430,14 +432,19 @@ def main() -> int:
         g = _gates(out)
         hit, total = _structure(out, pt)
         used_llm = _used_llm(out)
-        # 兜底骨架（未走 LLM）本来就不该被当作可交付论文：
-        # 字数门 G02 与「非模板」门 G03 报 fail 是设计使然，不算缺陷。
-        expected = set() if used_llm else {"G02", "G03"}
+        # 兜底骨架（未走 LLM）本来就不该被当作可交付论文：字数门 G02、
+        # 「非模板」门 G03 报 fail，以及没跑评审导致的 G04 未验证 / G10 fail，
+        # 都是设计使然，不算缺陷。
+        expected = set() if used_llm else {"G02", "G03", "G04", "G10"}
         blocking = list(g.get("blocking") or [])
-        real = [b for b in blocking if b not in expected]
+        unverified = list(g.get("unverified") or [])
+        # 评审官缺席会把 G04 记进 unverified 而不是 blocking。以前只看 blocking，
+        # 于是「语义幻觉根本没验证」被显示成「全部类型通过」，是假阳性。
+        real = ([b for b in blocking if b not in expected]
+                + [f"未验证:{u}" for u in unverified if u not in expected])
         rows.append({
             "type": pt, "rc": rc, "chars": _chars(out), "struct": f"{hit}/{total}",
-            "llm": used_llm,
+            "llm": used_llm, "reused": bool(args.skip_build),
             "blocking": ",".join(real) or "-",
             "expected": ",".join(b for b in blocking if b in expected) or "-",
             "unverified": ",".join(g.get("unverified") or []) or "-",
@@ -456,7 +463,8 @@ def main() -> int:
     print(f"  {'type':18s} {'llm':5s} {'chars':>6s} {'struct':>6s}  blocking")
     for r in rows:
         print(f"  {r['type']:18s} {str(r['llm']):5s} {r['chars']:6d} "
-              f"{r['struct']:>6s}  {r['blocking']}（兜底预期失败：{r['expected']}）")
+              f"{r['struct']:>6s}  {r['blocking']}（兜底预期失败：{r['expected']}）"
+              + ("  [复评历史产物]" if r.get("reused") else ""))
     bad = [r["type"] for r in rows if r["blocking"] != "-" or r["struct"].split("/")[0]
            != r["struct"].split("/")[1]]
     if bad:

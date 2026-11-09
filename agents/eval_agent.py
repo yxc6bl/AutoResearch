@@ -170,15 +170,34 @@ def _points_at_text(md: str, claim: str, gt: str = "") -> bool:
     评审官常把「文献罗列未结合实践」「这里该补实验」写成 hallucinations，
     那是质量意见，不是编造。硬门只认指得出证据的指控：要么引了原文片段，
     要么点了文中出现的具体数字——且该内容在事实素材里找不到依据。
+
+    文献摘要接入后多出两种新情况，都要单独处理：
+    - 评审官自己写明「数字引用正确，只是没写归属措辞」——转述不规范，不是编造；
+    - 张冠李戴（把文献 A 的数字安到文献 B 头上）——是真编造，但那个数字确实
+      在事实清单里，不能靠「数字在 gt 中」把它豁免掉。
     """
     # 去掉章节号与引用编号，否则「第2章」「[27]」会被当成数字证据
     s = re.sub(r'\[\d+\]', ' ', claim)
     s = re.sub(r'第?\s*\d+(?:[.\-–]\d+)?\s*[章节]', ' ', s)
-    for q in re.findall(r'[「“"《]([^」”"》]{6,})[」”"》]', s):
-        q = q.strip()
-        if q and q in md and (not gt or q not in gt):
+    quotes = [q.strip() for q in
+              re.findall(r'[「“"《]([^」”"》]{6,})[」”"》]', s) if q.strip()]
+    nums = re.findall(r'\d+(?:\.\d+)?%?', s)
+
+    # 评审官自己说「不是编造」：降级为 issue，不进零编造硬门
+    if re.search(r'未编造|引用正确|数字(?:引用)?正确|转述不(?:规范|严谨)|属于措辞', claim):
+        return False
+
+    # 归因错误：只要指得出正文原句或具体编号，就按硬幻觉处理，绕开 gt 数字豁免
+    if re.search(r'张冠李戴|安到(?:另一|其他|别的)|'
+                 r'摘要(?:中)?(?:未|没有|不)(?:提及|包含|支持|提供)|'
+                 r'推断超出|超出(?:了)?摘要|归因(?:错误|不当)', claim):
+        if any(q in md for q in quotes) or (re.search(r'\[\d+\]', claim) and nums):
             return True
-    for n in re.findall(r'\d+(?:\.\d+)?%?', s):
+
+    for q in quotes:
+        if q in md and (not gt or q not in gt):
+            return True
+    for n in nums:
         if n in md and (not gt or n not in gt):
             return True
     return False
@@ -966,16 +985,58 @@ def _ground_truth(analysis: dict) -> str:
     return "\n".join(bits)
 
 
+def _abstract_gt(base_dir) -> str:
+    """评审官的文献事实基础：与写作端共用同一个摘要块生成器（逐字同源）。
+
+    只放宽一边是危险的：写作端能看摘要、评审端看不到，真实转述就会被判成编造。
+    """
+    try:
+        from paper.lit_abstracts import abstract_block, enabled, load_papers
+        if not enabled():
+            return ""
+        ab, _ = abstract_block(load_papers(base_dir))
+        return ab
+    except Exception:
+        return ""
+
+
+def _gist_gt(base_dir) -> str:
+    """文献一句话概要（gist_cn）也是正文引用块的确定性来源，必须进事实基础。
+
+    `_role_citation_block` 会把 build_references 里的 gist 原样拼进正文，
+    其中常带样本量等数字。以前 gt 里没有这块，评审官一被要求「正文严禁数字」
+    就会把这些**真实素材**判成编造——实测里「918 条记录」「7 万条记录」两条
+    都出自这里，不是模型补的。
+    """
+    try:
+        from paper.lit_abstracts import load_papers
+        papers = load_papers(base_dir)
+    except Exception:
+        return ""
+    lines = ["【文献一句话概要：检索阶段落盘的元数据，正文引用块会原样采用】",
+             "以下每条与参考文献编号一一对应。其中出现的样本量、记录数等数字"
+             "属于已提供的真实素材，不得据此判为「事实清单之外」或编造；"
+             "但若正文把这些数字安到别的文献编号上，仍属张冠李戴。"]
+    n = 0
+    for i, p in enumerate(papers, 1):
+        g = str(p.get("gist_cn") or "").strip()
+        if g:
+            lines.append(f"[{i}] {g}")
+            n += 1
+    return "\n".join(lines) if n else ""
+
+
 def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
     """按论文类型选择零编造评审的「事实基础」（供 LLM 评审官对照）。
 
     - method_comparison：沿用实验产物 03_experiment.json 的指标/方法清单（原行为）。
-    - survey：事实基础是 01_literature.json 的文献清单（仅题名/作者/来源/年份）；
-      清单不含摘要与指标，故明确告知评审官综述只能定性，不得出现具体性能数字。
+    - survey：事实基础是 01_literature.json 的文献清单 + 真实摘要节选。
     - system_design：事实基础是 task_spec.json 的 system_spec
       （技术栈/需求/架构/模块/验证）；不得编造规格外技术或实测结果数字。
     """
     base_dir = Path(base_dir)
+    # 非实验型：文献摘要与写作端同源。method_comparison 不看文献摘要（它看实验产物）。
+    _ab = "" if paper_type == "method_comparison" else _abstract_gt(base_dir)
     if paper_type == "survey":
         papers = []
         lp = base_dir / "01_literature.json"
@@ -985,17 +1046,29 @@ def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
                 papers = d.get("papers") or []
             except Exception:
                 papers = []
-        bits = ["【本文为文献综述型，零编造事实基础 = 下方文献清单（且仅含题名/作者/来源/年份）】",
-                f"入选文献总数：{len(papers)} 篇",
-                "零编造约束：文献清单不含摘要与任何具体指标；正文只能定性描述各文献的方法路线、",
-                "研究问题与贡献方向，严禁出现具体性能数字（准确率/AUC/F1/敏感度/C-index/Dice 等），",
-                "也严禁编造清单之外的文献。引用编号须与清单一致；题名已点明的方法类别可定性转述，但不得补造数字。",
-                "", "文献清单（正文 [编号] 须落在此列表内）："]
+        if _ab:
+            bits = ["【本文为文献综述型，零编造事实基础 = 下方文献清单 + 摘要节选（数值已脱敏）】",
+                    f"入选文献总数：{len(papers)} 篇",
+                    "零编造约束：摘要节选中的具体数值已统一替换为「〔数值略〕」，"
+                    "正文严禁出现任何具体数字（样本量、记录数、准确率、AUC、F1 等）；年份与引用编号除外。"
+                    "有摘要的文献可转述其研究问题、方法路线、数据来源与结论方向，须用带归属的句式；"
+                    "无摘要的文献只能依据题名定性推断。严禁编造清单之外的文献，引用编号须与清单一致。",
+                    "", "文献清单（正文 [编号] 须落在此列表内）："]
+        else:
+            bits = ["【本文为文献综述型，零编造事实基础 = 下方文献清单（且仅含题名/作者/来源/年份）】",
+                    f"入选文献总数：{len(papers)} 篇",
+                    "零编造约束：文献清单不含摘要与任何具体指标；正文只能定性描述各文献的方法路线、",
+                    "研究问题与贡献方向，严禁出现具体性能数字（准确率/AUC/F1/敏感度/C-index/Dice 等），",
+                    "也严禁编造清单之外的文献。引用编号须与清单一致；题名已点明的方法类别可定性转述，但不得补造数字。",
+                    "", "文献清单（正文 [编号] 须落在此列表内）："]
         for i, p in enumerate(papers[:60], 1):
             _meta = "、".join(x for x in [p.get("venue", ""), str(p.get("year", ""))] if x)
             bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》"
                         + (f"（{_meta}）" if _meta else ""))
-        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+        if _ab:
+            bits += ["", "【以下为真实摘要节选，与写作端事实包逐字一致】", _ab]
+        return {"gt": "\n".join(bits), "lit_count": len(papers),
+                "abstracts_grounded": bool(_ab)}
 
     if paper_type == "system_design":
         ss: dict = {}
@@ -1051,7 +1124,10 @@ def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
             bits.append(f"【本文引用的参考文献（共 {len(papers)} 篇，编号 [1]–[{len(papers)}] 均属有效引用）】")
             for i, p in enumerate(papers[:60], 1):
                 bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》")
-        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+        if _ab:
+            bits += ["", "【以下为真实摘要节选，与写作端事实包逐字一致；正文据此转述文献不算编造】", _ab]
+        return {"gt": "\n".join(bits), "lit_count": len(papers),
+                "abstracts_grounded": bool(_ab)}
 
     if paper_type in ("case_study", "technical_report", "research_proposal"):
         # 通用：其余 spec 驱动型 —— 事实基础是 task_spec.json 里该类型声明的素材段。
@@ -1090,10 +1166,21 @@ def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
             bits.append(f"【本文引用的参考文献（共 {len(papers)} 篇，编号 [1]–[{len(papers)}] 均属有效引用）】")
             for i, p in enumerate(papers[:60], 1):
                 bits.append(f"[{i}] {p.get('authors', '')}《{p.get('title', '')}》")
-        return {"gt": "\n".join(bits), "lit_count": len(papers)}
+        if _ab:
+            bits += ["", "【以下为真实摘要节选，与写作端事实包逐字一致；正文据此转述文献不算编造】", _ab]
+        return {"gt": "\n".join(bits), "lit_count": len(papers),
+                "abstracts_grounded": bool(_ab)}
 
     # method_comparison（默认）：沿用实验产物
-    return {"gt": _ground_truth(analysis), "lit_count": (len(cands) if cands else 0)}
+    return {"gt": _ground_truth(analysis), "lit_count": (len(cands) if cands else 0),
+            "abstracts_grounded": False}
+
+
+_ABSTRACT_RULE = (
+    "5) 【仅当事实清单附了摘要节选时适用】摘要中的具体数值已脱敏为「〔数值略〕」，"
+    "正文出现样本量/记录数/指标值等具体数字（年份、引用编号以及事实清单"
+    "『文献一句话概要』里已给出的数字除外）才算幻觉。\n"
+)
 
 
 def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "general",
@@ -1155,13 +1242,34 @@ def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "gener
         "2) 四舍五入后的数值与事实清单高精度原值一致，不算编造；"
         "只有方法名、检验名、预处理操作、数据集、结论对象与事实清单矛盾，才算幻觉。\n"
         "3) 不要把「建议改进」写成幻觉；hallucinations 只放与事实清单明确矛盾的具体处。\n"
-        "verdict 为 revise 当且仅当存在幻觉、严重结构缺失或核心事实矛盾。"
+        "4) 以下**不算幻觉**，请写进 issues / suggestions：数字在事实清单里存在、"
+        "只是没写『该文献报告』等归属措辞（属于转述不规范）；章节编号、逻辑衔接、措辞问题。"
+        "判定为转述不规范时，请明确写出『数字引用正确』或『未编造数字』。\n"
+        "   以下**算幻觉**：把文献甲的内容安到文献乙头上（张冠李戴）；"
+        "摘要只说『比较了 A 与 B』却写成『发现 A 优于 B』；把文献结论写成『本文实测』。\n"
+        + (_ABSTRACT_RULE if "〔数值略〕" in (gt or "") else "")
+        + "verdict 为 revise 当且仅当存在幻觉、严重结构缺失或核心事实矛盾。"
     )
-    try:
-        out = LLM.chat_json(prompt + "\n\n【论文全文】\n" + md,
-                            system=LLM.FACT_FIRST_SYSTEM, temperature=0.2, max_tokens=2600)
-    except Exception as e:  # noqa: BLE001
-        return {"available": False, "reason": f"llm_error:{e}"}
+    # 网关偶发截断 / 输出带解释文字会让 chat_json 解析成 {}。以前这里直接判
+    # 「评审官缺席」，于是 G04 记未验证、严格模式拒绝交付——明明只是坏 JSON。
+    # 重试一次，且第二次把输出要求收紧（短数组、纯 JSON），避免长文撑爆 max_tokens。
+    _full = prompt + "\n\n【论文全文】\n" + md
+    _tight = ("\n\n⚠️ 上一次输出不是合法 JSON。请只输出一个 JSON 对象，不要解释、"
+              "不要 markdown 代码块；每个数组最多 4 条、每条不超过 60 字；"
+              "必须含 scores、overall、hallucinations、issues、unsupported_claims、"
+              "suggestions、verdict 七个字段。")
+    out: dict = {}
+    for _i in range(2):
+        try:
+            out = LLM.chat_json(_full + (_tight if _i else ""),
+                                system=LLM.FACT_FIRST_SYSTEM, temperature=0.2,
+                                max_tokens=(2600 if _i == 0 else 3200))
+        except Exception as e:  # noqa: BLE001
+            if _i:
+                return {"available": False, "reason": f"llm_error:{e}"}
+            out = {}
+        if isinstance(out, dict) and "overall" in out:
+            break
     if not isinstance(out, dict) or "overall" not in out:
         return {"available": False, "reason": "bad_json"}
     sc = out.get("scores") or {}
@@ -1353,8 +1461,13 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
         # 零编造评审的「事实基础」按论文类型选择：方法对比型用实验产物，
         # 综述型用文献清单，设计型用 system_spec（避免把空实验桩误判为「0 篇/无事实」）。
         _pt = _paper_type_of(md)
-        _gt_info = _ground_truth_for(_pt, Path(paper_path).resolve().parent.parent, _aj, cands)
-        _lj = llm_judge(str(paper_path), _aj, _gt_info["lit_count"], mode, gt=_gt_info["gt"])
+        _base = Path(paper_path).resolve().parent.parent
+        _gt_info = _ground_truth_for(_pt, _base, _aj, cands)
+        _gt = _gt_info["gt"]
+        _gb = _gist_gt(_base)
+        if _gb:
+            _gt += "\n\n" + _gb
+        _lj = llm_judge(str(paper_path), _aj, _gt_info["lit_count"], mode, gt=_gt)
         # 评审官缺席也必须留痕：以前 available=False 时 verdict 里连字段都没有，
         # 下游分不清「审过没发现幻觉」和「根本没审」，会把未验证当成通过。
         verdict["llm_judge"] = _lj if isinstance(_lj, dict) else {
@@ -1363,7 +1476,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             verdict["llm_judge"] = _lj
             _hard_hall, _soft_hall = [], []
             for _h in [str(x) for x in (_lj.get("hallucinations") or [])]:
-                (_hard_hall if _points_at_text(md, _h, _gt_info.get("gt", ""))
+                (_hard_hall if _points_at_text(md, _h, _gt)
                  else _soft_hall).append(_h)
             if _soft_hall:
                 # 保留痕迹但不阻断：让读者看到评审官的意见，也不让它凭印象判死一篇稿
