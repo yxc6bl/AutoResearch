@@ -18,18 +18,17 @@
 
 这条路和 GitHub 同步互不冲突：包随时能生成，GitHub 授权哪天方便哪天补。
 
-## 当前状态（2026-11-08）
+## 当前状态（2026-11-09 12:27 同步完成）
 
 | 项 | 状态 |
 |---|---|
 | 仓库 | `https://github.com/yxc6bl/AutoResearch.git`（用户给的是 `/invitations` 邀请页，已还原成仓库根地址） |
-| `origin` | **已配置并 fetch 成功** |
-| 远端默认分支 | `main`（本地已由 `master` 改名为 `main`） |
-| 本地 HEAD | `f0315eb` —— 合并远端初始快照后的提交，待推送 |
-| 网络 | 通（`git ls-remote` 匿名可读，远端 `435d25a`） |
-| 推送凭据 | **尚未完成授权**；系统凭据管理器里没有 github.com 条目 |
-| 自动推送 hook | 已安装 `.git/hooks/post-commit` |
-| 仓库体积 | ~52MB（含 MNIST 15MB），`out_*/`、`.env`、`*.docx`、`corpus/` 已被 `.gitignore` 排除 |
+| `origin` | 已配置，分支 `main` 已设上游跟踪 |
+| 同步结果 | **远端与本地 HEAD 一致，落后/领先 `0 0`**；49 个提交一次性推送成功（`435d25a..b592740`） |
+| 推送凭据 | 网页生成 classic PAT → `git credential approve` 存入 **Windows 凭据管理器**（GCM），不写项目文件、不入库 |
+| 自动推送 hook | 已安装 `.git/hooks/post-commit`，提交后异步 `git push`，失败写 `.git/sync.log` 且不影响 commit |
+| 远端文件 | 已用 GitHub 接口核对：`docs/ARCHITECTURE.md`、`docs/CAPABILITY.md`、`engine/image_backend.py`、`data/california_housing.csv`、`data/cora.*`、`data/mnist/*` 全部存在 |
+| 本地排除项 | `out_*/`、`.env`、`*.docx`、`corpus/`、`dist/` 被 `.gitignore` 排除（共享包不入库） |
 
 ### 远端历史怎么接的
 
@@ -42,13 +41,16 @@
 - 工作树保持本地最新工程，旧 zip / 旧结果目录不会覆盖新代码；
 - 旧快照仍留在历史里，随时可以 `git show` 回溯。
 
-## 授权：当前唯一待办
+## 授权方式（已完成，以下留档备查）
 
-本机 Git Credential Manager 2.9.0 在**无界面会话里弹不出可用的授权窗口**。
+**2026-11-09 12:27 已完成**：用户在 GitHub 网页生成 classic PAT（只勾 `repo`），
+经 `scripts/github_sync.py --store-token` 交给 GCM 持久化，随后 `git push -u origin main`
+成功推送 49 个提交。凭据可由 `git credential fill` 读回，`--status` 显示 `0 0`。
+
+当时的卡点记录：本机 Git Credential Manager 2.9.0 在**无界面会话里弹不出可用的授权窗口**。
 实测三次：默认 browser OAuth（`PUSH_EXIT=124`，300 秒超时）、强制
 `credential.gitHubAuthModes=device`（不吐设备码）、`GIT_TERMINAL_PROMPT=0`
-非交互探测（同样挂起）；`cmdkey /list` 里始终没有 github.com 条目。
-所以自动化这边能做的都做完了，**认证这一步必须本人做一次**。
+非交互探测（同样挂起）。所以自动化这边能做的都做完了，认证这一步必须本人做一次。
 
 ### 生成令牌：逐屏操作（全程在 GitHub 网页，不用装任何软件）
 

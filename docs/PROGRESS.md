@@ -546,3 +546,19 @@ Tokens (classic)/Note/7 days/只勾 repo/Generate/复制 `ghp_`/贴给我），�
 （评审官没抓到，人工复核发现）。**可交付不等于能过答辩**。
 
 共享包更新为 13.5MB / 135 文件 / 4 篇示例（新增 `examples/thesis_real_paper`）。
+
+---
+
+## 15. GitHub 远端同步打通（2026-11-09 12:27）
+
+用户贴来网页生成的 classic PAT，用 `scripts/github_sync.py --store-token`
+经 `git credential approve` 存入 Windows 凭据管理器（GCM），
+随后 `git push -u origin main` 一次性推送 **49 个提交**（`435d25a..b592740`），返回 0。
+
+核对：`--status` 显示落后/领先 `0 0`，`git ls-remote origin HEAD` 与本地 HEAD
+同为 `b592740`；GitHub 接口 `git/trees/main?recursive=1` 返回 86 个条目，
+抽查 `docs/ARCHITECTURE.md`、`docs/CAPABILITY.md`、`engine/image_backend.py`、
+`data/california_housing.csv`、`data/cora.content`、`data/mnist/*` 均已在远端。
+
+post-commit hook 已装（提交后异步 push，失败写 `.git/sync.log`、不影响 commit）。
+本节文档改动即由该 hook 自动推送，用于验证「这边提交、那边立刻拿到」这条链路。
