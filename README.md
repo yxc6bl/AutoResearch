@@ -69,7 +69,17 @@ python auto_research.py plan --topic "县域中学课后服务质量提升路径
 **加一种新论文类型**只改两处：`paper/thesis_template.py` 的 `PAPER_TYPES` 登记章节骨架，
 `paper/paper_type_specs.py` 的 `TYPE_SPECS` 登记素材来源/分章提示/兜底文案。
 统一构建器 `_build_non_experimental`、闸门、评审都会自动适配，不用再写 builder。
-逐类型自检：`python verify_multitype.py`（加 `--eval` 连评审官一起跑）。
+逐类型自检：`python verify_multitype.py`（加 `--eval` 连评审官一起跑，
+加 `--rounds 2` 让**评审官抓到编造**时带意见重写一轮再复评，取分高的一版）。
+
+**写之前先查素材够不够**：`python paper/spec_check.py --spec task_spec.json`
+会列出缺哪些字段、哪些偏薄，结果同时落 `00_spec_check.json`。零编造意味着
+素材少一块，正文就少一块实质内容——先补齐再跑，比写完再改省事。
+
+**评审意见会回写到正文**：评审官抓出的编造写进 `04_review.json`，下一轮按章节
+分发给对应的写作批次重写，再复评取最优；最优若不是最后一轮，正文/评审/docx
+一起回滚。契约与 `auto_research.py run` 的重写闭环是同一个。
+
 
 运行结果写入 `--out`，主要包括 `03_experiment.json`、`plots/`、`06_paper/paper_full.md` 和（安装 `python-docx` 时）`paper_full.docx`。结果是否有效应以实验 JSON 中的指标、错误及跳过方法为准。
 

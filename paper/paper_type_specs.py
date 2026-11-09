@@ -190,7 +190,7 @@ TYPE_SPECS: dict[str, dict] = {
         "extras": [("### 7.0 本文的独立见解", "innovations"),
                    ("### 7.1 研究局限", "limitations")],
         "batches": [
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["abstract", "keywords", "abstract_en", "keywords_en", "intro", "retrieval_method"], "prompt":
                 _COMMON_PRE + "文献综述论文的前置与第 1–2 章，输出 JSON：\n"
                 '{"abstract":"250-350字中文摘要（第三人称）：综述主题、文献规模、主要脉络、核心结论与开放问题",\n'
                 '  "keywords":"3-4个中文关键词，用；分隔",\n'
@@ -198,12 +198,12 @@ TYPE_SPECS: dict[str, dict] = {
                 '  "keywords_en":"对应的英文关键词，逗号分隔",\n'
                 '  "intro":"绪论正文 4 段（直接写正文，不写章标题）：①研究背景与实际/理论意义；②该领域的研究缺口与未解问题；③本文综述范围与组织方式（按主题/方法划分）；④本文的贡献（系统梳理若干主题、厘清争论、指出开放方向）",\n'
                 '  "retrieval_method":"第2章「文献检索与分析方法」正文 2-3 段：检索策略（数据库/关键词/时间窗）、纳入排除标准、文献计量概况（总量、年份跨度、主题分布），须与素材中的真实数字一致"}'},
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["framework", "status", "trend"], "prompt":
                 _COMMON_PRE + "综述主体，输出 JSON：\n"
                 '{"framework":"第3章「研究主题分类框架」正文 2-3 段：提出本文的综述分类维度（如按方法路线/应用场景/理论视角），说明为何这样划分，并给出各类别定义",\n'
                 '  "status":"第4章「各主题研究现状」正文（不少于 1800 字，直接写正文，不写章标题）：按第3章框架逐主题综述，每个主题下按『代表工作→立场→局限→彼此关系』组织，必须广泛出现 [编号] 引用（至少覆盖 20 篇不同文献），明确指出各工作的贡献与不足，以及本文归纳出的主线。**只能定性描述方法路线与贡献方向，严禁写出任何具体性能数字（准确率/AUC/F1/敏感度等）或实验数字——你并没有这些文献的摘要与指标数据，写了即视为编造。**",\n'
                 '  "trend":"第5章「研究趋势与争论」正文（不少于 800 字）：归纳近年研究趋势、不同阵营的方法论争论、尚未达成一致的关键分歧"}'},
-            {"max_tokens": 3072, "prompt":
+            {"max_tokens": 3072, "fields": ["open", "conclusion", "innovations", "limitations"], "prompt":
                 _COMMON_PRE + "综述的收尾部分，输出 JSON：\n"
                 '{"open":"第6章「开放问题与未来方向」正文（不少于 600 字）：列出 3-5 个该领域尚未解决的关键问题，并给出有依据的未来方向",\n'
                 '  "conclusion":"第7章「结论与展望」正文 3 段（不写章标题）：①复述核心发现（各主题的主线与共识）；②本文综述工作的整体价值；③可落地的后续研究建议",\n'
@@ -224,7 +224,7 @@ TYPE_SPECS: dict[str, dict] = {
         "extras": [("### 7.0 本文设计亮点与独立见解", "innovations"),
                    ("### 7.1 系统局限", "limitations")],
         "batches": [
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["abstract", "keywords", "abstract_en", "keywords_en", "intro", "requirements"], "prompt":
                 _COMMON_PRE + "系统/软件设计类论文的前置与第 1–2 章，输出 JSON：\n"
                 '{"abstract":"250-350字中文摘要（第三人称）：系统要解决的问题、采用的核心技术/架构、主要设计与验证安排",\n'
                 '  "keywords":"3-4个中文关键词，用；分隔",\n'
@@ -232,12 +232,12 @@ TYPE_SPECS: dict[str, dict] = {
                 '  "keywords_en":"对应的英文关键词，逗号分隔",\n'
                 '  "intro":"绪论正文 3 段（直接写正文）：①问题背景与意义；②现有方案不足；③本文工作目标与范围",\n'
                 '  "requirements":"第2章「需求分析」正文（不少于 600 字）：功能性需求（分点说明各模块职责）与非功能性需求（性能/可用/安全/可维护），须与素材一致"}'},
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["architecture", "modules", "tech"], "prompt":
                 _COMMON_PRE + "第 3–5 章，输出 JSON：\n"
                 '{"architecture":"第3章「总体架构设计」正文（不少于 700 字）：分层/模块划分、各层职责、数据流向，须与素材中的架构描述一致",\n'
                 '  "modules":"第4章「核心模块设计与实现」正文（不少于 1200 字）：逐模块说明职责、关键数据结构、接口与核心算法要点。各模块的输入输出、标签类别必须与素材 modules 描述逐字一致，不得写成不同类别或增删类别，不得虚构未声明的接口或功能。",\n'
                 '  "tech":"第5章「关键技术与难点」正文（不少于 600 字）：关键技术选型理由、实现中的主要难点与应对"}'},
-            {"max_tokens": 3072, "prompt":
+            {"max_tokens": 3072, "fields": ["validation", "conclusion", "innovations", "limitations"], "prompt":
                 _COMMON_PRE + "第 6 章与收尾，输出 JSON：\n"
                 '{"validation":"第6章「系统验证与测试」正文（不少于 600 字），仅按以下约束撰写：①只能复述素材 validation 明确给出的『策略』与『测试用例目标值（验收标准）』，目标值原文照抄；②严禁编造素材未给出的任何具体参数或测试场景数字（采样率、并发人数、测试时长、断网恢复秒数、CPU/内存占用等）；③严禁描写『实测/实验得到』的过程或结果，系统尚未部署运行，只能写『设计阶段设定以下验收标准，将在联调/试点阶段按此验证』；④可定性说明测试层级划分与每级验证目的，但不许补造数字。",\n'
                 '  "conclusion":"第7章「结论与展望」正文 3 段：①系统达成的主要目标；②本文工作价值；③可落地改进方向",\n'
@@ -258,7 +258,7 @@ TYPE_SPECS: dict[str, dict] = {
         "extras": [("### 7.0 本文的分析贡献", "innovations"),
                    ("### 7.1 研究局限", "limitations")],
         "batches": [
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["abstract", "keywords", "abstract_en", "keywords_en", "intro", "theory"], "prompt":
                 _COMMON_PRE + "案例研究论文的前置与第 1–2 章，输出 JSON：\n"
                 '{"abstract":"250-350字中文摘要（第三人称）：研究问题、案例对象、分析框架、主要发现与启示",\n'
                 '  "keywords":"3-4个中文关键词，用；分隔",\n'
@@ -266,12 +266,12 @@ TYPE_SPECS: dict[str, dict] = {
                 '  "keywords_en":"对应的英文关键词，逗号分隔",\n'
                 '  "intro":"绪论正文 3 段：①该现象的现实背景与研究意义；②现有研究对该问题的处理及其不足；③本文的研究问题与案例选择理由",\n'
                 '  "theory":"第2章「理论基础与文献回顾」正文（不少于 800 字）：阐述本文所依据的理论框架/分析视角，并结合入选文献 [编号] 说明该理论在同类案例中的应用与分歧。对文献只能定性转述其方法与结论方向，严禁编造具体数字。"}'},
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["design", "context", "analysis"], "prompt":
                 _COMMON_PRE + "第 3–5 章，输出 JSON：\n"
                 '{"design":"第3章「研究设计与案例选择」正文（不少于 600 字）：研究方法（单案例/多案例）、资料收集方式（访谈/文档/观察等，须与素材一致）、案例选择理由与典型性、资料整理与编码步骤、效度保障",\n'
                 '  "context":"第4章「案例背景与现状」正文（不少于 900 字）：只写素材给出的背景、对象、现象与已提供的数据，不得补造营收、人数、比率、时间点等未给出的数字；素材未给的信息一律不写",\n'
                 '  "analysis":"第5章「案例分析」正文（不少于 1500 字）：按分析框架逐维度剖析现象、机制与因果链条，以素材中的事实为证据，明确区分『素材事实』与『本文推断』"}'},
-            {"max_tokens": 3072, "prompt":
+            {"max_tokens": 3072, "fields": ["discussion", "conclusion", "innovations", "limitations"], "prompt":
                 _COMMON_PRE + "第 6 章与收尾，输出 JSON：\n"
                 '{"discussion":"第6章「讨论与启示」正文（不少于 800 字）：与文献对话（用 [编号] 引用），说明本案例对既有理论的印证、补充或挑战，并给出可操作的实践启示与适用边界",\n'
                 '  "conclusion":"第7章「结论与展望」正文 3 段：①研究问题的回答；②方法与发现的贡献；③单案例研究的局限与后续方向",\n'
@@ -292,7 +292,7 @@ TYPE_SPECS: dict[str, dict] = {
         "extras": [("### 7.0 工程要点与经验", "innovations"),
                    ("### 7.1 不足与后续改进", "limitations")],
         "batches": [
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["abstract", "keywords", "abstract_en", "keywords_en", "intro", "requirements"], "prompt":
                 _COMMON_PRE + "工程实践报告的前置与第 1–2 章，输出 JSON：\n"
                 '{"abstract":"250-350字中文摘要：项目背景、建设目标、采用的方案与主要交付物",\n'
                 '  "keywords":"3-4个中文关键词，用；分隔",\n'
@@ -300,11 +300,11 @@ TYPE_SPECS: dict[str, dict] = {
                 '  "keywords_en":"对应的英文关键词，逗号分隔",\n'
                 '  "intro":"第1章「概述」正文（不少于 700 字）：项目来源与业务背景、建设目标与范围、项目要解决的具体业务问题及其实际价值（据素材说清解决了什么，不写空泛口号）、本报告的组织结构",\n'
                 '  "requirements":"第2章「需求与约束」正文（不少于 800 字）：业务需求、功能需求、非功能指标（须与素材一致）、实施约束（时间/成本/环境/合规）"}'},
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["architecture", "implementation"], "prompt":
                 _COMMON_PRE + "第 3–4 章，输出 JSON：\n"
                 '{"architecture":"第3章「方案设计」正文（不少于 900 字）：总体方案、模块划分、接口与数据流、关键技术选型理由",\n'
                 '  "implementation":"第4章「实施过程」正文（不少于 1600 字）：按阶段说明实施步骤、每步的输入输出与里程碑、遇到的实际问题与处理方式。**严禁引入 tech_stack 之外的技术组件**（数据库/缓存/消息队列/Web 服务器/ORM 及其版本号，如 Redis、Nginx、Sqoop、MySQL 5.5 等一律不得出现），不得虚构未在素材中声明的过程细节与量化数据"}'},
-            {"max_tokens": 3072, "prompt":
+            {"max_tokens": 3072, "fields": ["results", "issues", "conclusion", "innovations", "limitations"], "prompt":
                 _COMMON_PRE + "第 5–7 章，输出 JSON：\n"
                 '{"results":"第5章「结果与验证」正文（不少于 800 字）：只能写素材给出的交付物与验收标准，按条说明如何核验；素材未给实测数据时写『按验收标准核验』，严禁编造实测指标数字",\n'
                 '  "issues":"第6章「问题与改进」正文（不少于 700 字）：实施中暴露的问题、根因分析、已采取的改进与仍待优化之处",\n'
@@ -326,7 +326,7 @@ TYPE_SPECS: dict[str, dict] = {
         "extras": [("### 7.0 方案的创新点", "innovations"),
                    ("### 7.1 风险与应对", "limitations")],
         "batches": [
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["abstract", "keywords", "abstract_en", "keywords_en", "intro", "status"], "prompt":
                 _COMMON_PRE + "开题报告的前置与第 1–2 章，输出 JSON：\n"
                 '{"abstract":"250-350字中文摘要：拟研究的问题、研究现状的空白、拟采用的方法、预期贡献",\n'
                 '  "keywords":"3-4个中文关键词，用；分隔",\n'
@@ -334,12 +334,12 @@ TYPE_SPECS: dict[str, dict] = {
                 '  "keywords_en":"对应的英文关键词，逗号分隔",\n'
                 '  "intro":"第1章「研究背景与意义」正文 3 段：①现实与学术背景；②问题的紧迫性；③理论意义与应用价值",\n'
                 '  "status":"第2章「国内外研究现状」正文（不少于 900 字）：按主题梳理入选文献 [编号] 的路线与结论方向，指出尚未解决的问题（研究空白）。只能定性转述，严禁编造任何具体性能数字或实验数据。"}'},
-            {"max_tokens": 4096, "prompt":
+            {"max_tokens": 4096, "fields": ["questions", "content", "route"], "prompt":
                 _COMMON_PRE + "第 3–5 章，输出 JSON：\n"
                 '{"questions":"第3章「研究问题与目标」正文（不少于 600 字）：提出 3-4 个可检验的研究问题（每个问题说明为何值得研究），并给出总体目标与具体目标，明确研究边界",\n'
                 '  "content":"第4章「研究内容与方法」正文（不少于 1000 字）：分点列出研究内容模块，并为每块指明对应方法（须与素材一致），说明数据来源与处理方式。**严禁编造素材未给出的具体参数**：样本量、班级/人数、统计工具（SPSS/R/Python 库）、专家组构成与人数、试点规模、量表条目数等一律不写；确需说明时只能写『拟在试点中确定』",\n'
                 '  "route":"第5章「技术路线与可行性」正文（不少于 700 字）：给出从问题到结论的技术路线（步骤链条）、关键难点与应对，并从理论、数据、条件三方面论证可行性。同样严禁编造素材未给出的工具、样本量与实施细节"}'},
-            {"max_tokens": 3072, "prompt":
+            {"max_tokens": 3072, "fields": ["plan", "conclusion", "innovations", "limitations"], "prompt":
                 _COMMON_PRE + "第 6–7 章与收尾，输出 JSON：\n"
                 '{"plan":"第6章「进度安排与预期成果」正文（不少于 500 字）：按素材给出的阶段安排说明各阶段任务与产出节点，预期成果（论文/原型/数据集等）不得编造量化指标",\n'
                 '  "conclusion":"第7章「结语」正文 2 段：方案要点回顾与执行承诺式说明",\n'

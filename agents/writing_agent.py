@@ -85,6 +85,14 @@ def run(out_dir, task_spec_path, store: MemoryStore | None = None, timeout: int 
         except Exception:
             llm_written = None
 
+    # 成文过程的两个关键信号必须让主流程看见，否则素材缺口与重写都在静默中发生：
+    #   [素材]           —— 素材完备度（缺什么、哪些偏薄）
+    #   [generate_paper —— 第几批带评审意见重写
+    # 其余日志仍然不转发，避免把 run 的控制台刷成一屏。
+    for _line in (proc.stdout or "").splitlines():
+        if _line.startswith("[素材]") or _line.startswith("[generate_paper·"):
+            print(_line)
+
     return {
         "paper": str(paper) if paper.exists() else None,
         "paper_md": str(paper_md) if paper_md.exists() else None,

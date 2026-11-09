@@ -2802,18 +2802,156 @@ def _load_spec(base: Path) -> dict:
         return {}
 
 
-def _write_batches(paper_type: str, facts: str, retries: int = 1) -> dict:
+def _review_digest(review: dict | None) -> dict:
+    """把 04_review.json 归一成「逐条指控 + 修改建议」，供重写提示使用。"""
+    if not isinstance(review, dict):
+        return {"claims": [], "suggestions": []}
+    claims = [str(x).strip() for x in
+              ((review.get("hallucinations") or []) + (review.get("unsupported_claims") or []))
+              if str(x).strip()]
+    suggestions = [str(x).strip() for x in (review.get("suggestions") or []) if str(x).strip()]
+    # 同一条被两类清单重复收录时不重复列，避免提示词里同一句话出现两遍
+    seen, uniq = set(), []
+    for c in claims:
+        if c not in seen:
+            seen.add(c)
+            uniq.append(c)
+    return {"claims": uniq, "suggestions": suggestions}
+
+
+def _suggestion_lines(suggestions: list[str]) -> list[str]:
+    """评审官的质量建议 + 采纳边界。两类重写块共用。"""
+    if not suggestions:
+        return []
+    out = ["评审官对论证质量的建议（**只用于调整写法与详略**）："]
+    out += [f"- {s}" for s in suggestions[:6]]
+    out.append("采纳边界：建议里出现的系统名、模块名、指标名、数字，若素材没有逐字给出，"
+               "一律不得写进正文。评审官看到的是事实清单、看不到你的全部素材，"
+               "它给的清单可能比素材更全——照抄它的清单，等于用二手转述替换一手素材，"
+               "同样算编造。")
+    return out
+
+
+def _suggestion_only_block(suggestions: list[str], fields: list[str] | None) -> str:
+    """没有编造指控、只有质量意见时的重写块。"""
+    lines = ["## 本次为重写稿：评审官未指出编造，但要求改写",
+             "以下意见针对上一版的论证。你正在写的这部分"
+             f"（{('、'.join(fields) if fields else '全文相关部分')}）如涉及，按意见调整写法与详略；",
+             "不涉及就按素材原样写，不要为了「看起来改过」而增删内容。", ""]
+    lines += _suggestion_lines(suggestions)
+    lines += ["", "改写规则：只在素材范围内调整结构、详略与论证链条；不得新增素材未声明的"
+                  "系统名、模块名、指标名、数字或结论。"]
+    return "\n".join(lines)
+
+
+def _review_block(review: dict | None, fields: list[str] | None = None) -> str:
+    """生成重写批次的「评审意见」前置块。
+
+    只把与本章节相关的条目交给模型：评审官一次抓出的问题横跨全文，若整篇原样塞进
+    每一批，模型容易「为了回应意见」把别章的内容搬进来。因此用上一版正文定位每条
+    指控落在哪一节，只把命中本批字段的条目下发；定位不到的条目按「通用」下发。
+    """
+    digest = _review_digest(review)
+    if not digest["claims"] and not digest["suggestions"]:
+        return ""
+    where = review.get("_locate") or {}
+    mine, common = [], []
+    for c in digest["claims"]:
+        keys = where.get(c)
+        if keys and fields:
+            if set(keys) & set(fields):
+                mine.append(c)
+            # 已定位到别的章节：不发给本批，避免跨章搬运
+        elif keys:
+            mine.append(c)
+        else:
+            common.append(c)
+    if not mine and not common:
+        # 只有建议、没有编造指控：也必须下发，否则「重写轮」等于原地重掷一次骰子，
+        # 评审官提的质量意见一个字都传不到写作端（设计型/案例型常见这种情形：
+        # 幻觉为 0，但 verdict=revise，要求补论证深度）。
+        if not digest["suggestions"]:
+            return ""
+        return _suggestion_only_block(digest["suggestions"], fields)
+    lines = ["## ⚠️ 本次为重写稿：上一版被评审官判为「文中出现、素材没有」",
+             "以下条目是评审官对照素材逐句核出的编造或夸大。你正在写的这"
+             f" {('、'.join(fields) if fields else '部分')} 若涉及，必须逐条消除："]
+    for i, c in enumerate(mine + common, 1):
+        lines.append(f"{i}. {c}")
+    lines += [
+        "改写规则（违反任一条即视为本次修订失败）：",
+        "- 命中上述条目的句子，删除该细节或改写为素材可支撑的表述；素材没有的数字、频率、时长、"
+        "人数、并发量、版本号、测试场景，一律不写；",
+        "- 不得为了「回应意见」而新增任何素材之外的内容，也不得把别章的论述搬进本章；",
+        "- 与本章节无关的条目直接忽略，不要因为它出现在这里就强行写一段；",
+        "- 改写后本章的事实密度可以下降，但不允许出现素材无法支撑的具体数字。",
+    ]
+    if digest["suggestions"]:
+        lines.append("")
+        lines += _suggestion_lines(digest["suggestions"])
+    return "\n".join(lines)
+
+
+def _locate_claims(review: dict | None, prev_md: str, chapters: list[dict]) -> dict:
+    """把每条指控定位到上一版正文的章节：先找引号原句，再找长数字。
+
+    定位只为「少发无关条目」，不作为判据——定位不到的条目仍会以「通用」下发，
+    所以宁可漏定位，也不能把真问题丢掉。
+    """
+    if not review or not prev_md:
+        return {}
+    # 切章：按 "## 第N章"/"## 摘要" 这类二级标题分段
+    seg, cur_key = {}, "__front__"
+    seg[cur_key] = []
+    for ln in prev_md.splitlines():
+        if ln.startswith("## "):
+            title = ln[3:].strip()
+            cur_key = "__front__"
+            for ch in chapters:
+                if title.startswith(f"第{ch['no']}章") or title.startswith(ch.get("cn", "")):
+                    cur_key = ch["key"]
+                    break
+            seg.setdefault(cur_key, [])
+        seg.setdefault(cur_key, []).append(ln)
+    body = {k: "\n".join(v) for k, v in seg.items()}
+    out = {}
+    for c in _review_digest(review)["claims"]:
+        hit = []
+        for q in re.findall(r'[「“"《]([^」”"》]{4,})[」”"》]', c):
+            q = q.strip()
+            if len(q) >= 4:
+                hit += [k for k, t in body.items() if q in t]
+        if not hit:
+            for n in re.findall(r'\d+(?:\.\d+)?', c):
+                if len(n) >= 3:  # 太短的编号（如 3、1）在任何章节都会命中，不用于定位
+                    hit += [k for k, t in body.items() if n in t]
+        hit = sorted(set(hit) - {"__front__"})
+        if hit:
+            out[c] = hit
+    return out
+
+
+def _write_batches(paper_type: str, facts: str, retries: int = 1,
+                   review: dict | None = None) -> dict:
     """按类型规格分批调用 LLM 写作。
 
     单批失败（限流 / 坏 JSON / 超时）先重试一次：否则该批章节会退化成一句话的兜底，
     整篇会出现「前面一万字、结论一百字」的断裂。重试仍失败才回落到字段级兜底。
+
+    ``review`` 非空时进入重写模式：评审意见按批次字段分发，只让相关章节改动。
     """
     written: dict = {}
     for i, batch in enumerate(batches_for(paper_type), 1):
+        _rb = _review_block(review, batch.get("fields") or [])
+        if _rb:
+            _n = sum(1 for _ln in _rb.splitlines() if re.match(r'^\d+\. ', _ln))
+            print(f"[generate_paper·{paper_type}] 第 {i} 批带评审意见重写（{_n} 条）")
+        prompt = (facts + "\n\n" + _rb + "\n\n" + batch["prompt"]) if _rb else \
+                 (facts + "\n\n" + batch["prompt"])
         for attempt in range(retries + 1):
             try:
                 r = LLM.chat_json(
-                    facts + "\n\n" + batch["prompt"],
+                    prompt,
                     system=WRITER_SYSTEM + STYLE_RULES,
                     temperature=batch.get("temperature", 0.3),
                     max_tokens=batch.get("max_tokens", 4096),
@@ -2896,7 +3034,40 @@ def _build_non_experimental(base: Path, args, paper_type: str) -> int:
     chapters = chapters_for(paper_type)
     facts = build_fact_pack(paper_type, spec, refs, references_block)
 
-    written = _write_batches(paper_type, facts) if LLM.available() else {}
+    # 素材完备度前置检查：缺字段时先说清楚，不要等写出一万字空话才发现。
+    # 结果落 00_spec_check.json，闸门与人工复核都能看到「这篇是在什么素材密度下写的」。
+    try:
+        from paper.spec_check import check_spec, format_report
+        _sc = check_spec(paper_type, spec)
+        (base / "00_spec_check.json").write_text(
+            json.dumps(_sc, ensure_ascii=False, indent=2), encoding="utf-8")
+        for _line in format_report(_sc):
+            print(_line)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[generate_paper·{paper_type}] 素材完备度检查跳过：{_e}")
+
+    # 重写模式：上一轮评审官的意见写在 04_review.json。
+    # 非实验型此前完全不读这个文件，于是「G04 判 hard_fail」只能拦住，改不了。
+    _review = {}
+    _rp = base / "04_review.json"
+    if _rp.exists():
+        try:
+            _review = _load(_rp)
+            if isinstance(_review, dict) and _review:
+                _prev = base / "06_paper" / "paper_full.md"
+                _pm = _prev.read_text(encoding="utf-8") if _prev.exists() else ""
+                _dig = _review_digest(_review)
+                _review["_locate"] = _locate_claims(_review, _pm, chapters)
+                print(f"[generate_paper·{paper_type}] 带评审意见重写："
+                      f"{len(_dig['claims'])} 条指控 / {len(_dig['suggestions'])} 条建议"
+                      f"（已定位 {len(_review['_locate'])} 条）")
+            else:
+                _review = {}
+        except Exception as _e:  # noqa: BLE001
+            print(f"[generate_paper·{paper_type}] 评审意见读取失败，按首轮写作：{_e}")
+            _review = {}
+
+    written = _write_batches(paper_type, facts, review=_review) if LLM.available() else {}
     used_llm = bool(written)
     if not used_llm:
         print(f"[generate_paper·{paper_type}] 网关不可用，转确定性兜底骨架")

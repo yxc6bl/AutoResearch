@@ -5,6 +5,8 @@
     python verify_multitype.py --types case_study # 只验证某几类
     python verify_multitype.py --skip-build       # 复用已有产物，只跑闸门/评审
     python verify_multitype.py --eval             # 额外跑 EvalAgent（会调 LLM 评审官）
+    python verify_multitype.py --eval --rounds 2  # 评审不过就带意见重写一轮再复评
+    python verify_multitype.py --eval --rounds 3  # 最多三轮，取评审分最高的一版
 
 产物目录：out_verify_<paper_type>/
 """
@@ -266,33 +268,165 @@ def _eval(out: Path) -> dict:
         return {}
 
 
+def _needs_revise(v: dict, all_signals: bool = False) -> bool:
+    """本轮是否值得带意见重写。
+
+    2026-11-09 实测（三次两轮，真实 LLM）给出的经验：
+      - 因「硬编造」重写：1/1 改善（评审 72→78，幻觉 3→0）；
+      - 仅因「风格建议」重写：0/2 改善（72→62、74→72），都靠回滚才没退步。
+
+    所以默认只在评审官指得出具体编造时重写：那是可执行的删除指令；而「写深一点」
+    「补论证」这类建议没有事实锚点，模型容易在扩写时引入新细节，反而更差。
+    想强行试的用 ``--revise-all``。
+    """
+    lj = (v or {}).get("llm_judge") or {}
+    if not lj.get("available"):
+        return False
+    if lj.get("hallucinations"):
+        return True
+    return bool(all_signals and lj.get("verdict") == "revise")
+
+
+def _write_review_brief(out: Path, v: dict) -> int:
+    """把评审官的指控落成 04_review.json——这是写作端唯一读取的重写输入。"""
+    lj = (v or {}).get("llm_judge") or {}
+    brief = {
+        "hallucinations": lj.get("hallucinations") or [],
+        "unsupported_claims": lj.get("unsupported_claims") or [],
+        "suggestions": lj.get("suggestions") or [],
+        "round_source": "verify_multitype",
+    }
+    n = sum(len(brief[k]) for k in ("hallucinations", "unsupported_claims", "suggestions"))
+    (out / "04_review.json").write_text(
+        json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+    return n
+
+
+def _score_of(v: dict):
+    lj = (v or {}).get("llm_judge") or {}
+    if lj.get("available") and isinstance(lj.get("overall"), (int, float)):
+        return (float(lj["overall"]), -len(lj.get("hallucinations") or []))
+    return (float((v or {}).get("overall") or 0), 0)
+
+
+def _restore_best(out: Path, snapshot: Path, verdict_snap: Path) -> None:
+    """回滚正文与评审结论，并重转 Word——三者必须同源。"""
+    md = out / "06_paper" / "paper_full.md"
+    shutil.copy2(snapshot, md)
+    if verdict_snap.exists():
+        shutil.copy2(verdict_snap, out / "06_paper" / "07_eval_verdict.json")
+    try:
+        from paper.generate_paper import md_to_docx
+        md_to_docx(md.read_text(encoding="utf-8"),
+                   out / "06_paper" / "paper_full.docx", out)
+    except Exception as e:  # noqa: BLE001
+        print(f"    docx 重转失败（正文已回滚）：{e}")
+    # WRITE_STATUS 里的字数也要跟着回滚，否则「正文 13k 字、状态文件写 9k」自相矛盾
+    try:
+        import re as _re
+        sp = out / "06_paper" / "WRITE_STATUS.json"
+        st = json.loads(sp.read_text(encoding="utf-8"))
+        st["chinese_chars"] = len(_re.findall(r"[\u4e00-\u9fff]", md.read_text(encoding="utf-8")))
+        st["note"] = (st.get("note") or "") + "（已回滚到最优轮）"
+        sp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--types", default="", help="逗号分隔；默认全部非实验类型")
     ap.add_argument("--skip-build", action="store_true", help="不重新构建，只跑闸门")
     ap.add_argument("--eval", action="store_true", help="额外跑 EvalAgent（调 LLM 评审官）")
+    ap.add_argument("--rounds", type=int, default=0,
+                    help="写作轮数；默认带 --eval 时 2 轮（抓到编造就带意见重写），否则 1 轮")
+    ap.add_argument("--revise-all", action="store_true",
+                    help="连「只有风格建议」也触发重写（实测容易退步，仅用于试验）")
     ap.add_argument("--fetch-lit", action="store_true",
                     help="强制按 literature_query 重新检索真实文献（不复用旧结果）")
     args = ap.parse_args()
 
     pts = ([t.strip() for t in args.types.split(",") if t.strip()]
            or [k for k, v in PAPER_TYPES.items() if not v["requires_experiment"]])
+    rounds = args.rounds or (2 if args.eval else 1)
 
     print(f"LLM 可用性（子进程继承）：OPENAI_API_KEY={'set' if os.environ.get('OPENAI_API_KEY') else 'empty'}")
+    print(f"写作轮数上限：{rounds}")
     rows = []
     for pt in pts:
         out = ROOT / f"out_verify_{pt}"
         spec = _write_spec(out, pt)
         _ensure_literature(out, spec, force=args.fetch_lit)
+        try:
+            from paper.spec_check import check_spec, format_report
+            for _line in format_report(check_spec(pt, spec)):
+                print("    " + _line)
+        except Exception:
+            pass
+        # 首轮不能带上一轮的评审简报，否则会「无中生有地重写」
+        (out / "04_review.json").unlink(missing_ok=True)
+
         rc, tail = (0, "reused")
-        if not args.skip_build:
-            # 旧评分结论必须作废：否则重写论文后 G04 会拿上一版的 hard_fail 当现值
-            (out / "06_paper" / "07_eval_verdict.json").unlink(missing_ok=True)
-            rc, tail = _build(out)
-        _stubs(out, pt)
-        # 评审必须先于闸门：G04/G05/G10 读的是 07_eval_verdict.json，
-        # 先跑闸门只会得到「未找到评分门 → unknown」，把跑过的评审记成没跑。
-        v = _eval(out) if args.eval else {}
+        v: dict = {}
+        best = None
+        last_round = 0
+        hist: list[dict] = []
+        for rnd in range(1, rounds + 1):
+            if not args.skip_build or rnd > 1:
+                # 旧评分结论必须作废：否则重写论文后 G04 会拿上一版的 hard_fail 当现值
+                (out / "06_paper" / "07_eval_verdict.json").unlink(missing_ok=True)
+                rc, tail = _build(out)
+            _stubs(out, pt)
+            # 评审必须先于闸门：G04/G05/G10 读的是 07_eval_verdict.json，
+            # 先跑闸门只会得到「未找到评分门 → unknown」，把跑过的评审记成没跑。
+            v = _eval(out) if args.eval else {}
+            last_round = rnd
+            _mdp = out / "06_paper" / "paper_full.md"
+            _snap = out / "06_paper" / f"paper_full_round{rnd}.md"
+            _vsnap = out / "06_paper" / f"07_eval_verdict_round{rnd}.json"
+            if _mdp.exists():
+                shutil.copy2(_mdp, _snap)
+            if (out / "06_paper" / "07_eval_verdict.json").exists():
+                shutil.copy2(out / "06_paper" / "07_eval_verdict.json", _vsnap)
+            _sc = _score_of(v)
+            hist.append({"round": rnd, "chars": _chars(out),
+                         "rule": (v or {}).get("overall"),
+                         "judge": (v.get("llm_judge") or {}).get("overall"),
+                         "hallucinations": len(((v.get("llm_judge") or {}).get("hallucinations")) or []),
+                         "revise": _needs_revise(v, args.revise_all)})
+            print(f"    第 {rnd} 轮：字 {_chars(out)} 规则分 {(v or {}).get('overall')} "
+                  f"评审 {(v.get('llm_judge') or {}).get('overall')} "
+                  f"幻觉 {len(((v.get('llm_judge') or {}).get('hallucinations')) or [])}")
+            if best is None or _sc > best[0]:
+                best = (_sc, rnd, _snap, _vsnap)
+            if rnd < rounds and _needs_revise(v, args.revise_all):
+                _n = _write_review_brief(out, v)
+                if _n:
+                    print(f"    评审要求修订（{_n} 条）→ 写 04_review.json，带意见重写…")
+                    continue
+            break
+        if best and best[1] != last_round and best[2].exists():
+            _restore_best(out, best[2], best[3])
+            print(f"    已回滚到第 {best[1]} 轮（评分更高），正文/评审/docx 同源")
+            # 回滚后必须重读结论：否则下面打印的仍是最后一轮（较差那版）的门与分数，
+            # 出现「正文已回滚、日志仍说 hard_fail」的自相矛盾。
+            try:
+                v = json.loads((out / "06_paper" / "07_eval_verdict.json")
+                               .read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        if rounds > 1 and hist:
+            try:
+                (out / "06_paper" / "REVIEW_ROUNDS.json").write_text(json.dumps({
+                    "paper_type": pt, "rounds": hist,
+                    "best_round": best[1] if best else None,
+                    "last_round": last_round,
+                    "note": "最优轮若不是最后一轮，paper_full.md / 07_eval_verdict.json / "
+                            "paper_full.docx 已一并回滚到该轮。",
+                }, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
         g = _gates(out)
         hit, total = _structure(out, pt)
         used_llm = _used_llm(out)

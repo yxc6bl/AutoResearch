@@ -1363,6 +1363,10 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
                     verdict["issues"].append("评审意见（非编造）：" + _s)
             _lj_bad = bool(_hard_hall)
             if _lj_bad:
+                # 硬幻觉必须触发重写：评审官有时会一边列出编造、一边仍写 verdict=pass，
+                # 而主流水线的回滚闭环只认 revise。以前这里只改 gate，于是
+                # 「G04 判了 hard_fail」却没有下一轮改写，问题被拦下却永远修不掉。
+                _lj["verdict"] = "revise"
                 verdict["issues"].insert(0, "LLM评审官发现疑似幻觉：" + "；".join(_lj["hallucinations"][:5]))
                 verdict["suggestions"].insert(0, "按 LLM 评审官意见回滚改写，消除虚构数字/事实")
                 verdict["gate"] = "hard_fail"
