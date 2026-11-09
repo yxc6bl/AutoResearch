@@ -2955,6 +2955,17 @@ def _build_non_experimental(base: Path, args, paper_type: str) -> int:
     parts.append(_acknowledgements() + "\n")
 
     paper = "\n".join(parts)
+    # 文献使用反馈：非实验型不走文献反馈 Agent，但「入选多少篇、正文真正引了多少篇」
+    # 在拼装时就能数准，写出来让 G09（文献真正用进正文）可判，而不是永远 unknown。
+    _cited = sorted({int(x) for x in re.findall(r'\[(\d+)\]', paper)
+                     if 1 <= int(x) <= len(refs)})
+    try:
+        (base / "05_lit_feedback.json").write_text(json.dumps({
+            "paper_type": paper_type, "n_selected": len(refs), "n_cited": len(_cited),
+            "cited_numbers": _cited,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[generate_paper·{paper_type}] 文献反馈写入失败：{_e}")
     meta = {"used_llm": used_llm, "sections": sorted(written.keys()), "n_refs": len(refs)}
     return _finalize_paper(base, paper, args, meta, chapters, spec, facts, paper_type)
 

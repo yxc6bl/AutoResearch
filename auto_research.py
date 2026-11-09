@@ -270,6 +270,23 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
     if lit_path.exists() and not force:
         _need_fetch = False
         print(f"[literature] 复用已有 {lit_path.name}（--force 可强制重抓）")
+    # 复用缓存文献时补做一次审评：否则 G08 永远是 unknown，覆盖缺口/冗余没人看，
+    # 「复用」变成「不检查」。审评只看已有清单，不重新联网抓取。
+    if lit_path.exists() and not (out_dir / "04_literature_review.json").exists():
+        try:
+            _lp = json.loads(lit_path.read_text(encoding="utf-8"))
+            _papers = _lp.get("papers") or []
+            if _papers:
+                ra = _load_module(ROOT / "agents" / "literature_review_agent.py", "lr_agent")
+                _topic = (spec.get("title") or spec.get("topic") or spec.get("direction")
+                          or spec.get("research_question") or spec.get("literature_query") or "")
+                _lrev = ra.run(_topic, _papers, _lp.get("candidates"))
+                (out_dir / "04_literature_review.json").write_text(
+                    json.dumps(_lrev, ensure_ascii=False, indent=2), encoding="utf-8")
+                print(f"[ReviewAgent] 补审缓存文献：覆盖 {_lrev.get('coverage_score')}/10，"
+                      f"缺口 {len(_lrev.get('missing_themes') or [])} 项")
+        except Exception as e:  # noqa: BLE001
+            print(f"[ReviewAgent] 缓存文献审评跳过：{e}")
     if _need_fetch:
         try:
             ga = _load_module(ROOT / "agents" / "literature_gather_agent.py", "lg_agent")

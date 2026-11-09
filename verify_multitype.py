@@ -160,6 +160,20 @@ def _ensure_literature(out: Path, spec: dict, force: bool = False) -> str:
         print(f"    检索文献：rc={r.returncode} -> {'ok' if lit.exists() else 'FAIL'}")
     elif not lit.exists() and LIT_SRC.exists():
         shutil.copy2(LIT_SRC, lit)
+    # 有文献清单就补一次覆盖审评：否则 G08 在该目录永远是 unknown，
+    # 「没检查」会被误读成「检查了没问题」。
+    rev = out / "04_literature_review.json"
+    if lit.exists() and not rev.exists():
+        r = subprocess.run(
+            [sys.executable, "agents/literature_review_agent.py",
+             "--lit", str(lit), "--topic", spec.get("topic") or spec.get("title", "")],
+            cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300)
+        try:
+            rev.write_text(r.stdout, encoding="utf-8")
+            print("    文献审评：ok")
+        except Exception:
+            print(f"    文献审评失败：rc={r.returncode}")
     return str(lit)
 
 
@@ -180,9 +194,13 @@ def _stubs(out: Path, pt: str) -> None:
         "markdown_exists": md.exists(), "docx_exists": docx.exists(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    with (out / "00_trace.jsonl").open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"step": "write", "ok": True, "paper_type": pt},
-                           ensure_ascii=False) + "\n")
+    # 字段名必须与 engine/gates.py G11 的读法一致（stage/status）；写 step/ok 会被读成
+    # status=None，于是「一次都没失败的运行」被记成失败阶段 [None]，G11 假失败。
+    # 用覆盖写而非追加：旧版残留的坏行会一直留在文件里污染判定。
+    (out / "00_trace.jsonl").write_text(
+        json.dumps({"stage": "write", "status": "ok", "paper_type": pt},
+                   ensure_ascii=False) + "\n",
+        encoding="utf-8")
 
 
 def _build(out: Path) -> tuple[int, str]:
@@ -272,6 +290,9 @@ def main() -> int:
             (out / "06_paper" / "07_eval_verdict.json").unlink(missing_ok=True)
             rc, tail = _build(out)
         _stubs(out, pt)
+        # 评审必须先于闸门：G04/G05/G10 读的是 07_eval_verdict.json，
+        # 先跑闸门只会得到「未找到评分门 → unknown」，把跑过的评审记成没跑。
+        v = _eval(out) if args.eval else {}
         g = _gates(out)
         hit, total = _structure(out, pt)
         used_llm = _used_llm(out)
@@ -292,7 +313,6 @@ def main() -> int:
               f"expected_fail={rows[-1]['expected']} | {tail}")
 
         if args.eval:
-            v = _eval(out)
             lj = (v or {}).get("llm_judge") or {}
             print(f"    eval gate={v.get('gate')} overall={v.get('overall')} "
                   f"judge_available={lj.get('available')} "

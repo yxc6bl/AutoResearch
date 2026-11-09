@@ -164,6 +164,26 @@ def check_structure(md: str):
     return max(0, score), missing_core, missing_rec
 
 
+def _points_at_text(md: str, claim: str, gt: str = "") -> bool:
+    """幻觉指控是否指得出「文中出现、但素材里没有」的具体文本。
+
+    评审官常把「文献罗列未结合实践」「这里该补实验」写成 hallucinations，
+    那是质量意见，不是编造。硬门只认指得出证据的指控：要么引了原文片段，
+    要么点了文中出现的具体数字——且该内容在事实素材里找不到依据。
+    """
+    # 去掉章节号与引用编号，否则「第2章」「[27]」会被当成数字证据
+    s = re.sub(r'\[\d+\]', ' ', claim)
+    s = re.sub(r'第?\s*\d+(?:[.\-–]\d+)?\s*[章节]', ' ', s)
+    for q in re.findall(r'[「“"《]([^」”"》]{6,})[」”"》]', s):
+        q = q.strip()
+        if q and q in md and (not gt or q not in gt):
+            return True
+    for n in re.findall(r'\d+(?:\.\d+)?%?', s):
+        if n in md and (not gt or n not in gt):
+            return True
+    return False
+
+
 def check_references(md: str):
     """参考文献与正文 [N] 引用对应 + 真实数字承载（计入 methodology 维度）。"""
     issues = []
@@ -282,16 +302,29 @@ def _slice_chapter(md: str, start_hint: str, end_hints):
     return "\n".join(lines[start:end])
 
 
-def check_topic_significance(md: str):
+def check_topic_significance(md: str, paper_type: str = "method_comparison"):
     """选题意义维度：绪论是否陈述「现实/理论相关性」与「研究空白」。
 
     依据：清华「选题好、有现实意义」；北大①选题是否具有理论或实践意义；
-    哈工大选题(10%)「有实际应用背景与可操作性，具备理论和现实意义」；
+    哈工大选题(10)「有实际应用背景与可操作性，具备理论和现实意义」；
     东北大学选题质量18%「理论意义或实际意义」。
     判定用信号词而非字面「研究意义」四字，避免误伤（如本文绪论以
     "乳腺癌早期筛查依赖…" 表相关性、"尚缺乏…严格量化比较" 表空白）。
+
+    首章标题按论文类型取（技术报告是「概述」、开题是「研究背景与意义」），
+    写死「第1章 绪论」会让这两类整章切片为空、误判 0 分。
     """
-    intro = _slice_chapter(md, "第1章 绪论", ["第2章", "国内外研究现状"])
+    intro = ""
+    try:
+        from paper.thesis_template import chapters_for
+        _chs = chapters_for(paper_type)
+    except Exception:
+        _chs = []
+    if _chs:
+        _ends = [c["cn"] for c in _chs[1:3]] or ["参考文献"]
+        intro = _slice_chapter(md, _chs[0]["cn"], _ends)
+    if not intro:
+        intro = _slice_chapter(md, "第1章 绪论", ["第2章", "国内外研究现状"])
     if not intro:
         intro = _slice_chapter(md, "绪论", ["国内外研究现状", "研究方法"])
     text = intro or ""
@@ -309,13 +342,105 @@ def check_topic_significance(md: str):
     return score, issues
 
 
-def check_methodology(md: str):
+_NON_EXP_CRITERIA = {
+    "survey": [
+        ("检索策略", "文献检索与分析方法", r'检索|数据库|关键词|纳入|排除|筛选'),
+        ("主题分类框架", "研究主题分类框架", r'分类|主题|框架|维度|归类'),
+        ("争论与共识", "研究趋势与争论", r'争论|分歧|共识|争议|不同观点|相左'),
+        ("趋势与开放问题", "开放问题与未来方向", r'趋势|开放|未来|尚未解决|挑战'),
+    ],
+    "system_design": [
+        ("需求与约束", "需求分析", r'功能|非功能|需求|用例|约束'),
+        ("架构与模块划分", "总体架构设计", r'架构|分层|模块|组件|接口'),
+        ("关键技术选型", "关键技术与难点", r'算法|技术选型|协议|框架|难点'),
+        ("验证与测试方案", "系统验证与测试", r'测试|验证|指标|用例|压测'),
+    ],
+    "case_study": [
+        ("资料类型与来源", "研究设计与案例选择", r'资料|文档|访谈|问卷|记录|来源'),
+        ("分析框架", "理论基础与文献回顾", r'框架|模型|维度|理论'),
+        ("事实与推断分离", "案例分析", r'素材事实|本文推断|推断|表明'),
+        ("多源交叉印证", "案例分析", r'交叉|印证|三角|多源|相互验证|对照'),
+    ],
+    "technical_report": [
+        ("实施过程", "实施过程", r'阶段|步骤|工作项|流程|里程碑'),
+        ("问题与处置", "问题与改进", r'问题|风险|处置|解决|改进|偏差'),
+        ("验收与指标", "结果与验证", r'验收|指标|验证|测试|对比'),
+        ("可复现性", None, r'环境|版本|配置|部署|复现'),
+    ],
+    "research_proposal": [
+        ("研究问题", "研究问题与目标", r'研究问题|目标|假设|边界'),
+        ("方法路线", "研究内容与方法", r'方法|路线|方案|设计'),
+        ("进度安排", "进度安排与预期成果", r'进度|阶段|时间|安排|计划'),
+        ("可行性", "技术路线与可行性", r'可行性|条件|基础|风险|保障'),
+    ],
+}
+
+
+def _chapter_text(md: str, name: str | None) -> str:
+    """取某一章正文（从含 name 的标题到下一个二级标题）。name=None 时返回全文。"""
+    if not name:
+        return md
+    lines = md.splitlines()
+    start = None
+    for i, l in enumerate(lines):
+        if re.match(r'^#{1,3}\s+.*' + re.escape(name), l):
+            start = i
+            break
+    if start is None:
+        return ""
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if re.match(r'^#{1,2}\s+', lines[j]):
+            end = j
+            break
+    return "\n".join(lines[start:end])
+
+
+def _methodology_non_exp(md: str, paper_type: str):
+    """非实验型的方法维度：按类型看「该做的事有没有做」，不拿消融/基线扣分。
+
+    综述没有对比基线、设计报告没有消融实验、开题报告还没做实验——用实验型
+    标尺量它们，只会得到与论文质量无关的低分。
+
+    判定落在**对应章节**上，而不是全文任意出现关键词：要求该章确有实质篇幅
+    （≥250 字）且含该要素，避免「全文随便提过一句」就拿满分。
+    """
+    crit = _NON_EXP_CRITERIA.get(paper_type) or _NON_EXP_CRITERIA["technical_report"]
+    issues, hit = [], 0
+    for name, chap, pat in crit:
+        body = _chapter_text(md, chap)
+        ok = len(body.strip()) >= 250 and bool(re.search(pat, body, re.I))
+        if ok:
+            hit += 1
+        else:
+            where = f"「{chap}」章" if chap else "全文"
+            issues.append(f"{where}缺少「{name}」的实质论述（{paper_type} 类论文的必备要素）")
+    score = round(100 * hit / len(crit))
+    ref_score, ref_issues = check_references(md)
+    for i in ref_issues:
+        issues.append("引用/真实性：" + i)
+    if any('不存在' in i or '找不到' in i for i in ref_issues):
+        score -= 20
+    if any('未被正文引用' in i for i in ref_issues):
+        score -= 10
+    return max(0, min(100, score)), issues
+
+
+def check_methodology(md: str, paper_type: str = "method_comparison"):
     """专业能力·方法与内容维度（权重最高 33%）。
 
-    依据：哈工大研究方法及内容(35%)「研究方案科学合理；数据来源可靠，
+    依据：哈工大研究方法及内容(35)「研究方案科学合理；数据来源可靠，
     分析论证设计正确，结论可信」；东北大学能力水平52%；中科大专业能力。
-    综合三项：实验严谨度 + 真实数字承载 + 引用对应。
+    实验型综合三项：实验严谨度 + 真实数字承载 + 引用对应；
+    非实验型改按类型要素核查（见 _methodology_non_exp）。
     """
+    if paper_type not in ("method_comparison", ""):
+        try:
+            from paper.thesis_template import is_experimental
+            if not is_experimental(paper_type):
+                return _methodology_non_exp(md, paper_type)
+        except Exception:
+            pass
     issues = []
     exp = _slice_chapter(md, "实验设置与数据", ["实验结果与分析"]) or ""
     exp += _slice_chapter(md, "实验结果与分析", ["深入分析与"]) or ""
@@ -1060,6 +1185,9 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
     md = Path(paper_path).read_text(encoding="utf-8")
     verdict = {"passed": False, "gate": "hard_fail", "scores": {}, "issues": [], "suggestions": []}
 
+    # 全文只认一次论文类型：后续每个维度都按类型取标尺，避免「实验型标尺量非实验论文」。
+    _pt = _paper_type_of(md)
+
     # 预载实验事实（ground truth），供创新/质量画像判定「忠实复现 vs 方法贡献」。
     # 必须在 check_innovation（用到 _faithful）之前完成加载与派生，避免未赋值错误。
     _analysis_path = Path(paper_path).resolve().parent.parent / "03_experiment.json"
@@ -1093,7 +1221,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
         verdict["issues"].append("真实性硬门：" + h)
 
     # 1) 选题意义
-    ts, ts_is = check_topic_significance(md)
+    ts, ts_is = check_topic_significance(md, _pt)
     verdict["scores"]["topic_sig"] = ts
     for i in ts_is:
         verdict["issues"].append("选题意义：" + i)
@@ -1124,7 +1252,7 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
         verdict["suggestions"].append("建议补充推荐章节：" + "、".join(mr))
 
     # 4) 专业能力·方法与内容
-    mth, mth_is = check_methodology(md)
+    mth, mth_is = check_methodology(md, _pt)
     verdict["scores"]["methodology"] = mth
     for i in mth_is:
         verdict["issues"].append("专业能力：" + i)
@@ -1223,7 +1351,17 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             "available": False, "reason": "bad_result"}
         if _lj.get("available"):
             verdict["llm_judge"] = _lj
-            _lj_bad = bool(_lj.get("hallucinations"))
+            _hard_hall, _soft_hall = [], []
+            for _h in [str(x) for x in (_lj.get("hallucinations") or [])]:
+                (_hard_hall if _points_at_text(md, _h, _gt_info.get("gt", ""))
+                 else _soft_hall).append(_h)
+            if _soft_hall:
+                # 保留痕迹但不阻断：让读者看到评审官的意见，也不让它凭印象判死一篇稿
+                _lj["hallucinations"] = _hard_hall
+                _lj["soft_findings"] = _soft_hall
+                for _s in _soft_hall[:5]:
+                    verdict["issues"].append("评审意见（非编造）：" + _s)
+            _lj_bad = bool(_hard_hall)
             if _lj_bad:
                 verdict["issues"].insert(0, "LLM评审官发现疑似幻觉：" + "；".join(_lj["hallucinations"][:5]))
                 verdict["suggestions"].insert(0, "按 LLM 评审官意见回滚改写，消除虚构数字/事实")
@@ -1245,6 +1383,19 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
             grade = name
             break
     verdict["grade"] = grade
+    # 自评与独立评审的偏离度：规则分只看「要素齐不齐」，评审官看「说得通不通」。
+    # 两者差得远时，以独立评审为准提示修改，避免结构化写作把分数抬成「良好」却没人读得下去。
+    _ljo = (verdict.get("llm_judge") or {}).get("overall")
+    if isinstance(_ljo, (int, float)):
+        gap = round(overall - float(_ljo), 1)
+        verdict["self_eval_gap"] = gap
+        if gap >= 15:
+            verdict["issues"].append(
+                f"自评偏高：规则评分 {overall}，独立评审 {_ljo}，相差 {gap} 分")
+            verdict["suggestions"].append(
+                "按独立评审意见逐条修改正文（规则分只核要素齐备，不核论证质量）")
+            verdict["grade_note"] = (f"等级按规则分给出（{overall}），但独立评审仅 {_ljo} 分；"
+                                     f"对外自评请以独立评审为准")
     # 幻觉拦截必须参与最终裁决。此前这里只用确定性一致性重算 hard_ok，
     # 把上面第 10 步刚设的 gate=hard_fail / passed=False 又覆盖回 hard_pass，
     # 导致「评审官查出幻觉、评分门却给 99 分优秀并通过」——实测已复现。
@@ -1284,6 +1435,16 @@ def main():
             cands = d if isinstance(d, list) else (d.get("papers") or d.get("candidates") or [])
         except Exception:
             cands = None
+    if cands is None:
+        # 没显式传 --lit 时，自动读论文目录上一级的 01_literature.json：
+        # 否则 60 篇真文献在盘上，评审官却按「0 篇」给 literature 判 24 分。
+        _lp = Path(args.paper).resolve().parent.parent / "01_literature.json"
+        if _lp.exists():
+            try:
+                d = json.loads(_lp.read_text(encoding="utf-8"))
+                cands = d if isinstance(d, list) else (d.get("papers") or d.get("candidates") or [])
+            except Exception:
+                cands = None
     v = run(args.paper, lit_candidates=cands, out_path=args.out, mode=args.mode)
     print(json.dumps(v, ensure_ascii=False, indent=2))
     sys.exit(0 if v["passed"] else 1)
