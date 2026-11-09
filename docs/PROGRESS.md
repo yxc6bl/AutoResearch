@@ -581,3 +581,18 @@ post-commit hook 已装（提交后异步 push，失败写 `.git/sync.log`、不
 会让某次提交漏推。现给 `--auto` 加最多 3 次重试（仅对网络类错误重试，间隔 2 秒；
 认证/权限类错误立即报错），并给 `git()` 子进程统一加 120 秒超时。
 本次提交用于验证：一次普通 commit 后无需任何手动操作，远端 HEAD 自动追平。
+
+### 15.3 代理对 github.com 的 CONNECT 限制（当前唯一遗留）
+
+12:29 起连续出现 `CONNECT tunnel failed, response 502` / `Empty reply from server`。
+诊断：同一本地代理 `127.0.0.1:5717` 访问 `api.github.com` 返回 **200**，
+访问 `github.com` 返回 **000/502**；绕过代理直连 `github.com:443` 也超时。
+即代理当前只放行 API 域名、不放行 git 智能 HTTP 域名，与凭据、仓库、代码都无关
+（12:27 的 49 提交推送成功可作反证）。重试扩到 5 次、覆盖 502/Empty reply/
+CONNECT tunnel failed 等网络错误，`git()` 统一加 120 秒超时。
+
+**遗留**：12:29 之后产生的若干文档/脚本提交暂未推送，本地领先若干个提交。
+网络恢复后任意一次提交会由 hook 自动把它们一起推走，或手动跑一次
+`python scripts/github_sync.py`。远端 `b592740` 已包含完整工程、全部数据与文档，
+只是同步状态记录与 hook 重试修复这两处文本不是最新版；
+最新代码同时已打进 `dist/AutoResearch_share_<日期>.zip`，不依赖 GitHub 也能交付。

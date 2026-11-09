@@ -189,9 +189,11 @@ def sync(message: str | None, auto: bool, dry_run: bool) -> int:
     # 否则一次抖动就漏推，要等下次提交才把两次一起带走。
     _retryable = ("schannel", "closed abruptly", "timed out", "timeout",
                   "could not resolve", "unable to access", "ssl", "tls",
-                  "connection reset", "early eof")
+                  "connection reset", "early eof", "empty reply", "502",
+                  "connect tunnel failed", "proxy connect aborted",
+                  "failed to connect")
     err, p = "", None
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):
         try:
             p = git("push", "-u", "origin", f"HEAD:{branch}", extra_config=cfg)
         except subprocess.TimeoutExpired:
@@ -207,9 +209,9 @@ def sync(message: str | None, auto: bool, dry_run: bool) -> int:
             err = (p.stderr or p.stdout or "").strip()
         if not any(k in err.lower() for k in _retryable):
             break  # 认证 / 权限类错误重试没意义
-        if attempt < 3:
-            log(f"第 {attempt} 次遇到网络抖动，2 秒后重试：{err[-160:]}")
-            time.sleep(2)
+        if attempt < 5:
+            log(f"第 {attempt} 次遇到网络抖动，3 秒后重试：{err[-160:]}")
+            time.sleep(3)
     log(f"推送失败：{err[-600:]}")
     print("[sync] 推送失败：", err[-600:])
     print("        若提示认证失败：设 GITHUB_TOKEN 后重试，或首次推送时完成 GCM 弹窗授权")
