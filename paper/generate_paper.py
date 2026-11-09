@@ -505,7 +505,7 @@ def _cite_tail(r: dict) -> str:
     return tail
 
 
-def _role_citation_block(refs: list[dict], heading: str | None = "### 2.x 代表性工作的路线归类",
+def _role_citation_block(refs: list[dict], heading: str | None = None,
                          neutral: bool = False) -> str:
     """第2章「按角色归类」的文献使用块。
 
@@ -2128,7 +2128,8 @@ def main() -> int:
     parts.append(written.get("related", "").strip() + "\n")
     # 确定性「按角色归类」引用块：保证所有入选文献均被正文引用（满足 EvalAgent 引用对应硬要求），
     # 同时以「方法/理论/基准/综述」四维组织，提升综述结构分。
-    _rc = _role_citation_block(refs)
+    _rc = _role_citation_block(
+        refs, heading=f"### {CHAPTER_BY_KEY['related']['no']}.1 代表性工作的路线归类")
     if _rc:
         parts.append(_rc + "\n")
 
