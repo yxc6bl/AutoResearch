@@ -724,3 +724,27 @@ response 502`（直连 `github.com:443` 也超时），`d6a490d` 暂留本地。
 
 注意系统设计的「规则分 93.9 / 评审 72.0」：差 21.9 分仍然说明结构齐备而论证一般，
 自评偏差提示会照常标出来。三篇都能过门，不等于三篇都能直接交。
+
+### 17.6 主链路跑批暴露的三个死锁
+
+用 `auto_research.py run --paper-type technical_report` 走真实主链路（不是 verify）。
+当时网关不稳：Semantic Scholar 握手超时、文献精读 LM 驱动=False、评审官
+`gateway_unavailable`。正文照样写出 10,802 字、59 篇文献全部被引，但最终判「不可交付」，
+卡在 G04 未验证。顺着查，三处都是**一次抖动就永久记账**：
+
+1. **负缓存不过期**：`llm_client.available()` 的探测只有 6 秒、1 次尝试，失败就把
+   `_CACHE_AVAIL=False` 永久写进进程。之后同一进程里的评审官、文献精读、正文兜底
+   全部跳过——网关已恢复，整篇还在走模板。改成负缓存 30 秒 TTL，可用结果仍永久缓存。
+2. **评审官不复探**：`llm_judge` 见 `available()==False` 直接返回缺席。现在先
+   `reset_cache()`、等 3 秒复探一次，把瞬时抖动与真断网区分开。
+3. **G03 判据是循环的**：G03「模型参与写作」读 `DELIVERY_STATUS.deliverable`，
+   而那个字段正是闸门自己写回去的裁决。一次因 G04 未验证被标不可交付，后续评审补齐后
+   G03 仍拿着「已标不可交付」继续判 fail，**产物永久钉死**。改为读
+   `WRITE_STATUS.llm_written`（写作端的第一手记录），并让 `sync_delivery` 支持反向同步。
+
+修完重算同一份产物：G03 pass（13 节、10,802 字）、G04 pass（评审 68、0 幻觉）、
+G07 fail（P2，文献只做了关键词筛选）、`deliverable=true`、`blocking=[]`。
+
+G03 改了判定输入，专门做了一次边界回归：模板稿 `llm_written=false` 仍 fail、
+遗留「不可交付」目录在模型确实写过时 pass、只有 DELIVERY 而无 `llm_written` 仍 unknown。
+全量 `out_*` 目录重算一遍，五个 `out_verify_*` 全部 11/11 可交付，没有回退。

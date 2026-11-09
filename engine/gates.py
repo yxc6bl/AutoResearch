@@ -48,7 +48,7 @@ CATALOG = [
      "artifact": "06_paper/paper_full.md", "rule": "正文汉字数 ≥ 6000（与 mark_delivery 同口径）",
      "action": "模板骨架稿不可交付，等模型恢复后重跑写作", "authority": "系统拒绝；人工放行需书面确认"},
     {"id": "G03", "level": "P0", "stage": "write", "name": "模型参与写作",
-     "artifact": "06_paper/DELIVERY_STATUS.json", "rule": "deliverable=true 且 llm_written 不为 False",
+     "artifact": "06_paper/WRITE_STATUS.json", "rule": "llm_written 不为 False（读写作产物，不读交付裁决）",
      "action": "确定性降级稿仅用于自测/定位链路", "authority": "系统拒绝；人工放行需书面确认"},
     {"id": "G04", "level": "P0", "stage": "eval", "name": "零编造硬门",
      "artifact": "06_paper/07_eval_verdict.json",
@@ -147,32 +147,36 @@ def _evaluate_one(out: Path, meta: dict) -> dict:
                 else fail(f"正文仅 {n} 个汉字（门槛 6000，与 mark_delivery 同口径）"))
 
     if gid == "G03":
-        d, exists = _json(out, meta["artifact"])
-        if not exists:
-            return unknown("未写 DELIVERY_STATUS.json；无法判定模型是否参与写作")
-        if d is None:
+        # 判据只能是「模型有没有真的写」，不能读 deliverable——那个字段是闸门自己的
+        # 输出（sync_delivery 把裁决写回 DELIVERY_STATUS）。读它等于循环论证：
+        # 一次因 G04 未验证被标不可交付，后续哪怕评审补齐，G03 也会拿着这句
+        # 「已标不可交付」继续判 fail，永远翻不了身（实测踩到过）。
+        ws = out / "06_paper" / "WRITE_STATUS.json"
+        w = None
+        if ws.exists():
+            try:
+                w = json.loads(ws.read_text(encoding="utf-8"))
+            except Exception:
+                w = None
+        if isinstance(w, dict) and w.get("llm_written") is not None:
+            if w.get("llm_written") is False:
+                return fail("WRITE_STATUS.llm_written=False（走了确定性模板骨架）")
+            return pass_(f"WRITE_STATUS 记录模型参与写作，"
+                         f"llm_sections={len(w.get('llm_sections') or [])} 节，"
+                         f"汉字 {w.get('chinese_chars')}")
+        dp = out / "06_paper" / "DELIVERY_STATUS.json"
+        if not dp.exists():
+            return unknown("未写 WRITE_STATUS.json / DELIVERY_STATUS.json；"
+                           "无法判定模型是否参与写作")
+        try:
+            d = json.loads(dp.read_text(encoding="utf-8"))
+        except Exception:
             return fail("DELIVERY_STATUS.json 无法解析")
-        if d.get("deliverable") is False:
-            return fail("已标不可交付：" + "；".join(d.get("reasons") or []))
         if d.get("llm_written") is False:
             return fail("llm_written=False（走了确定性模板骨架）")
         if d.get("llm_written") is None:
-            # 兼容旧目录：DELIVERY_STATUS 可能没记 llm_written，但生成器会单独写
-            # 06_paper/WRITE_STATUS.json（含 llm_sections），以该文件为准。
-            ws = out / "06_paper" / "WRITE_STATUS.json"
-            if ws.exists():
-                try:
-                    w = json.loads(ws.read_text(encoding="utf-8"))
-                except Exception:
-                    w = None
-                if isinstance(w, dict) and w.get("llm_written") is not None:
-                    if w.get("llm_written") is False:
-                        return fail("WRITE_STATUS.llm_written=False（走了确定性模板骨架）")
-                    return pass_(f"WRITE_STATUS 记录模型参与写作，"
-                                 f"llm_sections={len(w.get('llm_sections') or [])} 节")
             return unknown("DELIVERY_STATUS 未记录 llm_written，模型参与情况未验证")
-        return pass_(f"deliverable=true，llm_written={d.get('llm_written')}，"
-                     f"汉字 {d.get('chinese_chars')}")
+        return pass_(f"llm_written={d.get('llm_written')}，汉字 {d.get('chinese_chars')}")
 
     if gid in ("G04", "G05", "G10"):
         d, exists = _json(out, meta["artifact"])
@@ -387,6 +391,14 @@ def sync_delivery(out, rep: dict | None = None) -> dict | None:
         d["reasons"] = (d.get("reasons") or []) + [
             "P0 闸门未通过/未验证：" + "、".join(why)]
         d["hint"] = "不可交付：以 07_gate_report.json 的 P0 裁决为准"
+    elif dec["deliverable"] and d.get("deliverable") is False:
+        # 反向同步：补齐评审后重算，状态必须能回到「可交付」。
+        # 以前只写不回，一次瞬时失败（如评审官网关不可用）就把产物永久钉死，
+        # 用户重跑评审也翻不了身。
+        d["deliverable"] = True
+        d["reasons"] = [r for r in (d.get("reasons") or [])
+                        if not str(r).startswith("P0 闸门")]
+        d["hint"] = "可交付：以 07_gate_report.json 的 P0 裁决为准"
     try:
         p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:

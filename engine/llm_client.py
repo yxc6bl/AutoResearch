@@ -114,6 +114,11 @@ def _client_or_none():
 
 
 _CACHE_AVAIL: bool | None = None
+# 「不可用」不能永久缓存：探测只有 6 秒、1 次尝试，网关偶发 429/握手超时就会把它判死。
+# 一旦永久置 False，同一个进程里的后续所有调用（评审官、文献精读、正文兜底）全部跳过，
+# 表现为「明明网关已恢复，整篇论文还在走模板」。所以负结果只缓存 _NEG_TTL 秒。
+_CACHE_AT: float = 0.0
+_NEG_TTL: float = 30.0
 
 
 # ── 全局节流（信号量 + 最小间隔） ────────────────────────────────────────
@@ -186,14 +191,21 @@ def calls() -> int:
 
 
 def available() -> bool:
-    """网关是否可用。带一次性缓存，避免每次调用都握手。"""
-    global _CACHE_AVAIL
-    if _CACHE_AVAIL is not None:
-        return _CACHE_AVAIL
+    """网关是否可用。带缓存：可用结果永久缓存，不可用只缓存 30 秒。
+
+    负缓存必须过期，否则一次探测超时会毒化整个进程（见 _NEG_TTL 的注释）。
+    """
+    global _CACHE_AVAIL, _CACHE_AT
+    now = time.time()
+    if _CACHE_AVAIL is True:
+        return True
+    if _CACHE_AVAIL is False and (now - _CACHE_AT) < _NEG_TTL:
+        return False
     try:
         c = _client_or_none()
         if c is None:
             _CACHE_AVAIL = False
+            _CACHE_AT = now
             return False
         client, model, extra = c
         # 轻握手：极小 prompt 验证连通性与鉴权（带限流感知重试）
@@ -204,12 +216,14 @@ def available() -> bool:
         _CACHE_AVAIL = True
     except Exception:
         _CACHE_AVAIL = False
+    _CACHE_AT = now
     return _CACHE_AVAIL
 
 
 def reset_cache() -> None:
-    global _CACHE_AVAIL
+    global _CACHE_AVAIL, _CACHE_AT
     _CACHE_AVAIL = None
+    _CACHE_AT = 0.0
 
 
 def _is_fatal(exc) -> bool:

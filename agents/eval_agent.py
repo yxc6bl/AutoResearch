@@ -1110,7 +1110,17 @@ def llm_judge(paper_path, analysis: dict, lit_count: int = 0, mode: str = "gener
     }
     """
     if not LLM.available():
-        return {"available": False, "reason": "gateway_unavailable"}
+        # 探测只有 6 秒、1 次尝试：网关偶发 429 或握手超时就会把评审官判成缺席，
+        # 而 G04 会把「评审官未介入」记为未验证、严格模式直接拒绝交付。
+        # 这里复探一次，把「瞬时抖动」和「真的连不上」区分开——宁可多等 3 秒，
+        # 也不要让一篇正文完好的论文因为一次 ping 失败就变成不可交付。
+        try:
+            LLM.reset_cache()
+            time.sleep(3)
+        except Exception:
+            pass
+        if not LLM.available():
+            return {"available": False, "reason": "gateway_unavailable"}
     try:
         md = Path(paper_path).read_text(encoding="utf-8")
     except Exception:
