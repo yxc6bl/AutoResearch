@@ -562,3 +562,14 @@ Tokens (classic)/Note/7 days/只勾 repo/Generate/复制 `ghp_`/贴给我），�
 
 post-commit hook 已装（提交后异步 push，失败写 `.git/sync.log`、不影响 commit）。
 本节文档改动即由该 hook 自动推送，用于验证「这边提交、那边立刻拿到」这条链路。
+
+### 15.1 自动推送 hook 的真实缺陷（已修）
+
+首次验证时发现：提交后远端 HEAD 没变、`.git/sync.log` 为空，
+`--status` 显示领先 1。手动跑 `python scripts/github_sync.py --auto` 立刻推送成功，
+说明脚本没问题，**问题在 hook 里那个 `&`**：Git Bash / Windows 下后台子进程
+随 hook shell 退出被终止，根本没启动。
+
+修法：hook 改为同步执行 `--auto` 并 `exit 0`（推送失败只留日志、不打断 commit）；
+`setup()` 生成 hook 的模板同步改掉；`git()` 给所有子进程加 `timeout=120`，
+避免网络挂起把 commit 卡死。本节改动即用于验证「提交后无需任何手动操作即推送」。

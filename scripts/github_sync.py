@@ -40,8 +40,9 @@ def git(*args: str, extra_config: list[str] | None = None) -> subprocess.Complet
     for c in extra_config or []:
         cmd += ["-c", c]
     cmd += list(args)
+    # 给所有 git 子进程加超时：hook 同步执行时，网络挂起不能把 commit 卡死。
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace")
+                          errors="replace", timeout=120)
 
 
 def log(msg: str) -> None:
@@ -95,8 +96,12 @@ def setup(url: str, install_hook: bool = True) -> int:
         script = (Path(__file__).resolve()).as_posix()
         hook.write_text(
             "#!/bin/sh\n"
-            "# 由 scripts/github_sync.py --setup 安装：提交后自动推送，不再触发 commit。\n"
-            f'"{py}" "{script}" --auto >> "{LOG.as_posix()}" 2>&1 &\n',
+            "# 由 scripts/github_sync.py --setup 安装：提交后同步推送，不再触发 commit。\n"
+            "# 不能加 &：Git Bash / Windows 下后台子进程会随 hook shell 退出被终止，\n"
+            "# 实测 .git/sync.log 为空、远端不更新。同步执行并吞掉失败，\n"
+            "# 这样推送失败只留日志，不会打断 commit 本身。\n"
+            f'"{py}" "{script}" --auto >> "{LOG.as_posix()}" 2>&1\n'
+            "exit 0\n",
             encoding="utf-8", newline="\n")
         try:
             hook.chmod(0o755)
