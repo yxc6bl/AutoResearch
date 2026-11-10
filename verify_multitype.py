@@ -251,10 +251,16 @@ def _restore_after_failed_build(out: Path, saved: list[tuple[Path, Path]]) -> No
             pass
 
 
-def _build(out: Path) -> tuple[int, str]:
-    r = subprocess.run([sys.executable, "paper/generate_paper.py", "--output-dir", str(out)],
-                       cwd=str(ROOT), capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+def _build(out: Path, timeout: int = 600) -> tuple[int, str]:
+    """构建单篇论文。必须有整体超时：网关限流时单批写作可退避重试十几分钟，
+    旧版 subprocess.run 没有 timeout，整个验证会无限期挂住（实测踩到过）。
+    """
+    try:
+        r = subprocess.run([sys.executable, "paper/generate_paper.py", "--output-dir", str(out)],
+                           cwd=str(ROOT), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, f"构建超时（>{timeout}s）：放弃本轮，保留构建前成稿"
     tail = (r.stdout or "").strip().splitlines()[-3:]
     return r.returncode, " / ".join(tail)
 
@@ -444,9 +450,9 @@ def main() -> int:
                 (out / "06_paper" / "07_eval_verdict.json").unlink(missing_ok=True)
                 _saved = _backup_before_build(out) if _used_llm(out) else []
                 rc, tail = _build(out)
-                if _saved and not _used_llm(out):
+                if _saved and (not _used_llm(out) or rc == 124):
                     _restore_after_failed_build(out, _saved)
-                    tail = "子进程降级为兜底骨架，已恢复构建前成稿"
+                    tail = tail if rc == 124 else "子进程降级为兜底骨架，已恢复构建前成稿"
                     print(f"    [已恢复] {tail}")
                 else:
                     for _b, _p in _saved:
@@ -538,12 +544,15 @@ def main() -> int:
         print(f"  {r['type']:18s} {str(r['llm']):5s} {r['chars']:6d} "
               f"{r['struct']:>6s}  {r['blocking']}（兜底预期失败：{r['expected']}）"
               + ("  [复评历史产物]" if r.get("reused") else ""))
-    bad = [r["type"] for r in rows if r["blocking"] != "-" or r["struct"].split("/")[0]
-           != r["struct"].split("/")[1]]
+    # 构建失败/超时也必须算未通过：否则「重建没跑成、只是复评了旧稿」会被
+    # 打印成「全部类型通过」，掩盖本轮验证其实没做完。
+    bad = [r["type"] for r in rows
+           if r["blocking"] != "-" or r["rc"] != 0
+           or r["struct"].split("/")[0] != r["struct"].split("/")[1]]
     if bad:
         print("未通过：" + "、".join(bad))
         return 1
-    print("全部类型通过（结构完整、无额外阻断门）。")
+    print("全部类型通过（结构完整、构建成功、无额外阻断门）。")
     return 0
 
 

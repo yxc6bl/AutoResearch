@@ -141,6 +141,16 @@ class TestBuildGuard(unittest.TestCase):
         rc.assert_called_once()
         av.assert_called_once()
 
+    def test_build_timeout_never_hangs(self):
+        """构建子进程必须有整体超时，否则一次退避重试能挂住整个验证。"""
+        import subprocess
+        import verify_multitype as VM
+        with patch.object(VM.subprocess, "run",
+                          side_effect=subprocess.TimeoutExpired("generate_paper.py", 1)):
+            rc, tail = VM._build(Path("unused"), timeout=1)
+        self.assertEqual(rc, 124)
+        self.assertIn("超时", tail)
+
 
 class TestGistMaterial(unittest.TestCase):
     """gist 是写作端与评审端共用的第二份真实素材，两端必须同源。"""
