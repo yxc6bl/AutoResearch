@@ -31,7 +31,16 @@ def md_to_html(md: str) -> str:
     lines = md.split("\n")
     out: list[str] = []
     para: list[str] = []
-    toc_active = False
+    toc_open = False   # 有未闭合的 <ul class="toc">
+    list_buf: list[str] = []
+    list_tag = "ul"
+
+    def flush_list():
+        nonlocal list_tag
+        if list_buf:
+            out.append(f'<{list_tag} class="md-list">' + "".join(list_buf) + f"</{list_tag}>")
+            list_buf.clear()
+        list_tag = "ul"
 
     def flush_para():
         if para:
@@ -40,49 +49,67 @@ def md_to_html(md: str) -> str:
                 out.append(f"<p>{_inline(joined)}</p>")
             para.clear()
 
+    def close_toc():
+        nonlocal toc_open
+        if toc_open:
+            out.append("</ul>")
+            toc_open = False
+
     for raw in lines:
         line = raw.rstrip()
         stripped = line.strip()
         if not stripped:
             flush_para()
-            toc_active = False
+            flush_list()
             continue
         if line.startswith("### "):
             flush_para()
-            toc_active = False
+            flush_list()
+            close_toc()
             out.append(f'<h3>{_inline(stripped[4:])}</h3>')
         elif line.startswith("## "):
             flush_para()
+            flush_list()
+            close_toc()
             title = stripped[3:].strip()
             if title == "目录":
-                toc_active = True
+                toc_open = True
                 out.append('<h2 class="toc-title">目录</h2>')
                 out.append('<ul class="toc">')
             else:
-                if toc_active:  # 目录区块结束
-                    out.append("</ul>")
-                    toc_active = False
                 cls = "chapter" if re.match(r"^第[一二三四五六七八九十\d]+章", title) else "section-h2"
                 out.append(f'<h2 class="{cls}">{_inline(title)}</h2>')
         elif line.startswith("# "):
             flush_para()
-            if toc_active:
-                out.append("</ul>")
-                toc_active = False
+            flush_list()
+            close_toc()
             out.append(f'<h1 class="doc-title">{_inline(stripped[2:])}</h1>')
         elif stripped.startswith("> "):
             flush_para()
+            flush_list()
+            close_toc()
             out.append(f'<blockquote>{_inline(stripped[2:])}</blockquote>')
+        elif toc_open:
+            # 目录区块一直延续到下一个标题；空行不该把它截断
+            out.append(f'<li>{_inline(stripped)}</li>')
         elif re.match(r"^[-*] ", stripped):
             flush_para()
-            out.append(f'<li>{_inline(stripped[2:])}</li>')
-        elif toc_active:
-            out.append(f'<li>{_inline(stripped)}</li>')
+            if list_tag != "ul":
+                flush_list()
+            list_tag = "ul"
+            list_buf.append(f'<li>{_inline(stripped[2:])}</li>')
+        elif re.match(r"^\d+[.、] ", stripped):
+            flush_para()
+            if list_tag != "ol":
+                flush_list()
+            list_tag = "ol"
+            body = re.sub(r"^\d+[.、]\s*", "", stripped)
+            list_buf.append(f'<li>{_inline(body)}</li>')
         else:
             para.append(line)
     flush_para()
-    if toc_active:
-        out.append("</ul>")
+    flush_list()
+    close_toc()
     return "\n".join(out)
 
 
@@ -96,16 +123,30 @@ _DIM_COLOR = {
 _DIM_NAME = {
     "topic_sig": "选题意义", "literature": "文献调研", "structure": "逻辑构建",
     "methodology": "专业能力·方法内容", "innovation": "创新", "writing_norms": "撰写质量与规范",
-    "consistency": "零编造硬门",
+    "consistency": "零编造硬门", "authenticity": "真实性", "anti_ai": "反 AI 痕迹",
+    "content_quality": "内容质量", "mathematical_rigor": "数学严谨",
 }
 
 def _score_list(v: dict) -> list[tuple[str, float]]:
-    """把 scores 字段统一成 [(中文名, 分数)]，按 rubric 维度顺序排列。"""
+    """把 scores 字段统一成 [(中文名, 分数)]。
+
+    先按标准 rubric 顺序排，再接上本版 rubric 里的其他维度——旧产物用的是
+    authenticity / anti_ai / content_quality 这套键，硬编码顺序会把它们整段漏掉。
+    """
     sc = v.get("scores") or {}
-    if isinstance(sc, dict):
-        order = ["topic_sig", "literature", "structure", "methodology", "innovation", "writing_norms", "consistency"]
-        return [(_DIM_NAME.get(k, k), float(sc[k])) for k in order if k in sc]
-    return []
+    if not isinstance(sc, dict):
+        return []
+    order = ["topic_sig", "literature", "structure", "methodology", "innovation",
+             "writing_norms", "consistency"]
+    keys = [k for k in order if k in sc]
+    keys += [k for k in sc if k not in order and k != "overall"]
+    out = []
+    for k in keys:
+        try:
+            out.append((_DIM_NAME.get(k, k), float(sc[k])))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 def verdict_to_html(v: dict) -> str:
     overall = v.get("overall", 0)
@@ -172,6 +213,121 @@ def find_paper_dir(base: Path) -> Path | None:
     return max(candidates, key=lambda p: (p / "paper_full.md").stat().st_size)
 
 
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _rel(p: Path) -> str:
+    """转成相对工程根的 posix 路径（供 /api/file 解析）。"""
+    try:
+        return Path(p).resolve().relative_to(ROOT.resolve()).as_posix()
+    except Exception:
+        return ""
+
+
+def _read_json(p) -> dict | None:
+    try:
+        return json.loads(Path(p).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _paper_stats(md: str) -> dict:
+    """正文统计：汉字数、段落数、引用处数、章节数。只数不猜。"""
+    han = len(re.findall(r"[\u4e00-\u9fff]", md))
+    paras = [ln for ln in md.split("\n") if ln.strip() and not ln.lstrip().startswith(("#", ">", "-", "*", "|"))]
+    cites = re.findall(r"\[(\d+)\]", md)
+    chapters = re.findall(r"^##\s*第[一二三四五六七八九十\d]+章", md, flags=re.M)
+    return {
+        "chars": han,
+        "paragraphs": len(paras),
+        "citations": len(cites),
+        "distinct_refs": len(set(cites)),
+        "chapters": len(chapters),
+    }
+
+
+def collect_extras(base: Path, pd: Path) -> dict:
+    """补齐「论文之外」的可展示证据：诊断、闸门、写作状态、选材台账、可下载产物。"""
+    extras: dict = {}
+
+    # 评审 Agent 的文本诊断
+    review_md = pd / "08_paper_review.md"
+    extras["review_html"] = md_to_html(review_md.read_text(encoding="utf-8")) if review_md.exists() else ""
+    extras["review"] = _read_json(pd / "08_paper_review.json") or {}
+
+    # 质量闸门
+    gates = _read_json(base / "07_gate_report.json") or {}
+    extras["gates"] = {
+        "decision": gates.get("decision") or {},
+        "counts": gates.get("counts") or {},
+        "gates": [
+            {"id": g.get("id"), "level": g.get("level"), "name": g.get("name"),
+             "stage": g.get("stage"), "status": g.get("status"),
+             "rule": g.get("rule"), "evidence": g.get("evidence"),
+             "provenance": g.get("provenance")}
+            for g in (gates.get("gates") or [])
+        ],
+    } if gates else {}
+
+    # 写作与评审轮次
+    ws = _read_json(pd / "WRITE_STATUS.json") or {}
+    extras["write"] = {
+        "llm_written": bool(ws.get("llm_written")),
+        "model": ws.get("model") or "",
+        "paper_type": ws.get("paper_type") or "",
+        "sections": len(ws.get("llm_sections") or []),
+    } if ws else {}
+    extras["rounds"] = _read_json(pd / "REVIEW_ROUNDS.json") or {}
+
+    # 选材台账
+    led = _read_json(base / "LIT_SELECTION.json") or {}
+    if led:
+        decs = led.get("decisions") or []
+        by: dict[str, int] = {}
+        for d in decs:
+            by[str(d.get("by") or "rule")] = by.get(str(d.get("by") or "rule"), 0) + 1
+        extras["selection"] = {
+            "n_candidates": led.get("n_candidates"),
+            "n_selected": led.get("n_selected"),
+            "n_extra_from_refetch": led.get("n_extra_from_refetch"),
+            "selector": led.get("selector") or "",
+            "preferences_applied": led.get("preferences_applied") or {},
+            "review": led.get("review") or {},
+            "by_actor": by,
+            "n_human": sum(1 for d in decs if d.get("by") == "human"),
+        }
+    # 检索计划（留痕）
+    plan = _read_json(base / "LIT_PLAN.json") or {}
+    if plan:
+        st = plan.get("strategy") or {}
+        extras["plan"] = {
+            "sources": st.get("sources") or [],
+            "query_groups": st.get("query_groups") or [],
+            "applied_feedback": plan.get("applied_feedback") or [],
+            "outcome": plan.get("outcome") or {},
+            "topic_reading": plan.get("topic_reading") or "",
+        }
+
+    # 可下载产物
+    arts = []
+    for name, label, kind in (
+        ("paper_full.docx", "Word 文档", "docx"),
+        ("paper_full.md", "Markdown 正文", "md"),
+        ("08_paper_review.md", "文本诊断", "md"),
+        ("07_eval_verdict.json", "评分明细", "json"),
+    ):
+        f = pd / name
+        if f.exists():
+            arts.append({"label": label, "kind": kind, "rel": _rel(f),
+                         "size": f.stat().st_size, "name": name})
+    gr = base / "07_gate_report.json"
+    if gr.exists():
+        arts.append({"label": "闸门报告", "kind": "json", "rel": _rel(gr),
+                     "size": gr.stat().st_size, "name": gr.name})
+    extras["artifacts"] = arts
+    return extras
+
+
 def collect_result(base: str) -> dict:
     """从一次运行的产物目录收集所有可展示内容。"""
     base = Path(base)
@@ -187,6 +343,8 @@ def collect_result(base: str) -> dict:
 
     md = (pd / "paper_full.md").read_text(encoding="utf-8")
     res["paper_html"] = md_to_html(md)
+    res["stats"] = _paper_stats(md)
+    res["paper_dir_rel"] = _rel(pd)
 
     vp = pd / "07_eval_verdict.json"
     if vp.exists():
@@ -202,7 +360,7 @@ def collect_result(base: str) -> dict:
             try:
                 data = json.loads(lp.read_text(encoding="utf-8"))
                 cands = data if isinstance(data, list) else (data.get("papers") or data.get("candidates") or [])
-                res["literature"] = cands[:30]
+                res["literature"] = cands[:60]
                 break
             except Exception:
                 pass
@@ -228,6 +386,8 @@ def collect_result(base: str) -> dict:
             for f in sorted(pd_.glob("*.png")):
                 # 相对工程根的路径，供 /api/file 解析
                 res["plots"].append(str(f))
+
+    res.update(collect_extras(base, pd))
     return res
 
 

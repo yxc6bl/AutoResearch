@@ -34,6 +34,27 @@ python auto_research.py run --spec engine/tasks/proof/wine_sklearn_spec.json --o
 
 其他命令：`python auto_research.py plan --topic "..."`、`python auto_research.py iterate --topic "..." --rounds 3`。`plan`/`iterate` 的规划和论文润色可能调用 `.env` 中配置的 LLM；直接 `run` 的分析不需要 API Key，LLM 不可用时论文生成器可回退到模板。
 
+## 网页界面
+
+零第三方依赖（只用标准库），起一个本地服务就能用：
+
+```bash
+python web/app.py                                      # 默认 http://0.0.0.0:5000
+WEB_HOST=127.0.0.1 WEB_PORT=5077 python web/app.py    # 本机换端口
+```
+
+左侧填主题 / 类型 / API Key 直接跑；右侧分七栏看结果：**论文、文本诊断、评分、
+质量闸门、文献、实验、图表**。看历史成果不需要 Key——点「最近产物」里任意一条，
+或填目录名即可加载，`.docx` 与 `.md` 一键下载。
+
+- 深链：`/?dir=out_verify_survey&tab=gate`、`/?demo=1`、`/?theme=dark`，可直接定位到
+  某个产物的某一栏（截图、发给导师都方便）。
+- 「人工选材」在文献栏内展开：勾选保留 / 剔除并写备注，提交即写入
+  `memory/lit_preferences.json`，下一轮抓取生效，台账同步标 `by=human`。
+- 运行日志按阶段推进（解析 → 检索 → 实验 → 写作 → 评审 → 闸门 → 导出），
+  中途失败会停在出错阶段并把原因留在日志里。
+- 服务端只读工程根内的产物目录（`_safe_dir`），`/api/file` 也做了路径越权拦截。
+
 ## 论文类型（`--paper-type`）
 
 系统支持**六种**可插拔论文类型，`plan` / `run` / `from_title` 都接受 `--paper-type`

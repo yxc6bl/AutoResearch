@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -23,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent          # AutoResearch/
 sys.path.insert(0, str(ROOT))
 
-from web.render import collect_result, verdict_to_html  # noqa: E402
+from web.render import collect_result, find_paper_dir, verdict_to_html  # noqa: E402
 
 # 发布到云端时由启动环境注入；默认 0.0.0.0 允许外部访问，本地调试可设 WEB_HOST=127.0.0.1
 HOST = os.environ.get("WEB_HOST", "0.0.0.0")
@@ -145,12 +146,67 @@ def build_result_payload(out_dir: Path) -> dict:
     return res
 
 
+def _recent_runs(limit: int = 9) -> list[dict]:
+    """扫描工程根下的产物的最新动态，供网页「最近产物」一键打开。"""
+    cands: list[tuple[float, Path, Path]] = []
+    roots = [p for p in ROOT.glob("out_*") if p.is_dir()]
+    demo = ROOT / "demo_results"
+    if demo.is_dir():
+        roots += [p for p in demo.glob("*") if p.is_dir()]
+    for d in roots:
+        try:
+            pd = find_paper_dir(d)
+            if not pd:
+                continue
+            cands.append(((pd / "paper_full.md").stat().st_mtime, d, pd))
+        except Exception:  # noqa: BLE001
+            continue
+    cands.sort(key=lambda x: x[0], reverse=True)
+
+    rows = []
+    for mtime, d, pd in cands[: max(1, limit)]:
+        try:
+            md = (pd / "paper_full.md").read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            continue
+        title = ""
+        for ln in md.split("\n"):
+            if ln.startswith("# "):
+                title = ln[2:].strip()
+                break
+        v = {}
+        try:
+            v = json.loads((pd / "07_eval_verdict.json").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+        wst = {}
+        try:
+            wst = json.loads((pd / "WRITE_STATUS.json").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
+        rows.append({
+            "dir": d.relative_to(ROOT).as_posix(),
+            "name": d.name,
+            "title": title or d.name,
+            "paper_type": wst.get("paper_type") or "",
+            "chars": len(re.findall(r"[\u4e00-\u9fff]", md)),
+            "score": v.get("overall"),
+            "passed": v.get("passed"),
+            "gate": v.get("gate") or "",
+            "mtime": mtime,
+        })
+    return rows
+
+
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8"):
+    def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8",
+              extra: dict | None = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
@@ -237,7 +293,24 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/" or path == "/index.html":
             html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8",
+                       {"Cache-Control": "no-store"})
+            return
+
+        if path == "/favicon.ico":
+            self._send(204, b"")
+            return
+
+        if path == "/api/health":
+            self._json({"ok": True, "root": str(ROOT), "tasks": len(TASKS)})
+            return
+
+        if path == "/api/recent":
+            try:
+                n = int(qs.get("limit", ["9"])[0])
+            except Exception:  # noqa: BLE001
+                n = 9
+            self._json({"runs": _recent_runs(max(1, min(30, n)))})
             return
 
         if path == "/api/lit-choices" and "dir" in qs:
@@ -276,15 +349,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/open" and "dir" in qs:
-            d = qs["dir"][0]
-            p = Path(d)
-            if not p.is_absolute():
-                p = ROOT / p
-            if not p.exists():
-                self._json({"found": False, "error": f"目录不存在：{p}"}, 404)
+            d = self._safe_dir(qs["dir"][0])
+            if d is None:
+                self._json({"found": False, "error": "目录不存在或不在工程内"}, 404)
                 return
             try:
-                self._json(build_result_payload(p))
+                self._json(build_result_payload(d))
             except Exception as e:  # noqa: BLE001
                 self._json({"found": False, "error": str(e)}, 500)
             return
@@ -292,17 +362,51 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/file":
             rel = qs.get("path", [""])[0]
             fp = (ROOT / rel).resolve()
-            if not str(fp).startswith(str(ROOT.resolve())):
+            root = ROOT.resolve()
+            if fp != root and root not in fp.parents:
                 self._send(403, b"forbidden")
                 return
-            if not fp.exists():
+            if not fp.is_file():
                 self._send(404, b"not found")
                 return
-            ctype = "image/png" if fp.suffix == ".png" else "application/octet-stream"
-            self._send(200, fp.read_bytes(), ctype)
+            ctype = {
+                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".svg": "image/svg+xml", ".pdf": "application/pdf",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".md": "text/markdown; charset=utf-8", ".json": "application/json; charset=utf-8",
+                ".csv": "text/csv; charset=utf-8",
+            }.get(fp.suffix.lower(), "application/octet-stream")
+            extra = {"Cache-Control": "no-store"}
+            if qs.get("download", [""])[0] in ("1", "true", "yes"):
+                fn = urllib.parse.quote(fp.name)
+                extra["Content-Disposition"] = (
+                    f"attachment; filename=\"{fp.name.encode('ascii', 'ignore').decode() or 'download'}\"; "
+                    f"filename*=UTF-8''{fn}")
+            self._send(200, fp.read_bytes(), ctype, extra)
             return
 
         self._send(404, b"not found")
+
+    def do_HEAD(self):
+        """让 curl -I / 浏览器预检能拿到状态码与类型，不必先下整个文件。"""
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/file":
+            rel = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+            fp = (ROOT / rel).resolve()
+            root = ROOT.resolve()
+            if fp != root and root not in fp.parents:
+                self.send_response(403)
+            elif not fp.is_file():
+                self.send_response(404)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(fp.stat().st_size))
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
 
     def do_POST(self):
         if self.path == "/api/lit-choices":
@@ -348,14 +452,14 @@ class Handler(BaseHTTPRequestHandler):
         data_filename = (data.get("data_filename") or "upload.csv").strip()
 
         if mode == "open":  # 打开已有目录，不跑流水线
-            d = (data.get("dir") or "").strip()
-            p = Path(d)
-            if not p.is_absolute():
-                p = ROOT / p
+            d = self._safe_dir((data.get("dir") or "").strip())
+            if d is None:
+                self._json({"error": "目录不存在或不在工程内"}, 404)
+                return
             tid = _next_id()
             with _lock:
-                TASKS[tid] = {"status": "done", "log": [f"[open] 加载 {p}"],
-                              "out_dir": str(p), "proc": None}
+                TASKS[tid] = {"status": "done", "log": [f"[open] 加载 {d}"],
+                              "out_dir": str(d), "proc": None}
             self._json({"task_id": tid, "open": True})
             return
 
@@ -397,6 +501,11 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             TASKS[tid] = {"status": "running", "log": [log_head],
                           "out_dir": str(out_dir), "proc": None}
+            # 只保留最近 60 个已结束任务，防止长驻进程内存无限增长
+            if len(TASKS) > 60:
+                for k in sorted(TASKS)[: len(TASKS) - 60]:
+                    if TASKS.get(k, {}).get("status") != "running":
+                        TASKS.pop(k, None)
         threading.Thread(
             target=run_pipeline,
             args=(tid, mode, topic, dataset, rounds, out_dir, api_key, data_path, data_url,

@@ -818,3 +818,101 @@ class TestFeedbackLoop(unittest.TestCase):
         kept, applied = SL.apply_preferences(papers, "测试")
         self.assertEqual([p["id"] for p in kept], ["a"])
         self.assertEqual(applied["removed"][0]["by"], "human")
+
+
+class TestWebRender(unittest.TestCase):
+    """网页渲染层的确定性行为：目录/列表不要塌成散文，评分维度不要漏掉旧 rubric。"""
+
+    def test_toc_survives_blank_line(self):
+        from web.render import md_to_html
+        md = "# 标题\n\n## 目录\n\n摘要\n第1章 绪论\n\n## 摘要\n\n正文。"
+        h = md_to_html(md)
+        self.assertIn('<ul class="toc">', h)
+        self.assertEqual(h.count("<li>"), 2, "目录条目要逐条成 li，不能被空行截断成段落")
+        self.assertIn("</ul>", h)
+
+    def test_lists_are_wrapped(self):
+        from web.render import md_to_html
+        h = md_to_html("## 第1章\n\n- 甲\n- 乙\n\n1. 丙\n2. 丁\n")
+        self.assertIn('<ul class="md-list"><li>甲</li><li>乙</li></ul>', h)
+        self.assertIn('<ol class="md-list"><li>丙</li><li>丁</li></ol>', h)
+
+    def test_citation_becomes_superscript(self):
+        from web.render import md_to_html
+        h = md_to_html("正文见文献[12]的方法。")
+        self.assertIn('<sup class="cite">[12]</sup>', h)
+
+    def test_score_list_covers_legacy_rubric(self):
+        from web.render import _score_list
+        v = {"scores": {"consistency": 100, "structure": 100, "authenticity": 100,
+                        "anti_ai": 100, "literature": 78.366, "overall": 97.8}}
+        names = dict(_score_list(v))
+        self.assertIn("文献调研", names)
+        self.assertIn("真实性", names, "旧 rubric 的维度不能被顺序表漏掉")
+        self.assertNotIn("overall", names)
+        self.assertAlmostEqual(names["文献调研"], 78.366)
+
+    def test_verdict_html_keeps_legacy_dims(self):
+        from web.render import verdict_to_html
+        h = verdict_to_html({"overall": 97.8, "passed": True, "gate": "hard_pass",
+                             "scores": {"authenticity": 100, "anti_ai": 90}})
+        self.assertIn("真实性", h)
+        self.assertIn("反 AI 痕迹", h)
+        self.assertIn("97.8", h)
+
+    def test_collect_result_extras(self):
+        from web.render import collect_result
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / "run"
+            pd = base / "06_paper"
+            pd.mkdir(parents=True)
+            (pd / "paper_full.md").write_text(
+                "# 题目\n\n## 第1章 绪论\n\n本文引用[1]与[2]，共三处[1]。\n", encoding="utf-8")
+            (pd / "07_eval_verdict.json").write_text(json.dumps(
+                {"overall": 88.5, "passed": True, "gate": "hard_pass",
+                 "scores": {"structure": 90}}), encoding="utf-8")
+            (pd / "08_paper_review.md").write_text("# 诊断\n\n- 结论：好\n", encoding="utf-8")
+            (pd / "WRITE_STATUS.json").write_text(json.dumps(
+                {"paper_type": "survey", "llm_written": True, "model": "m",
+                 "llm_sections": ["intro"]}), encoding="utf-8")
+            (base / "07_gate_report.json").write_text(json.dumps(
+                {"counts": {"P0": {"pass": 1, "total": 1}},
+                 "decision": {"deliverable": True},
+                 "gates": [{"id": "G03", "level": "P0", "name": "模型参与写作",
+                            "status": "pass", "evidence": "llm_written=true"}]}), encoding="utf-8")
+            (base / "LIT_SELECTION.json").write_text(json.dumps(
+                {"n_candidates": 100, "n_selected": 20, "selector": "model",
+                 "decisions": [{"id": "a", "selected": True, "by": "model"},
+                               {"id": "b", "selected": False, "by": "human"}]}), encoding="utf-8")
+
+            res = collect_result(str(base))
+            self.assertTrue(res["found"])
+            self.assertEqual(res["stats"]["chars"], 14)
+            self.assertEqual(res["stats"]["citations"], 3)
+            self.assertEqual(res["stats"]["distinct_refs"], 2)
+            self.assertIn("诊断", res["review_html"])
+            self.assertEqual(res["gates"]["counts"]["P0"]["pass"], 1)
+            self.assertTrue(res["gates"]["decision"]["deliverable"])
+            self.assertEqual(res["write"]["paper_type"], "survey")
+            self.assertEqual(res["selection"]["n_human"], 1)
+            names = {a["name"] for a in res["artifacts"]}
+            self.assertIn("paper_full.md", names)
+
+
+class TestWebServerSafety(unittest.TestCase):
+    def test_safe_dir_rejects_outside(self):
+        from web.app import Handler, ROOT
+        self.assertIsNone(Handler._safe_dir(None, str(ROOT.parent)))
+        self.assertIsNone(Handler._safe_dir(None, "../../"))
+        self.assertIsNone(Handler._safe_dir(None, "definitely_not_here"))
+        ok = Handler._safe_dir(None, ".")
+        self.assertEqual(ok, ROOT.resolve())
+
+    def test_recent_runs_shape(self):
+        from web.app import _recent_runs
+        rows = _recent_runs(3)
+        self.assertLessEqual(len(rows), 3)
+        for r in rows:
+            self.assertIn("dir", r)
+            self.assertIn("chars", r)
+            self.assertTrue(r["chars"] > 0)
