@@ -40,6 +40,7 @@ DEMO_SPECS: dict[str, dict] = {
     "system_design": {
         "title": "面向校园健康场景的可穿戴心电监测与预警系统设计与实现",
         "topic": "面向校园健康场景的可穿戴心电监测与预警系统设计与实现",
+        "literature_query": "wearable ECG monitoring atrial fibrillation detection",
         "institution_mode": "general",
         "system_spec": {
             "summary": "一套面向高校场景的可穿戴心电(ECG)实时监测与异常预警系统，由采集终端、"
@@ -161,7 +162,28 @@ def _ensure_literature(out: Path, spec: dict, force: bool = False) -> str:
             encoding="utf-8", errors="replace", timeout=600)
         print(f"    检索文献：rc={r.returncode} -> {'ok' if lit.exists() else 'FAIL'}")
     elif not lit.exists() and LIT_SRC.exists():
+        # 旧版静默复制一份心血管文献池，任何没给检索词的类型都会被塞进去，
+        # 评审官随后判「文献与主题零交集」。保留兜底但必须留痕、必须警告。
         shutil.copy2(LIT_SRC, lit)
+        print("    [警告] 本类型未给 literature_query，复用演示文献池"
+              "（out_demo_heart，心血管主题）；与题目不符时请用 --fetch-lit 重抓")
+    # 检索完成后做一次主题一致性提示：只报告，不过滤文献、不改引用编号。
+    if lit.exists() and q:
+        try:
+            from paper.lit_material import topic_overlap
+            _papers = json.loads(lit.read_text(encoding="utf-8")).get("papers") or []
+            _ov = topic_overlap(q, _papers)
+            (out / "00_lit_relevance.json").write_text(json.dumps({
+                "query": q, "n_papers": len(_papers), "topic_overlap": _ov,
+                "note": "粗粒度词面一致性，仅用于预警；不参与闸门、不改动引用编号。",
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            if _ov < 0.25:
+                print(f"    [警告] 文献池与检索式主题一致性仅 {_ov:.2f}，"
+                      f"疑似跑题；建议 --fetch-lit 重抓（当前 {len(_papers)} 篇）")
+            else:
+                print(f"    文献主题一致性：{_ov:.2f}（{len(_papers)} 篇）")
+        except Exception:
+            pass
     # 有文献清单就补一次覆盖审评：否则 G08 在该目录永远是 unknown，
     # 「没检查」会被误读成「检查了没问题」。
     rev = out / "04_literature_review.json"
@@ -205,12 +227,46 @@ def _stubs(out: Path, pt: str) -> None:
         encoding="utf-8")
 
 
+def _backup_before_build(out: Path) -> list[tuple[Path, Path]]:
+    """构建前备份已有的 LLM 成稿：网关抖动时子进程会降级成 2 千字骨架，
+    直接覆盖会把好稿毁掉（实测踩过：一次限流把两篇 1.2 万字稿子换成兜底）。
+    """
+    saved = []
+    for name in ("paper_full.md", "paper_full.docx", "WRITE_STATUS.json",
+                 "07_eval_verdict.json"):
+        p = out / "06_paper" / name
+        if p.exists():
+            b = out / "06_paper" / (name + ".prebuild")
+            shutil.copy2(p, b)
+            saved.append((b, p))
+    return saved
+
+
+def _restore_after_failed_build(out: Path, saved: list[tuple[Path, Path]]) -> None:
+    for b, p in saved:
+        try:
+            shutil.copy2(b, p)
+            b.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def _build(out: Path) -> tuple[int, str]:
     r = subprocess.run([sys.executable, "paper/generate_paper.py", "--output-dir", str(out)],
                        cwd=str(ROOT), capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     tail = (r.stdout or "").strip().splitlines()[-3:]
     return r.returncode, " / ".join(tail)
+
+
+def _gateway_ok() -> bool:
+    """构建前的可用性探测。失败时宁可跳过构建，也不要覆盖已有成稿。"""
+    try:
+        from engine import llm_client as LC
+        LC.reset_cache()
+        return bool(LC.available())
+    except Exception:
+        return False
 
 
 def _gates(out: Path) -> dict:
@@ -342,6 +398,8 @@ def main() -> int:
                     help="写作轮数；默认带 --eval 时 2 轮（抓到编造就带意见重写），否则 1 轮")
     ap.add_argument("--revise-all", action="store_true",
                     help="连「只有风格建议」也触发重写（实测容易退步，仅用于试验）")
+    ap.add_argument("--allow-fallback", action="store_true",
+                    help="允许网关不可用时构建确定性兜底骨架（会覆盖已有成稿，默认禁止）")
     ap.add_argument("--fetch-lit", action="store_true",
                     help="强制按 literature_query 重新检索真实文献（不复用旧结果）")
     args = ap.parse_args()
@@ -369,15 +427,30 @@ def main() -> int:
         (out / "04_review.json").unlink(missing_ok=True)
 
         rc, tail = (0, "reused")
+        # 网关一抖，子进程会把 1.2 万字成稿换成 2 千字兜底骨架。先探测：
+        # 不可用就跳过构建，除非显式 --allow-fallback 做断网演练。
+        _do_build = not args.skip_build
+        if _do_build and not args.allow_fallback and not _gateway_ok():
+            print("    [跳过构建] 网关不可用：默认不覆盖已有成稿；"
+                  "断网演练请加 --allow-fallback")
+            _do_build = False
         v: dict = {}
         best = None
         last_round = 0
         hist: list[dict] = []
         for rnd in range(1, rounds + 1):
-            if not args.skip_build or rnd > 1:
+            if _do_build:
                 # 旧评分结论必须作废：否则重写论文后 G04 会拿上一版的 hard_fail 当现值
                 (out / "06_paper" / "07_eval_verdict.json").unlink(missing_ok=True)
+                _saved = _backup_before_build(out) if _used_llm(out) else []
                 rc, tail = _build(out)
+                if _saved and not _used_llm(out):
+                    _restore_after_failed_build(out, _saved)
+                    tail = "子进程降级为兜底骨架，已恢复构建前成稿"
+                    print(f"    [已恢复] {tail}")
+                else:
+                    for _b, _p in _saved:
+                        _b.unlink(missing_ok=True)
             _stubs(out, pt)
             # 评审必须先于闸门：G04/G05/G10 读的是 07_eval_verdict.json，
             # 先跑闸门只会得到「未找到评分门 → unknown」，把跑过的评审记成没跑。
@@ -401,7 +474,7 @@ def main() -> int:
                   f"幻觉 {len(((v.get('llm_judge') or {}).get('hallucinations')) or [])}")
             if best is None or _sc > best[0]:
                 best = (_sc, rnd, _snap, _vsnap)
-            if rnd < rounds and _needs_revise(v, args.revise_all):
+            if rnd < rounds and _do_build and _needs_revise(v, args.revise_all):
                 _n = _write_review_brief(out, v)
                 if _n:
                     print(f"    评审要求修订（{_n} 条）→ 写 04_review.json，带意见重写…")

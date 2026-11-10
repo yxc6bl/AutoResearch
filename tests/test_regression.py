@@ -23,6 +23,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from paper.lit_abstracts import abstract_block, clean_abstract, load_papers  # noqa: E402
+from paper.lit_material import (  # noqa: E402
+    gist_block, gist_items, normalize_gist, topic_overlap,
+)
 from paper.paper_type_specs import TYPE_SPECS, build_fact_pack  # noqa: E402
 from paper.spec_check import check_spec  # noqa: E402
 from paper.generate_paper import (  # noqa: E402
@@ -34,7 +37,10 @@ from agents.eval_agent import (  # noqa: E402
 from engine import gates as G  # noqa: E402
 from engine import llm_client as LLM  # noqa: E402
 from paper.thesis_template import chapters_for  # noqa: E402
-from verify_multitype import _needs_revise  # noqa: E402
+from verify_multitype import (  # noqa: E402
+    _backup_before_build, _gateway_ok, _needs_revise,
+    _restore_after_failed_build,
+)
 
 
 def _papers(n: int = 5) -> list[dict]:
@@ -105,6 +111,121 @@ class TestAbstractBlock(unittest.TestCase):
         block, st = abstract_block(papers)
         self.assertEqual(block, "")
         self.assertEqual(st["n_used"], 0)
+
+
+class TestBuildGuard(unittest.TestCase):
+    """网关一抖就把成稿换成兜底骨架，是实测造成过数据损失的缺陷。"""
+
+    def test_backup_restores_full_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "out"
+            (p / "06_paper").mkdir(parents=True)
+            names = ("paper_full.md", "paper_full.docx", "WRITE_STATUS.json",
+                     "07_eval_verdict.json")
+            for n in names:
+                (p / "06_paper" / n).write_text("GOOD:" + n, encoding="utf-8")
+            saved = _backup_before_build(p)
+            self.assertEqual(len(saved), 4)
+            for n in names:
+                (p / "06_paper" / n).write_text("FALLBACK", encoding="utf-8")
+            _restore_after_failed_build(p, saved)
+            for n in names:
+                self.assertEqual((p / "06_paper" / n).read_text(encoding="utf-8"),
+                                 "GOOD:" + n)
+                self.assertFalse((p / "06_paper" / (n + ".prebuild")).exists())
+
+    def test_gateway_probe_rechecks_cache(self):
+        with patch.object(LLM, "available", return_value=False) as av, \
+                patch.object(LLM, "reset_cache") as rc:
+            self.assertFalse(_gateway_ok())
+        rc.assert_called_once()
+        av.assert_called_once()
+
+
+class TestGistMaterial(unittest.TestCase):
+    """gist 是写作端与评审端共用的第二份真实素材，两端必须同源。"""
+
+    def test_placeholder_gists_are_dropped(self):
+        for bad in ("未知", "无", "N/A", "unknown", "-", None, 5, "   "):
+            self.assertEqual(normalize_gist(bad), "", f"应拒绝 {bad!r}")
+        self.assertEqual(normalize_gist("  用KNN  预测  风险 "), "用KNN 预测 风险")
+
+    def test_items_keep_numbering_and_skip_placeholders(self):
+        papers = [
+            {"gist_cn": "第一篇用随机森林"},
+            {"gist_cn": "未知"},
+            {"gist_cn": "第三篇做综述"},
+        ]
+        items = gist_items(papers)
+        self.assertEqual(items, ["[1] 第一篇用随机森林", "[3] 第三篇做综述"])
+
+    def test_writer_and_judge_share_exact_items(self):
+        papers = [{"gist_cn": f"第{i}篇做了某研究"} for i in range(1, 6)]
+        papers[2]["gist_cn"] = "暂无"
+        w, ws = gist_block(papers, audience="writer")
+        j, js = gist_block(papers, audience="judge")
+        items = gist_items(papers)
+        self.assertTrue(all(x in w for x in items))
+        self.assertTrue(all(x in j for x in items))
+        self.assertEqual(ws["n_used"], js["n_used"])
+        self.assertIn("概要里没写的结论", w)
+        self.assertIn("属于", j)
+
+    def test_gist_enters_fact_pack_and_judge_gt(self):
+        from pathlib import Path
+        from agents.eval_agent import _gist_gt
+        papers = [{"gist_cn": "测试八周体育干预对农村中学儿童心血管风险的影响"}]
+        facts, st = build_fact_pack("case_study", {"title": "测试题目"},
+                                    [{"num": 1}], "[1] 清单", {"papers": papers})
+        self.assertEqual(st["gists_used"], 1)
+        self.assertIn("测试八周体育干预", facts)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            (p / "01_literature.json").write_text(
+                json.dumps({"papers": papers}, ensure_ascii=False), encoding="utf-8")
+            self.assertIn("[1] 测试八周体育干预", _gist_gt(p))
+
+    def test_topic_overlap_flags_mismatched_pool(self):
+        good = [{"title": "Machine learning for cardiovascular disease risk prediction"},
+                {"title": "Deep learning detects atrial fibrillation from wearable ECG"}]
+        bad = [{"title": "After-school program quality in rural middle schools"},
+               {"title": "Teacher motivation and student satisfaction"}]
+        q = "machine learning cardiovascular disease risk prediction"
+        self.assertGreater(topic_overlap(q, good), 0.5)
+        self.assertLess(topic_overlap(q, bad), 0.25)
+
+    def test_cite_tail_drops_placeholder(self):
+        from paper.generate_paper import _cite_tail
+        self.assertEqual(_cite_tail({"gist": "未知", "usable_in": "方法"}), "")
+        self.assertEqual(_cite_tail({"gist": "用KNN预测", "usable_in": ""}), "：用KNN预测")
+
+    def test_gist_reaches_actual_writer_prompt(self):
+        """不依赖网关：捕获 _write_batches 真正发给模型的提示词。"""
+        from paper import generate_paper as GP
+        papers = [{"gist_cn": "该研究测试八周体育干预的可行性"}]
+        facts, st = build_fact_pack("case_study", {"title": "县域中学课后服务"},
+                                    [{"num": 1}], "[1] 清单", {"papers": papers})
+        seen = []
+
+        def fake(prompt, **kw):
+            seen.append(prompt)
+            return {"abstract": "占位"}
+
+        with patch.object(GP.LLM, "chat_json", side_effect=fake):
+            GP._write_batches("case_study", facts)
+        self.assertEqual(len(seen), 3)
+        self.assertTrue(all("[1] 该研究测试八周体育干预的可行性" in p for p in seen))
+        self.assertTrue(all("概要里没写的结论" in p for p in seen))
+
+    def test_neutral_citation_block_no_fake_experiment_claim(self):
+        from paper.generate_paper import _role_citation_block
+        refs = [{"num": 1, "title": "某研究", "venue": "期刊", "year": 2024,
+                 "role": "方法", "tier": "core", "gist": "做了某研究"}]
+        neutral = _role_citation_block(refs, neutral=True)
+        self.assertNotIn("统一实验协议下重新评估", neutral)
+        self.assertIn("不据概要推断文献未写明的结论", neutral)
+        plain = _role_citation_block(refs, neutral=False)
+        self.assertIn("统一实验协议下重新评估", plain)
 
 
 class TestFactPackGrounding(unittest.TestCase):

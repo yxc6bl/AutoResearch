@@ -44,6 +44,8 @@ from paper.paper_type_specs import (  # noqa: E402
     field_alias_for, extras_for, cite_block_at, related_work_after, label_of,
     is_pluggable,
 )
+# 文献一句话概要的清洗规则与事实包共用同一处，避免「未知」这类占位值被写进正文。
+from paper.lit_material import normalize_gist  # noqa: E402
 # 统一走共享 LLM 客户端：自带网关握手探测（识别 401/限流）、指数退避重试、全局节流与熔断器；
 # 因此本模块的散文写作在网关不可用/被限流时会干净地返回 {}，由 main() 自动降级为 _fallback_sections。
 from engine import llm_client as LLM  # noqa: E402
@@ -193,8 +195,9 @@ def build_references(lit) -> list[dict]:
             "year": p.get("year", ""),
             "url": p.get("url", ""),
             "role": p.get("role", "方法"),
-            # 一句话概要（由检索 Agent 生成并缓存）；缺失时正文只给标题+出处，不编造
-            "gist": p.get("gist_cn") or "",
+            # 一句话概要（由检索 Agent 生成并缓存）；占位值/缺失时留空——
+            # 旧版把「未知」也当成概要输出成「：未知」，既难看又诱导模型替它编内容。
+            "gist": normalize_gist(p.get("gist_cn")),
             # core=直接可比；adjacent=相邻领域（正文措辞需区分，不得混为直接对比）
             "tier": p.get("fit_tier") or "core",
             # 逐篇阅读时判的「能用在论文哪一节」：正文引用块据此写明用途，
@@ -496,10 +499,16 @@ def _proposed_method_block(analysis, main_metric) -> str:
 
 
 def _cite_tail(r: dict) -> str:
-    """把逐篇阅读的「做了什么」与「用在哪节」拼成引用说明；缺的部分不编造。"""
-    gist = (r.get("gist") or "").strip()
+    """把逐篇阅读的「做了什么」与「用在哪节」拼成引用说明；缺的部分不编造。
+
+    概要为占位值（未知/无/N/A）说明这篇没被真正读懂，此时连「用于：某章」
+    这种阅读判断也不输出——只留题名与出处，不给模型任何可脑补的抓手。
+    """
+    gist = normalize_gist(r.get("gist"))
+    if not gist:
+        return ""
     use = (r.get("usable_in") or "").strip()
-    tail = f"：{gist}" if gist else ""
+    tail = f"：{gist}"
     if use and use != "无":
         tail += f"（用于：{use}）"
     return tail
@@ -563,8 +572,16 @@ def _role_citation_block(refs: list[dict], heading: str | None = None,
             head = f"- [{r['num']}] 《{title}》" + (f"（{src}）" if src else "")
             lines.append(head + _cite_tail(r))
         lines.append("")
-    lines.append("上述文献分别从方法设计、理论支撑、基准评测与系统性综述四个角度构成了本研究的方法论上下文；"
-                 "本文在统一实验协议下重新评估并定位自身结果，与前人工作形成可对照的差异。")
+    if neutral:
+        # 设计/综述/报告/开题型没有统一实验协议，不能声称「重新评估并对照差异」；
+        # 同时说明概要只是检索阶段的一句话描述，不构成文献结论的充分依据。
+        lines.append("上述文献按检索阶段的角色标注归类，可作为本研究的方法论参照。"
+                     "各条概要来自检索阶段的一句话描述，其适用边界以题名与原文为准；"
+                     "本文不据此声称与上述工作做过统一实验协议下的对比，"
+                     "也不据概要推断文献未写明的结论。")
+    else:
+        lines.append("上述文献分别从方法设计、理论支撑、基准评测与系统性综述四个角度构成了本研究的方法论上下文；"
+                     "本文在统一实验协议下重新评估并定位自身结果，与前人工作形成可对照的差异。")
     return "\n".join(lines)
 
 

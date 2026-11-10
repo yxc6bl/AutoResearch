@@ -185,10 +185,15 @@ def build_fact_pack(paper_type: str, spec: dict, refs: list,
     ``paper.lit_abstracts.abstract_block``，保证两边逐字同源。
     """
     from paper.lit_abstracts import abstract_block, enabled
+    from paper.lit_material import gist_block
     papers = ((lit or {}).get("papers") or []) if isinstance(lit, dict) else []
     ab_text, ab_stats = (abstract_block(papers) if enabled()
                          else ("", {"n_total": len(papers), "n_with_abstract": 0,
                                     "n_used": 0, "chars": 0}))
+    # 一句话概要是检索阶段落盘的真实素材，一直只出现在正文引用块里、没进写作提示，
+    # 模型写「研究现状」时只看得到题名，于是凭题名脑补文献结论。这里补上。
+    gist_text, gist_stats = gist_block(papers, audience="writer")
+    stats = {**ab_stats, "gists_used": gist_stats["n_used"]}
 
     s = TYPE_SPECS[paper_type]
     material = s["material"]
@@ -206,14 +211,19 @@ def build_fact_pack(paper_type: str, spec: dict, refs: list,
             base += "\n## 参考文献清单（可引用，用于文献对话；不得编造清单外文献）\n" + references_block
     else:
         return (_spec_material(paper_type, spec, s["spec_block"], s.get("spec_label", "题目"),
-                               s.get("extra_rules")), ab_stats)
+                               s.get("extra_rules")), stats)
 
     if ab_text:
         base += "\n\n" + ab_text
         base += ("\n提示：以上摘要属于文献原文，撰写「国内外研究现状」「相关工作」"
                  "「理论基础」等章节时应据此展开具体论述，而不是只按题名做空泛归类；"
                  "但无摘要的文献仍不得补造。\n")
-    return base, ab_stats
+    if gist_text:
+        base += "\n\n" + gist_text
+        base += ("\n提示：写「国内外研究现状」「相关工作」「理论基础」时，有概要的文献"
+                 "必须依据对应编号的概要转述，不得只看题名就推断该文献得出了什么结论；"
+                 "概要没写的结论一律不写。\n")
+    return base, stats
 
 
 # ── 分章写作提示 ──────────────────────────────────────────────────────

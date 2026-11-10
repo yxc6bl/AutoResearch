@@ -1010,20 +1010,11 @@ def _gist_gt(base_dir) -> str:
     """
     try:
         from paper.lit_abstracts import load_papers
-        papers = load_papers(base_dir)
+        from paper.lit_material import gist_block
+        text, _ = gist_block(load_papers(base_dir), audience="judge")
+        return text
     except Exception:
         return ""
-    lines = ["【文献一句话概要：检索阶段落盘的元数据，正文引用块会原样采用】",
-             "以下每条与参考文献编号一一对应。其中出现的样本量、记录数等数字"
-             "属于已提供的真实素材，不得据此判为「事实清单之外」或编造；"
-             "但若正文把这些数字安到别的文献编号上，仍属张冠李戴。"]
-    n = 0
-    for i, p in enumerate(papers, 1):
-        g = str(p.get("gist_cn") or "").strip()
-        if g:
-            lines.append(f"[{i}] {g}")
-            n += 1
-    return "\n".join(lines) if n else ""
 
 
 def _ground_truth_for(paper_type: str, base_dir, analysis: dict, cands) -> dict:
