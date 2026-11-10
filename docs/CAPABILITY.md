@@ -482,3 +482,45 @@ python paper/spec_check.py --spec out_run/task_spec.json
   本轮未取得真实诊断结果，恢复后执行
   `python auto_research.py step --name review --out <产物目录>` 即可。
 - 回归用例增至 59 个，全部通过（0.15 秒、不联网）。
+
+### 11.5 补齐：检索规划留痕、网页人工选材、自我反馈闭环
+
+用户把设想又讲细了一层：拿到选题后要先「判断抓什么、走什么路径」，这一步要留痕；
+「人也要能有选的权利」，不能只让 AI 选完事；评审的 feedback 要能存记忆、让系统
+自己改进。对照上一节的实现，这三件确实还差，本轮补齐。
+
+**检索规划台账** `engine/lit_plan.py` → `<out>/LIT_PLAN.json`：
+
+- `understanding`：选题、任务类型、方法线索、数据集线索（直接来自任务规格，不推断）；
+- `strategy`：每条检索式 + 用途分类 + 来源（`planner` / `feedback` / `refetch` /
+  `broadening`）、启用的数据源、是否由模型规划。用途是确定性词面推断，
+  明确标 `purpose_source="keyword_heuristic"`，**不冒充模型的推理过程**；
+- `rounds`：首轮广撒网、覆盖不足扩面、审评缺口补抓，各自用了哪些式子、抓回多少；
+- `outcome`：候选数、入选数、剩余缺口。
+
+**网页人工选材**：`GET /api/lit-choices?dir=…` 返回 AI 入选清单与每篇状态，
+`POST /api/lit-choices` 批量写回。前端在「文献」标签加了勾选面板：默认全选，
+取消勾选即剔除，可填备注；保存后 `apply_human_choices()` 同时写偏好记忆和本次
+选材台账（标 `by=human`、记录 `human_choices`）。接口限制只能访问工程根内目录，
+实测越界请求被拒。旧目录没有检索计划时前端明确提示，不显示成空白。
+
+**自我反馈闭环**：
+
+```
+论文诊断 / 文献审评  →  suggested_queries / recommended_add_queries
+    → add_feedback_queries()  存进 memory/lit_preferences.json
+    → 下轮抓取 take_feedback_queries()（只消费一次）
+    → 并入 queries，LIT_PLAN 标 origin=feedback
+    → 该轮诊断书显示「本次检索已应用的历史反馈」
+```
+
+另外诊断 Agent 只对模型真通读的结果存检索建议，规则兜底不配给建议（避免污染
+计划）。人工表态的匹配也收紧了：短标识必须精确等于文献 id 或题名，长度 ≥8
+才允许子串命中——实测单字符标识会因为题名里含同一个字母，把「人工剔除」
+错误豁免成「保留」。
+
+**实测**：网页 GET 返回 59 篇入选清单、POST 剔除 1 篇后台账 `by=human` 增 1、
+偏好文件写入成功；越界目录被拒。64 个回归用例全部通过（0.3 秒、不联网），
+覆盖反馈检索式只消费一次、计划标来源、诊断书显示已应用反馈、人工勾选改台账。
+网关仍限流，本轮未跑真实抓取，因此 `LIT_PLAN.json` 只在新一次抓取时生成，
+旧目录会明确显示「未记录检索计划」。详见 `docs/PROGRESS.md` 第 21 节。

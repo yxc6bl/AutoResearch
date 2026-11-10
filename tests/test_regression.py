@@ -42,6 +42,7 @@ from verify_multitype import (  # noqa: E402
     _restore_after_failed_build,
 )
 from engine import selection_ledger as SL  # noqa: E402
+from engine import lit_plan as LP  # noqa: E402
 from agents import paper_review_agent as PRA  # noqa: E402
 
 
@@ -732,3 +733,88 @@ class TestPaperReview(unittest.TestCase):
                 r = PRA.run(str(p / "paper.md"), str(p))
         self.assertFalse(r["llm_available"])
         self.assertEqual(r["provenance"], "rule")
+
+
+class TestFeedbackLoop(unittest.TestCase):
+    """「评审反馈 → 检索计划 → 下轮抓取」这条自我改进闭环必须真的连起来。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._p = patch.object(SL, "PREF_PATH", Path(self.tmp.name) / "prefs.json")
+        self._p.start()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self._p.stop()
+        self.tmp.cleanup()
+
+    def test_feedback_query_consumed_once(self):
+        n = SL.add_feedback_queries(["wearable ECG atrial fibrillation review",
+                                      "wearable ECG atrial fibrillation review"],
+                                     source="paper_review", note="缺可穿戴综述")
+        self.assertEqual(n, 1)
+        first = SL.take_feedback_queries()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["source"], "paper_review")
+        self.assertEqual(SL.take_feedback_queries(), [], "同一条反馈不该每轮重复并入")
+
+    def test_plan_marks_feedback_origin_and_rounds(self):
+        fb = [{"query": "ECG wearable survey", "source": "paper_review", "note": "缺综述"}]
+        plan = LP.create("心电监测", ["machine learning ECG", "ECG wearable survey"],
+                         ["crossref", "openalex"], lm_driven=True, feedback=fb)
+        origins = {g["query"]: g["origin"] for g in plan["strategy"]["query_groups"]}
+        self.assertEqual(origins["ECG wearable survey"], "feedback")
+        self.assertEqual(origins["machine learning ECG"], "planner")
+        self.assertEqual(plan["strategy"]["purpose_source"], "keyword_heuristic")
+        LP.add_round(plan, "refetch", ["ECG benchmark dataset"], 7, "审评缺口补抓")
+        LP.finish(plan, 120, 40, ["缺基准数据集"])
+        path = LP.write(self.root, plan)
+        loaded = LP.load(self.root)
+        self.assertEqual(len(loaded["rounds"]), 2)
+        self.assertEqual(loaded["outcome"]["n_selected"], 40)
+        self.assertTrue(Path(path).exists())
+
+    def test_review_saves_suggested_queries_only_when_llm_read(self):
+        md = "## 第1章 绪论\n" + "正文内容。" * 80 + "\n"
+        paper = self.root / "paper.md"
+        paper.write_text(md, encoding="utf-8")
+        fake = {"verdict": "修改后可提交", "overall": "文献覆盖偏窄",
+                "strengths": [], "chapters": [], "cross_cutting": [],
+                "top_actions": [], "suggested_queries": ["cardiac wearable ECG survey"]}
+        with patch.object(PRA.LLM, "available", return_value=True), \
+                patch.object(PRA.LLM, "chat_json", return_value=fake):
+            r = PRA.run(str(paper), str(self.root))
+        self.assertEqual(r["feedback_queries_saved"], 1)
+        self.assertEqual(SL.take_feedback_queries()[0]["source"], "paper_review")
+        with patch.object(PRA.LLM, "available", return_value=False):
+            r2 = PRA.run(str(paper), str(self.root))
+        self.assertEqual(r2["feedback_queries_saved"], 0, "规则兜底不配给检索建议")
+
+    def test_review_report_shows_applied_feedback(self):
+        run_dir = self.root / "run"
+        out = run_dir / "06_paper"
+        out.mkdir(parents=True)
+        (out / "paper.md").write_text("## 第1章 绪论\n" + "正文。" * 80, encoding="utf-8")
+        plan = LP.create("心电", ["ECG wearable survey"], ["crossref"],
+                         feedback=[{"query": "ECG wearable survey",
+                                    "source": "literature_review", "note": "上轮缺综述"}])
+        LP.write(run_dir, plan)
+        with patch.object(PRA.LLM, "available", return_value=False):
+            r = PRA.run(str(out / "paper.md"), str(out))
+        self.assertEqual(len(r["applied_feedback"]), 1)
+        self.assertIn("本次检索已应用的历史反馈", (out / "08_paper_review.md").read_text(encoding="utf-8"))
+
+    def test_human_choices_mark_ledger(self):
+        run_dir = self.root / "run2"
+        papers = [{"id": "a", "title": "Paper A"}, {"id": "b", "title": "Paper B"}]
+        SL.record_selection("测试", papers, papers, run_dir, selector="model")
+        res = SL.apply_human_choices(run_dir, ["a"], ["b"], "人工勾选：B 与题目无关")
+        self.assertEqual(res["ledger_updated"], 2)
+        led = json.loads((run_dir / SL.LEDGER_NAME).read_text(encoding="utf-8"))
+        by_num = {r["id"]: r for r in led["decisions"]}
+        self.assertEqual(by_num["a"]["by"], "human")
+        self.assertFalse(by_num["b"]["selected"])
+        self.assertEqual(by_num["b"]["by"], "human")
+        kept, applied = SL.apply_preferences(papers, "测试")
+        self.assertEqual([p["id"] for p in kept], ["a"])
+        self.assertEqual(applied["removed"][0]["by"], "human")

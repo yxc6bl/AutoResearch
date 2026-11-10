@@ -326,8 +326,12 @@ function loadResult(id){
   }).catch(e=>setStatus('加载失败：'+e,'failed'));
 }
 
+let currentOutDir='';
+let litPickData=null;
+
 function renderResult(d){
   const tabs=el('tabs');
+  currentOutDir=d.out_dir||el('openDir').value.trim();
   // 构建 tab body
   let html='';
   // 论文
@@ -341,7 +345,13 @@ function renderResult(d){
     const meta=[c.authors,c.venue,c.year].filter(Boolean).join(' · ');
     lit+=`<div class="list-item"><div class="t">${esc(title)}</div><div class="m">${esc(meta)}</div></div>`;
   });
-  html+=`<div class="tabpane" id="pane-lit">${lit||'<div class="empty">无文献</div>'}</div>`;
+  html+=`<div class="tabpane" id="pane-lit">
+    <div style="margin-bottom:12px;padding:10px;border:1px solid var(--line);border-radius:8px">
+      <button type="button" id="litPickBtn" style="padding:6px 12px">人工选材：勾选保留 / 剔除</button>
+      <span id="litPickStat" style="margin-left:10px;color:var(--muted);font-size:12px"></span>
+      <div id="litPickPanel" style="display:none;margin-top:12px"></div>
+    </div>
+    ${lit||'<div class="empty">无文献</div>'}</div>`;
   // 实验
   let exp='';
   if(d.experiment){
@@ -364,7 +374,56 @@ function renderResult(d){
   html+=`<div class="tabpane" id="pane-plots">${pl||'<div class="empty">无图表</div>'}</div>`;
 
   el('tabbody').innerHTML=html;
+  if(el('litPickBtn')) el('litPickBtn').onclick=openLitPicker;
+  el('litPickStat').textContent='当前目录：'+currentOutDir;
   setStatus('已加载结果','done');
+}
+
+function openLitPicker(){
+  if(!currentOutDir){setStatus('请先加载一个产物目录','failed');return;}
+  fetch(API+'/api/lit-choices?dir='+encodeURIComponent(currentOutDir))
+    .then(r=>r.json()).then(d=>{
+      if(!d.found){setStatus('选材清单读取失败：'+(d.error||''),'failed');return;}
+      litPickData=d;
+      const pl=d.plan||{};
+      let h='<div style="font-size:12px;color:var(--muted);margin-bottom:8px">';
+      h+='检索数据源：'+esc((pl.sources||[]).join('、')||'（未记录）')+'；检索式 '+(pl.query_groups||[]).length+' 条';
+      if((pl.applied_feedback||[]).length){
+        h+='<br>本次已并入上轮反馈：'+pl.applied_feedback.map(x=>esc(x.query||'')).join('；');
+      }
+      if(!d.plan_available) h+='<br>（该目录是旧运行，未记录检索计划；新跑一次会生成 LIT_PLAN.json）';
+      h+='<br>已存偏好规则 '+d.n_rules+' 条、单篇表态 '+d.n_decisions+' 条</div>';
+      h+='<div style="max-height:320px;overflow:auto;border-top:1px solid var(--line);padding-top:6px">';
+      (d.papers||[]).forEach(p=>{
+        const ck=p.human==='drop'?'':'checked';
+        const tag=p.human==='drop'?'已剔除':(p.human==='keep'?'人工保留':'AI 入选');
+        h+=`<label style="display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid var(--line);font-size:12.5px">
+          <input type="checkbox" data-key="${esc(p.key).replace(/"/g,'&quot;')}" ${ck} style="margin-top:3px">
+          <span><b>[${p.num}] ${esc(p.title)}</b><br>
+          <span style="color:var(--muted)">${esc([p.venue,p.year].filter(Boolean).join(' · '))} · ${esc(tag)}</span>
+          ${p.gist?'<br><span style="color:var(--muted)">'+esc(p.gist)+'</span>':''}</span></label>`;
+      });
+      h+='</div><div style="margin-top:10px"><input id="litPickNote" placeholder="备注：为什么这样选（会存进记忆）" style="width:100%;padding:6px;margin-bottom:8px">';
+      h+='<button type="button" id="litPickSave" style="padding:6px 14px">保存我的选择</button> <span id="litPickMsg" style="font-size:12px"></span></div>';
+      el('litPickPanel').innerHTML=h;
+      el('litPickPanel').style.display='block';
+      el('litPickSave').onclick=saveLitChoices;
+    }).catch(e=>setStatus('请求失败：'+e,'failed'));
+}
+
+function saveLitChoices(){
+  if(!litPickData) return;
+  const keep=[],drop=[];
+  document.querySelectorAll('#litPickPanel input[type=checkbox]').forEach(cb=>{
+    (cb.checked?keep:drop).push(cb.dataset.key);
+  });
+  const note=(el('litPickNote').value||'').trim();
+  fetch(API+'/api/lit-choices',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({dir:litPickData.dir,keep,drop,note})})
+    .then(r=>r.json()).then(d=>{
+      el('litPickMsg').textContent=d.ok?`已保存：保留 ${d.keep} 篇、剔除 ${d.drop} 篇，台账更新 ${d.ledger_updated} 条`:('失败：'+(d.error||''));
+      if(d.ok) setStatus('人工选材已写入记忆，下次抓取生效','done');
+    }).catch(e=>{el('litPickMsg').textContent='请求失败：'+e;});
 }
 
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}

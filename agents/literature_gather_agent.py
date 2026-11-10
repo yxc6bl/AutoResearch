@@ -466,6 +466,28 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
         queries = _keyword_queries(topic, task_type, method_cn, dataset_query)
     print(f"[GatherAgent] 检索式（{'LM 合成' if lm_driven else '关键词派生'}）：{queries}")
 
+    # 系统自我反馈闭环：上一轮论文诊断 / 文献审评指出的缺口已存成检索式，
+    # 这次抓取直接并入计划，并在 LIT_PLAN 里标明这几条的来源。
+    _fb_queries: list[dict] = []
+    try:
+        from engine import selection_ledger as SL
+        _fb_queries = SL.take_feedback_queries(limit=4)
+        _extra = [x["query"] for x in _fb_queries if x["query"] not in queries]
+        if _extra:
+            queries = queries + _extra
+            print(f"[检索规划] 并入 {len(_extra)} 条历史反馈检索式：{_extra}")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[检索规划] 反馈并入跳过：{_e}")
+
+    # 检索规划台账：选题 → 检索式（用途/来源）→ 数据源 → 每轮结果，全程可查。
+    _plan = None
+    try:
+        from engine import lit_plan as LP
+        _plan = LP.create(topic, queries, enabled_sources(), task_type,
+                          method_cn, dataset_query, lm_driven, _fb_queries)
+    except Exception as _e:  # noqa: BLE001
+        print(f"[检索规划] 台账初始化跳过：{_e}")
+
     # ② 广撒网
     pool = _fetch_pool(queries, per_query=40, deadline=_deadline)
     pool = pool[:max_candidates]
@@ -614,6 +636,9 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
                                             "lm_semantic" if _lm_kept else "keyword_only")
                 sel_report["cap"] = _cap
                 report["broadened_queries"] = _wide[:3]
+                if _plan is not None:
+                    LP.add_round(_plan, "broadening", _wide[:3], len(_added),
+                                 "首轮覆盖不足，按放宽主题扩面重抓")
                 report["rounds"] = int(report.get("rounds") or 1) + 1
                 report["n_candidates"] = len(pool)
                 print(f"[GatherAgent] 覆盖不足，已扩面重抓 {len(_added)} 条新候选 → 精选 {len(chosen)} 篇")
@@ -699,6 +724,14 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
           "quality_score": c.get("quality_score"), "url": c.get("url"),
           "role": c.get("role")} for c in pool], ensure_ascii=False, indent=2), encoding="utf-8")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if _plan is not None:
+        try:
+            LP.finish(_plan, len(pool), len(chosen), report.get("gaps") or [])
+            LP.write(out_dir, _plan)
+            print(f"[检索规划] 计划与结果已落盘 → {LP.NAME}")
+        except Exception as _e:  # noqa: BLE001
+            print(f"[检索规划] 台账写入跳过：{_e}")
 
     # 选材台账：候选池里每一篇的去留、理由、决策者（model/rule/human）都要留痕，
     # 否则用户事后想改「为什么把这篇选进来」没有任何依据。

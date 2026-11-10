@@ -334,6 +334,15 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                 try:
                     from engine import selection_ledger as SL
                     SL.attach_review(out_dir, _lrev)
+                    # 审评给出的补强检索式存进记忆，下一轮检索计划会并入；
+                    # 本轮先走原有的即时补抓，两条路不冲突。
+                    _nq = SL.add_feedback_queries(
+                        _lrev.get("recommended_add_queries") or [],
+                        source="literature_review",
+                        note="审评缺口：" + "；".join(
+                            map(str, (_lrev.get("missing_themes") or [])[:3])))
+                    if _nq:
+                        print(f"[检索规划] 审评给出 {_nq} 条补强检索式，已存记忆供下轮并入")
                 except Exception:
                     pass
                 # 审评 → 补抓闭环：缺口不再只写进 04 文件就结束，
@@ -347,6 +356,18 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         if _rr.get("status") == "ok":
                             print(f"[RefetchAgent] 文献集已更新为 {_rr['n_after']} 篇"
                                   f"（LM 阅读覆盖 {_rr['read_coverage_after']:.0%}）")
+                            try:
+                                from engine import lit_plan as LP
+                                _pl = LP.load(out_dir)
+                                if _pl:
+                                    LP.add_round(
+                                        _pl, "refetch",
+                                        _lrev.get("recommended_add_queries") or [],
+                                        int(_rr.get("n_after", 0)) - int(_rr.get("n_before", 0)),
+                                        "审评缺口即时补抓")
+                                    LP.write(out_dir, _pl)
+                            except Exception:
+                                pass
                     except Exception as e:  # noqa: BLE001
                         print(f"[RefetchAgent] 补抓跳过（不影响主流程）：{e}")
             except Exception as e:  # noqa: BLE001

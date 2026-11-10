@@ -157,6 +157,79 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
+    def _safe_dir(self, raw: str):
+        """只允许访问工程根内的产物目录，避免任意路径读取。"""
+        d = Path(raw)
+        if not d.is_absolute():
+            d = ROOT / d
+        try:
+            d = d.resolve()
+            root = ROOT.resolve()
+            if d != root and root not in d.parents:
+                return None
+        except Exception:
+            return None
+        return d if d.exists() else None
+
+    def _get_lit_choices(self, raw_dir: str):
+        d = self._safe_dir(raw_dir)
+        if d is None:
+            self._json({"found": False, "error": "目录不存在或不在工程内"}, 404)
+            return
+        try:
+            from engine import selection_ledger as SL
+            from engine import lit_plan as LP
+            from paper.lit_material import normalize_gist as _ng
+            lp = d / "01_literature.json"
+            papers = json.loads(lp.read_text(encoding="utf-8")).get("papers") or [] if lp.exists() else []
+            prefs = SL.load_prefs()
+            drops = {x["key"] for x in prefs.get("paper_decisions", []) if x.get("action") == "drop"}
+            keeps = {x["key"] for x in prefs.get("paper_decisions", []) if x.get("action") == "keep"}
+            rows = []
+            for i, p in enumerate(papers, 1):
+                key = str(p.get("id") or p.get("title") or "")
+                state = "drop" if SL._paper_hits(drops, p) else (
+                    "keep" if SL._paper_hits(keeps, p) else "ai")
+                rows.append({"num": i, "key": key, "title": p.get("title") or "",
+                             "year": p.get("year"), "venue": p.get("venue"),
+                             "gist": _ng(p.get("gist_cn")),
+                             "human": state})
+            plan = LP.load(d) or {}
+            self._json({
+                "found": True, "dir": str(d), "papers": rows,
+                "plan_available": bool(plan),
+                "plan": {"sources": (plan.get("strategy") or {}).get("sources") or [],
+                         "query_groups": (plan.get("strategy") or {}).get("query_groups") or [],
+                         "applied_feedback": plan.get("applied_feedback") or [],
+                         "outcome": plan.get("outcome") or {}},
+                "n_rules": len(prefs.get("rules") or []),
+                "n_decisions": len(prefs.get("paper_decisions") or []),
+            })
+        except Exception as e:  # noqa: BLE001
+            self._json({"found": False, "error": str(e)}, 500)
+
+    def _post_lit_choices(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            data = {}
+        d = self._safe_dir(str(data.get("dir") or ""))
+        if d is None:
+            self._json({"ok": False, "error": "目录不存在或不在工程内"}, 404)
+            return
+        try:
+            from engine import selection_ledger as SL
+            res = SL.apply_human_choices(
+                d, data.get("keep") or [], data.get("drop") or [],
+                str(data.get("note") or "")[:200])
+            res["ok"] = True
+            res["hint"] = "已写入记忆：下次抓取会按这些选择剔除/优先保留；本次选材台账已标注 by=human。"
+            self._json(res)
+        except Exception as e:  # noqa: BLE001
+            self._json({"ok": False, "error": str(e)}, 500)
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -165,6 +238,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if path == "/api/lit-choices" and "dir" in qs:
+            self._get_lit_choices(qs["dir"][0])
             return
 
         if path == "/api/datasets":
@@ -228,6 +305,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, b"not found")
 
     def do_POST(self):
+        if self.path == "/api/lit-choices":
+            self._post_lit_choices()
+            return
         if self.path != "/api/run":
             self._send(404, b"not found")
             return

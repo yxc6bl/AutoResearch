@@ -39,7 +39,8 @@ def _now() -> str:
 
 # ── 偏好存储 ──────────────────────────────────────────────────────────
 def _empty() -> dict:
-    return {"version": 1, "rules": [], "paper_decisions": [], "review_notes": []}
+    return {"version": 2, "rules": [], "paper_decisions": [],
+            "review_notes": [], "feedback_queries": []}
 
 
 def load_prefs() -> dict:
@@ -106,6 +107,103 @@ def add_review_note(run_dir: str, item_id: str, status: str,
     d["review_notes"].append(rec)
     _save(d)
     return rec
+
+
+# ── 评审反馈 → 下轮检索式（系统自我改进） ─────────────────────────────
+def _paper_hits(keys: set[str], p: dict) -> bool:
+    """人工表态是否命中这篇文献。
+
+    短标识（如测试里的 a/b，或用户手输的简写）绝不做子串匹配——
+    "a" 会出现在几乎任何英文题名里，实测把「人工剔除」误豁免成「保留」。
+    只有完整 id / 题名精确相等，或足够长的标识（≥8 字符）才允许子串命中。
+    """
+    ident = _norm(f"{p.get('id') or ''}{p.get('title') or ''}")
+    pid = _norm(p.get("id"))
+    ptitle = _norm(p.get("title"))
+    for k in keys or ():
+        if not k:
+            continue
+        if k == pid or k == ptitle or (len(k) >= 8 and k in ident):
+            return True
+    return False
+
+
+def add_feedback_queries(queries: list[str], source: str,
+                         note: str = "") -> int:
+    """把论文诊断 / 文献审评指出的缺口转成下轮要搜的式子，存进记忆。
+
+    去重按归一化文本；同一条反馈只存一次。source 记来源，便于事后查
+    「这条检索式是为什么加的」。
+    """
+    d = load_prefs()
+    d.setdefault("feedback_queries", [])
+    seen = {_norm(x.get("query")) for x in d["feedback_queries"]}
+    n = 0
+    for q in queries or []:
+        q = str(q).strip()
+        if not q or _norm(q) in seen:
+            continue
+        d["feedback_queries"].append({
+            "query": q[:200], "source": source, "note": note,
+            "ts": _now(), "used_at": None})
+        seen.add(_norm(q))
+        n += 1
+    if n:
+        _save(d)
+    return n
+
+
+def take_feedback_queries(limit: int = 4) -> list[dict]:
+    """取出尚未消费的反馈检索式，并标记已被本次检索计划采用。"""
+    d = load_prefs()
+    out = []
+    for x in d.setdefault("feedback_queries", []):
+        if x.get("used_at"):
+            continue
+        out.append({"query": x["query"], "source": x.get("source"),
+                    "note": x.get("note"), "ts": x.get("ts")})
+        x["used_at"] = _now()
+        if len(out) >= limit:
+            break
+    if out:
+        _save(d)
+    return out
+
+
+def apply_human_choices(run_dir, keep: list[str], drop: list[str],
+                        note: str = "") -> dict:
+    """网页/命令行里人勾选的保留与剔除，一次写回偏好台账与本次选材台账。"""
+    keep, drop = list(keep or []), list(drop or [])
+    for k in keep:
+        add_decision(k, "keep", note)
+    for k in drop:
+        add_decision(k, "drop", note)
+    p = Path(run_dir) / LEDGER_NAME
+    updated = 0
+    if p.exists():
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            dk = {_norm(k) for k in drop}
+            kk = {_norm(k) for k in keep}
+            for row in d.get("decisions") or []:
+                ident = _norm(f"{row.get('id') or ''}{row.get('title') or ''}")
+                if _paper_hits(dk, row):
+                    row["by"] = "human"
+                    row["selected"] = False
+                    row["reason"] = note or "人工剔除"
+                    updated += 1
+                elif _paper_hits(kk, row):
+                    row["by"] = "human"
+                    row["selected"] = True
+                    row["reason"] = note or "人工要求保留"
+                    updated += 1
+            d["human_choices"] = {"keep": keep, "drop": drop,
+                                  "note": note, "ts": _now()}
+            p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    return {"keep": len(keep), "drop": len(drop),
+            "ledger_updated": updated, "path": str(p)}
 
 
 def active_rules(topic: str = "") -> list[dict]:
@@ -192,19 +290,17 @@ def apply_preferences(papers: list[dict], topic: str = "") -> tuple[list[dict], 
     keep_keys = {x["key"] for x in decisions if x.get("action") == "keep"}
     kept, removed, boosted = [], [], []
     for p in papers or []:
-        ident = _norm(f"{p.get('id') or ''}{p.get('title') or ''}")
-        if any(k and k in ident for k in drop_keys) and not any(
-                k and k in ident for k in keep_keys):
+        if _paper_hits(drop_keys, p) and not _paper_hits(keep_keys, p):
             removed.append({"title": p.get("title"), "by": "human", "reason": "人工排除"})
             continue
         hit_avoid = [r for r in rules if r["kind"] == "avoid" and _match(r, p)]
-        if hit_avoid and not any(k and k in ident for k in keep_keys):
+        if hit_avoid and not _paper_hits(keep_keys, p):
             removed.append({"title": p.get("title"), "by": "human",
                             "reason": f"偏好规则 {hit_avoid[0]['field']}={hit_avoid[0]['value']}"})
             continue
         bonus = sum(float(r.get("weight") or 0) for r in rules
                     if r["kind"] in ("require", "boost") and _match(r, p))
-        bonus += 0.3 if any(k and k in ident for k in keep_keys) else 0.0
+        bonus += 0.3 if _paper_hits(keep_keys, p) else 0.0
         if bonus:
             p = dict(p)
             p["pref_bonus"] = round(bonus, 3)
@@ -254,8 +350,7 @@ def record_selection(topic: str, pool: list[dict], chosen: list[dict],
     human_keys = {x["key"] for x in decisions}
 
     def _row(p: dict, selected: bool) -> dict:
-        ident = _norm(f"{p.get('id') or ''}{p.get('title') or ''}")
-        by = "human" if any(k and k in ident for k in human_keys) else (
+        by = "human" if _paper_hits(human_keys, p) else (
             selector if selected else "rule")
         reason = (p.get("llm_why") or p.get("llm_what") or p.get("gist_cn") or
                   (f"role={p.get('role')}, fit={p.get('fit_score')}" if selected else

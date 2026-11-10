@@ -51,7 +51,8 @@ PROMPT = """你是本科毕业论文的指导教师。请通读下面这篇论�
   "cross_cutting": ["跨章节的问题，如术语不一致、章节小结与正文不符、引用密度失衡、前后结论矛盾"],
   "top_actions": [
     {"priority": 1, "action": "最该先做的一件事（动作句）", "where": "落在哪一章/哪一节", "why": "为什么优先"}
-  ]
+  ],
+  "suggested_queries": ["若发现文献覆盖不足，给出 2-4 条可直接用于 arXiv/OpenAlex 的英文检索式；没有文献问题则给空数组"]
 }
 
 硬性要求：
@@ -60,7 +61,9 @@ PROMPT = """你是本科毕业论文的指导教师。请通读下面这篇论�
 3. how 不许写「建议加强」「应进一步提升」这类空话，要写成可执行的动作；
 4. 每章都给 judgment；确实没问题就给空 problems 并说明为什么；
 5. top_actions 最多 8 条，按对论文质量的影响从大到小排，优先写能立刻动手的；
-6. 只输出 JSON，不要解释、不要 markdown 代码块。
+6. suggested_queries 必须是简短的英文检索短语（不要中文长句、不要整段解释），
+   它们会被存进记忆，下一轮抓文献时并入检索计划；
+7. 只输出 JSON，不要解释、不要 markdown 代码块。
 """
 
 
@@ -169,6 +172,25 @@ def run(paper_path, out_dir=None, verdict: dict | None = None) -> dict:
     review["dropped_unverifiable_quotes"] = dropped
     review["paper"] = str(p)
     review["ts"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+    # 自我反馈闭环：诊断发现的文献缺口 -> 下轮检索式，写进跨运行记忆。
+    # 只有模型真通读过才存，规则兜底不配给检索建议（会污染计划）。
+    try:
+        from engine import selection_ledger as SL
+        if review.get("llm_available"):
+            review["feedback_queries_saved"] = SL.add_feedback_queries(
+                review.get("suggested_queries") or [], source="paper_review",
+                note=f"论文诊断：{str(review.get('verdict') or '')}")
+        else:
+            review["feedback_queries_saved"] = 0
+        # 本次成文的检索计划里，有哪些式子来自上一轮反馈——让闭环可被看见。
+        from engine import lit_plan as LP
+        _plan = LP.load(out.parent) or LP.load(out)
+        review["applied_feedback"] = (_plan or {}).get("applied_feedback") or []
+    except Exception:
+        review["feedback_queries_saved"] = 0
+        review["applied_feedback"] = []
+
     review["human_feedback_hint"] = (
         "对某条意见表态：python auto_research.py lit-pref --review-mark "
         "<产物目录> P01 accepted --note \"…\"；采纳/驳回会存进记忆并影响下一轮写作。")
@@ -205,6 +227,13 @@ def _render(r: dict) -> str:
             L += ["（本章未发现需要改动的具体问题）", ""]
     if r.get("cross_cutting"):
         L += ["## 跨章节问题", ""] + [f"- {x}" for x in r["cross_cutting"]] + [""]
+    if r.get("applied_feedback"):
+        L += ["## 本次检索已应用的历史反馈", "",
+              "下面这几条检索式是上一轮诊断／审评留下的，本次抓文献时已并入计划：", ""]
+        for x in r["applied_feedback"]:
+            L.append(f"- `{x.get('query')}`（来源：{x.get('source') or '未知'}"
+                     + (f"；{x.get('note')}" if x.get("note") else "") + "）")
+        L.append("")
     if r.get("top_actions"):
         L += ["## 优先修改清单", ""]
         for a in sorted(r["top_actions"], key=lambda x: x.get("priority") or 99):
