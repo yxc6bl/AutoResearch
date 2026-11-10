@@ -223,6 +223,18 @@ def build_fact_pack(paper_type: str, spec: dict, refs: list,
         base += ("\n提示：写「国内外研究现状」「相关工作」「理论基础」时，有概要的文献"
                  "必须依据对应编号的概要转述，不得只看题名就推断该文献得出了什么结论；"
                  "概要没写的结论一律不写。\n")
+    # 人工对上一篇诊断书的批注与选材偏好，单条即生效（不必等台账攒够两次）。
+    try:
+        from engine import selection_ledger as SL
+        _notes = SL.review_notes_for()
+        if _notes:
+            base += ("\n\n【人工批注：上一篇论文诊断书里人已确认要改的事，本次务必落实】\n"
+                     + "\n".join(f"- {x['detail']}" for x in _notes))
+        _pp = SL.preference_prompt(spec.get("title") or spec.get("topic") or "")
+        if _pp:
+            base += "\n\n" + _pp
+    except Exception:
+        pass
     return base, stats
 
 

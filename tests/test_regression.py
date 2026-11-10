@@ -41,6 +41,8 @@ from verify_multitype import (  # noqa: E402
     _backup_before_build, _gateway_ok, _needs_revise,
     _restore_after_failed_build,
 )
+from engine import selection_ledger as SL  # noqa: E402
+from agents import paper_review_agent as PRA  # noqa: E402
 
 
 def _papers(n: int = 5) -> list[dict]:
@@ -597,3 +599,136 @@ class TestLLMAvailabilityCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestSelectionLedger(unittest.TestCase):
+    """选材台账 + 人工偏好：单条意见必须立刻生效，且不影响引用编号顺序。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._p = patch.object(SL, "PREF_PATH", Path(self.tmp.name) / "prefs.json")
+        self._p.start()
+        self.papers = [
+            {"id": "a", "title": "Deep learning for heart risk", "year": 2024,
+             "venue": "Nature", "abstract": "clinical cohort"},
+            {"id": "b", "title": "A preprint on diabetes", "year": 2018,
+             "venue": "arXiv", "abstract": "preprint"},
+            {"id": "c", "title": "Survey of cardiovascular models", "year": 2022,
+             "venue": "IEEE", "abstract": "review"},
+        ]
+
+    def tearDown(self):
+        self._p.stop()
+        self.tmp.cleanup()
+
+    def test_avoid_rule_removes_and_keeps_order(self):
+        SL.add_rule("avoid", "keyword", "preprint", note="别用预印本")
+        kept, applied = SL.apply_preferences(self.papers, "心血管")
+        self.assertEqual([p["id"] for p in kept], ["a", "c"])
+        self.assertEqual(applied["n_before"], 3)
+        self.assertEqual(applied["n_after"], 2)
+
+    def test_year_rule_and_boost(self):
+        SL.add_rule("avoid", "year", "<=2020")
+        SL.add_rule("boost", "keyword", "survey", weight=0.2)
+        kept, _ = SL.apply_preferences(self.papers)
+        self.assertEqual([p["id"] for p in kept], ["a", "c"])
+        self.assertGreater(kept[1].get("pref_bonus", 0), 0)
+
+    def test_keep_overrides_drop(self):
+        SL.add_decision("A preprint on diabetes", "drop", note="不相关")
+        SL.add_decision("A preprint on diabetes", "keep", note="导师要求保留")
+        kept, _ = SL.apply_preferences(self.papers)
+        self.assertEqual(len(kept), 3)
+        self.assertGreater(kept[1].get("pref_bonus", 0), 0)
+
+    def test_record_selection_covers_all_candidates(self):
+        pool = self.papers + [{"id": "d", "title": "Dropped one", "year": 2019}]
+        chosen = self.papers[:2]
+        d = Path(self.tmp.name) / "out"
+        info = SL.record_selection("心血管", pool, chosen, d, selector="model")
+        led = json.loads((d / SL.LEDGER_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(info["n_candidates"], 4)
+        self.assertEqual(info["n_selected"], 2)
+        self.assertEqual(len(led["decisions"]), 4)
+        self.assertEqual(sum(1 for x in led["decisions"] if x["selected"]), 2)
+        self.assertTrue(all(x["by"] in ("model", "rule", "human") for x in led["decisions"]))
+        self.assertTrue(SL.attach_review(d, {"weak_ids": ["d"],
+                                             "missing_themes": ["缺综述"]}))
+        led2 = json.loads((d / SL.LEDGER_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(led2["review"]["missing_themes"], ["缺综述"])
+
+    def test_preferences_and_notes_reach_writer_fact_pack(self):
+        """闭环的消费端：人的表态必须真的出现在写作提示里，不能只存在文件里。"""
+        SL.add_rule("avoid", "keyword", "preprint", note="别用预印本")
+        SL.add_review_note("out_x", "P01", "accepted", "照改", "第2章补样本说明")
+        facts, _ = build_fact_pack("survey", {"title": "心血管综述"},
+                                   [{"num": 1}], "[1] 清单", {"papers": []})
+        self.assertIn("用户偏好", facts)
+        self.assertIn("人工批注", facts)
+        self.assertIn("第2章补样本说明", facts)
+
+    def test_preference_prompt_and_review_notes(self):
+        SL.add_rule("avoid", "keyword", "preprint", note="别用预印本")
+        SL.add_review_note("out_x", "P01", "accepted", "照改", "第2章补样本说明")
+        SL.add_review_note("out_x", "P02", "rejected", "", "别再提框架图")
+        pp = SL.preference_prompt("心血管")
+        self.assertIn("不要选", pp)
+        self.assertIn("别用预印本", pp)
+        notes = [x["detail"] for x in SL.review_notes_for()]
+        self.assertTrue(any("人工确认要改" in x for x in notes))
+        self.assertTrue(any("已被人工驳回" in x for x in notes))
+        self.assertIn("【用户偏好", SL.preference_prompt())
+
+
+class TestPaperReview(unittest.TestCase):
+    """文本诊断：不打分、定位句必须可核实、兜底不许装作读过全文。"""
+
+    def _md(self) -> str:
+        return ("## 封面\n姓名：某某\n\n## 诚信声明\n本人声明。\n\n"
+                "## 摘要\n本文研究某问题。\n\n"
+                "## 第1章 绪论\n" + "背景与意义。" * 60 + "\n\n"
+                "## 第2章 方法\n" + "方法描述。" * 60 + "\n\n"
+                "## Abstract\nThis is an English abstract.\n\n"
+                "## 参考文献\n[1] A.\n")
+
+    def test_fallback_skips_front_matter_and_english(self):
+        r = PRA._fallback(self._md())
+        self.assertFalse(r["llm_available"])
+        self.assertIn("未完成文本诊断", r["verdict"])
+        joined = " ".join(r["cross_cutting"])
+        for bad in ("封面", "诚信声明", "Abstract", "摘要"):
+            self.assertNotIn(bad, joined, "前置材料/英文摘要不该被判成展开不足")
+        self.assertIn("未完成逐章诊断", PRA._render(r))
+        self.assertNotIn("分", PRA._render(r).split("## 整体判断")[0])
+
+    def test_fabricated_quotes_are_dropped(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            (p / "paper.md").write_text(self._md(), encoding="utf-8")
+            fake = {"verdict": "修改后可提交", "overall": "整体判断",
+                    "strengths": [],
+                    "chapters": [{"chapter": "第1章 绪论", "judgment": "尚可",
+                                  "problems": [
+                                      {"quote": "背景与意义。", "why": "太泛",
+                                       "how": "补具体数据", "severity": "中"},
+                                      {"quote": "文中根本没有这句话", "why": "编的",
+                                       "how": "删掉", "severity": "高"}]}],
+                    "cross_cutting": [], "top_actions": []}
+            with patch.object(PRA.LLM, "available", return_value=True), \
+                    patch.object(PRA.LLM, "chat_json", return_value=fake):
+                r = PRA.run(str(p / "paper.md"), str(p))
+            self.assertEqual(r["dropped_unverifiable_quotes"], 1)
+            self.assertEqual(len(r["chapters"][0]["problems"]), 1)
+            self.assertEqual(r["chapters"][0]["problems"][0]["id"], "P01")
+            self.assertTrue((p / "08_paper_review.md").exists())
+            self.assertTrue((p / "08_paper_review.json").exists())
+
+    def test_run_falls_back_when_gateway_down(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            (p / "paper.md").write_text(self._md(), encoding="utf-8")
+            with patch.object(PRA.LLM, "available", return_value=False):
+                r = PRA.run(str(p / "paper.md"), str(p))
+        self.assertFalse(r["llm_available"])
+        self.assertEqual(r["provenance"], "rule")

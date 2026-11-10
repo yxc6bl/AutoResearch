@@ -650,6 +650,23 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
             except Exception as e:  # noqa: BLE001
                 print(f"[GatherAgent] 入选补读跳过：{e}")
 
+    # 跨运行人工偏好：只剔除/加分，不重排顺序——顺序就是正文 [N] 引用编号。
+    _applied: dict = {}
+    try:
+        from engine import selection_ledger as SL
+        _pp = SL.preference_prompt(topic)
+        if _pp:
+            print("[选材台账] 检测到人工偏好：\n" + _pp)
+        chosen, _applied = SL.apply_preferences(chosen, topic)
+        if _applied.get("removed"):
+            print(f"[选材台账] 按人工偏好剔除 {len(_applied['removed'])} 篇")
+        if _applied.get("n_after", len(chosen)) < 8:
+            print("[选材台账] [警告] 应用偏好后入选不足 8 篇，正文可能缺文献；"
+                  "请用 lit-pref --list 检查排除规则")
+        report["preferences"] = _applied
+    except Exception as _e:  # noqa: BLE001
+        print(f"[选材台账] 偏好应用跳过：{_e}")
+
     report["selection"] = sel_report
 
     if sel_report.get("role_stats"):
@@ -682,6 +699,18 @@ def run(topic: str, task_type: str = "classification", method_cn: list[str] | No
           "quality_score": c.get("quality_score"), "url": c.get("url"),
           "role": c.get("role")} for c in pool], ensure_ascii=False, indent=2), encoding="utf-8")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # 选材台账：候选池里每一篇的去留、理由、决策者（model/rule/human）都要留痕，
+    # 否则用户事后想改「为什么把这篇选进来」没有任何依据。
+    try:
+        from engine import selection_ledger as SL
+        _led = SL.record_selection(topic, pool, chosen, out_dir,
+                                   selector=("model" if lm_driven else "rule"),
+                                   applied=_applied)
+        print(f"[选材台账] {_led['n_candidates']} 候选 / {_led['n_selected']} 入选"
+              f" / {_led['n_human']} 篇有人工表态 → {SL.LEDGER_NAME}")
+    except Exception as _e:  # noqa: BLE001
+        print(f"[选材台账] 写入失败（不影响本次抓取）：{_e}")
 
     print(f"[GatherAgent] 精选 {len(chosen)} 篇 → {papers_path.name}（LM 驱动={lm_driven}）")
     return {"papers": chosen, "candidates": pool, "report": report, "lm_driven": lm_driven}

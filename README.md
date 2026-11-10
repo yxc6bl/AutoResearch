@@ -90,7 +90,34 @@ python auto_research.py plan --topic "县域中学课后服务质量提升路径
 写作事实包与评审事实基础，模型写「研究现状」不再只看题名就替文献编结论。
 占位值（「未知」「无」「N/A」等）会被确定性清掉，不会写进正文引用块。
 
-**改代码后跑一次回归**（50 个用例，不联网、约 0.13 秒）：
+## 选材留痕、人工偏好与文本诊断
+
+**文献侧**：每次抓取写 `LIT_SELECTION.json`，记录候选池里每一篇的去留、理由和
+决策者（模型／规则／人工）；用 `python auto_research.py lit-pref --selection <产物目录>`
+查看。人的偏好存进 `memory/lit_preferences.json`，**单条立刻生效**，下轮抓取就会
+剔除或加权，文献审评 Agent 也读同一份偏好，不会把你排除的类型又建议补回来：
+
+```bash
+python auto_research.py lit-pref --kind avoid --field keyword --value preprint --note "不要预印本"
+python auto_research.py lit-pref --drop "题名或 DOI" --note "与题目无关"
+python auto_research.py lit-pref --keep "题名或 DOI" --note "导师指定保留"
+python auto_research.py lit-pref --list
+```
+
+**论文侧**：整篇产出后自动写 `06_paper/08_paper_review.md`（给人读）和同名 json。
+它**不给分数**，只做指导教师式的通读诊断：整体判断、逐章问题（引用原文片段／
+为什么是问题／具体怎么改）、按影响排序的优先修改清单。也可单独跑
+`python auto_research.py step --name review --out <产物目录>`。每条意见有稳定编号，
+可以对它表态，采纳或驳回都会存进记忆并影响下一轮写作提示：
+
+```bash
+python auto_research.py lit-pref --review-mark <产物目录> P01 accepted --note "照这个改"
+python auto_research.py lit-pref --review-mark <产物目录> P02 rejected --note "这条不适用"
+```
+
+网关不可用时诊断书会明确标注「未完成文本诊断」，只列确定性事实，不假装模型读过全文。
+
+**改代码后跑一次回归**（59 个用例，不联网、约 0.15 秒）：
 
 ```bash
 python -m unittest discover -s tests -v

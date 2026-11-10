@@ -280,11 +280,21 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                 ra = _load_module(ROOT / "agents" / "literature_review_agent.py", "lr_agent")
                 _topic = (spec.get("title") or spec.get("topic") or spec.get("direction")
                           or spec.get("research_question") or spec.get("literature_query") or "")
-                _lrev = ra.run(_topic, _papers, _lp.get("candidates"))
+                try:
+                    from engine import selection_ledger as SL
+                    _prefs = SL.preference_prompt(_topic)
+                except Exception:
+                    _prefs = ""
+                _lrev = ra.run(_topic, _papers, _lp.get("candidates"), _prefs)
                 (out_dir / "04_literature_review.json").write_text(
                     json.dumps(_lrev, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(f"[ReviewAgent] 补审缓存文献：覆盖 {_lrev.get('coverage_score')}/10，"
                       f"缺口 {len(_lrev.get('missing_themes') or [])} 项")
+                try:
+                    from engine import selection_ledger as SL
+                    SL.attach_review(out_dir, _lrev)
+                except Exception:
+                    pass
         except Exception as e:  # noqa: BLE001
             print(f"[ReviewAgent] 缓存文献审评跳过：{e}")
     if _need_fetch:
@@ -303,7 +313,12 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
             try:
                 ra = _load_module(ROOT / "agents" / "literature_review_agent.py", "lr_agent")
                 _cands = _gres.get("candidates") or []
-                _lrev = ra.run(_topic, _gres["papers"], _cands)
+                try:
+                    from engine import selection_ledger as SL
+                    _prefs = SL.preference_prompt(_topic)
+                except Exception:
+                    _prefs = ""
+                _lrev = ra.run(_topic, _gres["papers"], _cands, _prefs)
                 (out_dir / "04_literature_review.json").write_text(
                     json.dumps(_lrev, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(f"[ReviewAgent] 文献覆盖评分 {_lrev.get('coverage_score')}/10"
@@ -316,6 +331,11 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                         print(f"[ReviewAgent] 已记录 {_nfb} 条覆盖缺口 → memory/feedback.jsonl")
                 except Exception as e:  # noqa: BLE001
                     print(f"[ReviewAgent] 缺口入账跳过：{e}")
+                try:
+                    from engine import selection_ledger as SL
+                    SL.attach_review(out_dir, _lrev)
+                except Exception:
+                    pass
                 # 审评 → 补抓闭环：缺口不再只写进 04 文件就结束，
                 # 而是转成检索式再抓一轮，新增文献同样逐篇读，最后覆盖 01_literature.json。
                 # 想省时间可设 LIT_REFETCH=0 关闭。
@@ -538,6 +558,47 @@ def run_task(spec: dict, out_dir, make_paper: bool = True, mode: str = "general"
                             print(f"[EvalAgent] docx 重转失败（正文已回滚）：{_de}")
                     except Exception as e:  # noqa: BLE001
                         print(f"[EvalAgent] 回滚失败（保留最后一轮稿件）：{e}")
+            # 论文文本诊断（给人读）：通读全文给「哪里有问题、怎么改」，不打分。
+            # 与 eval_agent 分工：那边是分数与闸门，这边是指导教师式的文字诊断书。
+            if os.environ.get("AUTO_PAPER_REVIEW", "1") != "0" and _md.exists():
+                try:
+                    pra = _load_module(ROOT / "agents" / "paper_review_agent.py", "pr_agent")
+                    _pr = pra.run(str(_md), str(out_dir / "06_paper"), _verdict)
+                    _npr = sum(len(c.get("problems") or [])
+                               for c in (_pr.get("chapters") or [])) \
+                        + len(_pr.get("problems") or [])
+                    _nact = len(_pr.get("top_actions") or [])
+                    result["paper_review"] = {
+                        "verdict": _pr.get("verdict"), "n_problems": _npr,
+                        "n_actions": _nact,
+                        "report": str(out_dir / "06_paper" / "08_paper_review.md")}
+                    print(f"[论文诊断] {_pr.get('verdict')} | {_npr} 处问题 | "
+                          f"{_nact} 条优先动作 -> 06_paper/08_paper_review.md")
+                    try:
+                        from engine import feedback as FB
+                        _nn = 0
+                        # 规则兜底只数得出篇幅，入台账会变成「按该章补足内容」
+                        # 这种空泛噪音，还会被 lessons() 当成反复出现的问题。
+                        _actions = (_pr.get("top_actions") or [])[:6] \
+                            if _pr.get("llm_available") else []
+                        for _a in _actions:
+                            FB.add(str(_a.get("action") or "")[:300], type="其他",
+                                   severity="P1", stage="paper_review",
+                                   run_dir=str(out_dir),
+                                   topic=str(spec.get("title") or spec.get("topic") or ""),
+                                   source="paper_review",
+                                   evidence=str(_a.get("where") or ""),
+                                   action=str(_a.get("why") or ""),
+                                   provenance=("model" if _pr.get("llm_available") else "rule"),
+                                   confidence="medium")
+                            _nn += 1
+                        if _nn:
+                            print(f"[论文诊断] {_nn} 条改进动作已入反馈台账")
+                    except Exception:
+                        pass
+                except Exception as _pe:  # noqa: BLE001
+                    print(f"[论文诊断] 跳过：{_pe}")
+
         except Exception as e:  # noqa: BLE001
             result["errors"].append(f"generate_paper 异常: {e}")
 
@@ -1049,6 +1110,43 @@ def cmd_step(args) -> int:
             pass
         return 0
 
+    if name == "review":
+        md = out / "06_paper" / "paper_full.md"
+        if not md.exists():
+            print(f"[step review] 缺少 {md}，先跑 step --name write")
+            return 1
+        vp = out / "06_paper" / "07_eval_verdict.json"
+        v = None
+        if vp.exists():
+            try:
+                v = json.loads(vp.read_text(encoding="utf-8"))
+            except Exception:
+                v = None
+        pra = _load_module(ROOT / "agents" / "paper_review_agent.py", "pr_agent")
+        r = pra.run(str(md), str(out / "06_paper"), v)
+        n = sum(len(c.get("problems") or []) for c in (r.get("chapters") or [])) \
+            + len(r.get("problems") or [])
+        print(f"[step review] {r.get('verdict')} | {n} 处问题 | "
+              f"{len(r.get('top_actions') or [])} 条优先动作")
+        print(f"  给人读的诊断书：{out / '06_paper' / '08_paper_review.md'}")
+        try:
+            from engine import feedback as FB
+            cnt = 0
+            _actions = (r.get("top_actions") or [])[:6] \
+                if r.get("llm_available") else []
+            for a in _actions:
+                FB.add(str(a.get("action") or "")[:300], type="其他", severity="P1",
+                       stage="paper_review", run_dir=str(out), source="paper_review",
+                       evidence=str(a.get("where") or ""), action=str(a.get("why") or ""),
+                       provenance=("model" if r.get("llm_available") else "rule"),
+                       confidence="medium")
+                cnt += 1
+            if cnt:
+                print(f"[step review] {cnt} 条改进动作已入反馈台账")
+        except Exception as e:  # noqa: BLE001
+            print(f"[step review] 反馈记录跳过：{e}")
+        return 0
+
     if name == "polish":
         md = out / "06_paper" / "paper_full.md"
         if not md.exists():
@@ -1186,6 +1284,92 @@ def cmd_feedback(args) -> int:
         print(f"{r['ts']} [{r['type']}/{r['severity']}] {r['detail'][:70]}")
     if not rows:
         print("台账为空。用 --add 手工补记，或跑 step --name eval 自动采集。")
+    return 0
+
+
+
+def cmd_lit_pref(args) -> int:
+    """文献选材偏好：人对「抓什么、选什么、别选什么」的表态，跨运行生效。"""
+    from engine import selection_ledger as SL
+
+    if args.selection:
+        led = Path(args.selection) / SL.LEDGER_NAME
+        if not led.exists():
+            print(f"未找到选材台账：{led}")
+            return 1
+        d = json.loads(led.read_text(encoding="utf-8"))
+        dec = d.get("decisions") or []
+        print(f"题目：{d.get('topic')}")
+        print(f"候选 {d.get('n_candidates')} 篇 → 入选 {d.get('n_selected')} 篇"
+              f"（决策者 {d.get('selector')}）")
+        by = {}
+        for x in dec:
+            by[x.get("by")] = by.get(x.get("by"), 0) + 1
+        print("决策来源分布：" + "、".join(f"{k} {v} 条" for k, v in by.items()))
+        rev = d.get("review") or {}
+        if rev.get("missing_themes"):
+            print("审评缺口：" + "；".join(map(str, rev["missing_themes"][:5])))
+        if rev.get("weak_ids"):
+            print("审评判定弱相关：" + "、".join(map(str, rev["weak_ids"][:8])))
+        print("入选明细（前 12 条）：")
+        for x in [y for y in dec if y.get("selected")][:12]:
+            print(f"  [{x.get('by')}] {str(x.get('title'))[:70]} — {str(x.get('reason'))[:60]}")
+        return 0
+
+    acted = False
+    if args.drop:
+        r = SL.add_decision(args.drop, "drop", args.note, args.topic)
+        print("已排除：" + json.dumps(r, ensure_ascii=False))
+        acted = True
+    if args.keep:
+        r = SL.add_decision(args.keep, "keep", args.note, args.topic)
+        print("已要求保留：" + json.dumps(r, ensure_ascii=False))
+        acted = True
+    if args.kind:
+        r = SL.add_rule(args.kind, args.field, args.value, args.note,
+                        args.scope, args.weight)
+        print("已新增偏好规则：" + json.dumps(r, ensure_ascii=False))
+        acted = True
+    if args.review_mark:
+        rd, iid, status = args.review_mark
+        detail = ""
+        rp = Path(rd) / "06_paper" / "08_paper_review.json"
+        if rp.exists():
+            try:
+                rv = json.loads(rp.read_text(encoding="utf-8"))
+                for a in rv.get("top_actions") or []:
+                    if a.get("id") == iid:
+                        detail = a.get("action") or ""
+                        break
+                if not detail:
+                    for ch in rv.get("chapters") or []:
+                        for pr in ch.get("problems") or []:
+                            if pr.get("id") == iid:
+                                detail = f"{pr.get('why') or ''} → {pr.get('how') or ''}"
+                                break
+            except Exception:
+                pass
+        r = SL.add_review_note(rd, iid, status, args.note, detail)
+        print("已记下评审批注：" + json.dumps(r, ensure_ascii=False))
+        acted = True
+
+    if acted or args.list:
+        d = SL.load_prefs()
+        print("\n=== 当前偏好（memory/lit_preferences.json）===")
+        for r in d.get("rules", []):
+            print(f"  {r['id']} [{r['kind']}/{r['field']}] {r['value']}"
+                  f"  scope={r['scope']}  {r.get('note') or ''}")
+        for x in d.get("paper_decisions", []):
+            print(f"  单篇 {x['action']}: {str(x.get('raw'))[:70]}  {x.get('note') or ''}")
+        for x in d.get("review_notes", [])[-5:]:
+            print(f"  评审批注 {x['item_id']}/{x['status']}: {str(x.get('detail'))[:60]}")
+        pp = SL.preference_prompt(args.topic)
+        if pp:
+            print("\n" + pp)
+        return 0
+    print("用法：lit-pref --list / --selection <目录> / --kind avoid --field keyword "
+          "--value preprint / --drop <题名或DOI> / --keep <题名或DOI> / "
+          "--review-mark <目录> <意见编号> accepted|rejected|done")
     return 0
 
 
@@ -1478,9 +1662,9 @@ def main() -> int:
                     help="论文类型素材 JSON（含 material 字段时按类型挂到对应 spec_block）")
     fp.set_defaults(func=cmd_from_title)
 
-    sp = sub.add_parser("step", help="只跑某一步（plan/experiment/write/eval/polish），便于单模块调用")
+    sp = sub.add_parser("step", help="只跑某一步（plan/experiment/write/eval/review/polish），便于单模块调用")
     sp.add_argument("--name", required=True,
-                    choices=["plan", "experiment", "write", "eval", "polish"])
+                    choices=["plan", "experiment", "write", "eval", "review", "polish"])
     sp.add_argument("--out", required=True, help="产物目录")
     sp.add_argument("--topic", default="", help="plan 步骤需要：题目/主题")
     sp.add_argument("--dataset", default="", help="plan 步骤可选：sklearn 数据集名")
@@ -1520,6 +1704,24 @@ def main() -> int:
     fbp.add_argument("--confidence", default="medium", choices=["high", "medium", "low"],
                      help="这条反馈的把握程度")
     fbp.set_defaults(func=cmd_feedback)
+
+    lpp = sub.add_parser("lit-pref", help="文献选材偏好：记住人抓什么/选什么/别选什么，下轮生效")
+    lpp.add_argument("--list", action="store_true", help="列出全部偏好与单篇表态")
+    lpp.add_argument("--selection", default="", help="查看某次运行的选材台账目录")
+    lpp.add_argument("--drop", default="", help="排除某篇（题名/DOI/id），下轮不再入选")
+    lpp.add_argument("--keep", default="", help="要求保留某篇，优先于排除规则")
+    lpp.add_argument("--kind", default="", choices=["avoid", "require", "boost"])
+    lpp.add_argument("--field", default="keyword",
+                     choices=["id", "title", "venue", "year", "keyword", "topic"])
+    lpp.add_argument("--value", default="", help="匹配值；year 支持 >=2022 / <=2020")
+    lpp.add_argument("--scope", default="global", help="global 或题目关键词")
+    lpp.add_argument("--weight", type=float, default=0.15, help="require/boost 的加分")
+    lpp.add_argument("--note", default="", help="这条偏好/批注的理由")
+    lpp.add_argument("--topic", default="", help="关联题目")
+    lpp.add_argument("--review-mark", nargs=3, default=[],
+                     metavar=("RUN_DIR", "ITEM_ID", "STATUS"),
+                     help="对诊断报告某条意见表态：accepted/rejected/done")
+    lpp.set_defaults(func=cmd_lit_pref)
 
     dcp = sub.add_parser("doctor", help="自检：模型网关与文献数据源是否可用")
     dcp.set_defaults(func=cmd_doctor)

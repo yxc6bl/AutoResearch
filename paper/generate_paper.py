@@ -906,20 +906,32 @@ WRITER_SYSTEM += STYLE_RULES
 
 
 def _feedback_lessons() -> str:
-    """读取反馈台账里的高频未修复问题，作为写作时的硬约束注入。
+    """读取反馈台账与人工批注，作为写作时的硬约束注入。
 
-    这是 feedback 闭环的「消费端」：问题被记录 → 反复出现 → 下次写作前就必须规避，
-    而不是每次重新发现、重新解释。
+    问题被记录 → 反复出现 → 下次写作前就必须规避；另外人对诊断报告的
+    单条批注**立即生效**，不必等 feedback.lessons() 攒够两次。
     """
+    blocks = []
     try:
         from engine import feedback as FB
         items = FB.lessons(limit=5, min_count=2)
-        if not items:
-            return ""
-        return ("\n【历史反馈（同类问题已在本系统中反复出现，本次务必避免）】\n"
-                + "\n".join(f"- {x}" for x in items))
+        if items:
+            blocks.append("\n【历史反馈（同类问题已在本系统中反复出现，本次务必避免）】\n"
+                          + "\n".join(f"- {x}" for x in items))
     except Exception:
-        return ""
+        pass
+    try:
+        from engine import selection_ledger as SL
+        notes = SL.review_notes_for()
+        pp = SL.preference_prompt()
+        if notes:
+            blocks.append("\n【人工对上一篇论文诊断书的批注（优先级最高）】\n"
+                          + "\n".join(f"- {x['detail']}" for x in notes))
+        if pp:
+            blocks.append("\n" + pp)
+    except Exception:
+        pass
+    return "\n".join(blocks)
 
 
 def _fact_pack(spec, hyp, exp, refs, analysis, best_method, best_value):

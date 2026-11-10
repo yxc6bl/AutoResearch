@@ -87,8 +87,22 @@ def _rules_review(topic: str, papers: list[dict]) -> dict:
     }
 
 
-def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) -> dict:
-    """对一批精选文献做审评，返回 review verdict。"""
+def _load_preferences(topic: str) -> str:
+    try:
+        from engine import selection_ledger as SL
+        return SL.preference_prompt(topic)
+    except Exception:
+        return ""
+
+
+def run(topic: str, papers: list[dict], candidates: list[dict] | None = None,
+        preferences: str = "") -> dict:
+    """对一批精选文献做审评，返回 review verdict。
+
+    ``preferences`` 是人的选材偏好（来自 memory/lit_preferences.json）。
+    审评人必须知道「哪些是用户明确不要的」，否则会把人排除过的类型又当成
+    「缺失主题」建议补回来，形成自相矛盾的反馈。
+    """
     if not papers:
         return {"coverage_score": 0, "assessment": "无文献可审评",
                 "redundant_ids": [], "weak_ids": [], "missing_themes": ["未抓到任何文献"],
@@ -109,7 +123,10 @@ def run(topic: str, papers: list[dict], candidates: list[dict] | None = None) ->
     cand_n = len(candidates) if candidates else 0
     prompt = (
         f"研究选题：{topic}\n\n"
-        f"下面是已为这篇本科毕设精选的文献（共 {len(view)} 篇 / 全量候选 {cand_n} 篇）。"
+        + (preferences + "\n\n注意：用户明确排除的类型不要写进 missing_themes，"
+           "也不要建议重新搜回来；被人工要求保留的文献不列入 weak_ids。\n\n"
+           if preferences else "")
+        + f"下面是已为这篇本科毕设精选的文献（共 {len(view)} 篇 / 全量候选 {cand_n} 篇）。"
         "你是文献审评人，请独立判断这批文献是否「配得上」这个选题：\n"
         "1) coverage_score（1-10）：覆盖度与权威性是否足够；\n"
         "2) assessment：一句话总体评价；\n"
@@ -160,4 +177,6 @@ if __name__ == "__main__":
     cands = None
     if args.cand and Path(args.cand).exists():
         cands = json.loads(Path(args.cand).read_text(encoding="utf-8"))
-    print(json.dumps(run(args.topic, papers, cands), ensure_ascii=False, indent=2))
+    print(json.dumps(run(args.topic, papers, cands,
+                         preferences=_load_preferences(args.topic)),
+                     ensure_ascii=False, indent=2))
