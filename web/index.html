@@ -361,6 +361,7 @@ details.fold .fold-body{padding:0 11px 12px}
 .prose strong{color:var(--ink)}
 .banner{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:11px;font-size:12.5px;line-height:1.7;margin-bottom:16px}
 .banner.warn{background:var(--warn-soft);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent)}
+.banner.bad{background:var(--bad-soft);color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 30%,transparent)}
 .banner.info{background:var(--brand-soft);color:var(--brand-ink);border:1px solid color-mix(in srgb,var(--brand) 24%,transparent)}
 
 /* Toast / 灯箱 */
@@ -897,6 +898,10 @@ async function startRun(){
   if (state.busy) return;
   const topic = $('#topic').value.trim();
   if (!topic) { toast('先填研究主题', 'warn'); $('#topic').focus(); return; }
+  if (topic.length > 200 || (topic.includes('{') && /"[^"]{1,40}"\s*:/.test(topic))) {
+    toast('研究主题里像是粘进了 JSON 素材。主题只填一句话，JSON 请放到「类型素材」框里。', 'warn');
+    $('#topic').focus(); return;
+  }
   if (!$('#apikey').value.trim()) { toast('需要填 API Key（只用于本次运行）', 'warn'); $('#apikey').focus(); return; }
 
   // 供应商配置：地址和模型完全由用户决定，服务端不会替换成任何默认值
@@ -1068,7 +1073,14 @@ function renderHead(d){
   if (v.passed) chips.push('<span class="chip ok">硬门通过</span>');
   else if (v.passed === false) chips.push('<span class="chip bad">未过硬门</span>');
   if (v.grade) chips.push(`<span class="chip gray">${esc(v.grade)}</span>`);
+  const w = d.write || {};
+  const dec = (d.gates && d.gates.decision) || {};
+  const notDeliverable = (dec.deliverable === false) || (w.llm_written === false);
+  if (notDeliverable) chips.push('<span class="chip bad">不可交付</span>');
   chips.push(`<span class="dirname">${esc(baseName(d.out_dir))}</span>`);
+  const banner = notDeliverable
+    ? `<div class="banner bad"><b>这不是可交付成稿</b><span>模型未参与写作（网关不可用或 Key 未生效），正文为确定性模板骨架，仅供自测定位。请换可用的模型接口后重跑，不要直接提交。</span></div>`
+    : '';
 
   const arts = d.artifacts || [];
   const docx = arts.find(a => a.kind === 'docx');
@@ -1080,6 +1092,7 @@ function renderHead(d){
   actions.push('<button class="btn" id="printBtn">打印 / 存 PDF</button>');
 
   $('#stageHead').innerHTML = `
+    ${banner}
     <div class="crumbs">${chips.join('')}</div>
     <h1 class="stage-title">${esc(title)}</h1>
     <div class="stage-sub">

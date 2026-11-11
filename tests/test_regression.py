@@ -1139,5 +1139,45 @@ class TestProviderAgnostic(unittest.TestCase):
         self.assertFalse(LLM._real_key(""))
 
 
+class TestPaperQualityGuards(unittest.TestCase):
+    """组员发来的两篇论文暴露的两个事故，固化成护栏。
+
+    一篇是模型没参与写作时模板拼接出断句/中英混杂；另一篇是把整段 JSON
+    素材当成论文题目，原样印在封面和标题上（看起来像乱码）。
+    """
+
+    def test_topic_rejects_json_material(self):
+        from web.app import _validate_topic
+        _validate_topic("基于集成学习的乳腺癌良恶性诊断研究")
+        _validate_topic("社区医院慢病随访管理系统")
+        for bad in (
+            '社区医院慢病随访管理系统{"summary": "给社区医院做随访系统"}',
+            '{"tech_stack": ["Python", "Vue"]}',
+            "题目" * 110,
+        ):
+            with self.assertRaises(ValueError):
+                _validate_topic(bad)
+
+    def test_fallback_never_produces_broken_sentences(self):
+        from paper.generate_paper import _fallback_sections, _one_line
+        spec = {
+            "research_question": "在心血管任务中，不同模型是否有差异？\n哪种更稳健？",
+            "direction": "",
+            "topic": "心脏病预测",
+            "candidate_methods": [{"name": "随机森林"}, {"name": "K近邻"}],
+            "task_type": "classification",
+        }
+        r = _fallback_sections(spec, {}, [], "K近邻", 0.8295, "accuracy")
+        self.assertNotIn(" 的方法选型", r["intro"], "direction 为空时不能缺主语")
+        self.assertNotIn("数据集 数据集", r["abstract"] + r["intro"])
+        self.assertNotIn("\n", r["abstract"] + r["intro"])
+        self.assertNotIn("？", r["abstract"] + r["intro"])
+        self.assertTrue(r["intro"].startswith("机器学习方法"))
+        self.assertTrue(all(ord(c) < 128 for c in r["abstract_en"]),
+                        "英文摘要不能混进中文方法名或中文数据集名")
+        self.assertGreaterEqual(len(r["keywords"].split("；")), 3)
+        self.assertEqual(_one_line("甲？\n乙？"), "甲。乙。")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1663,24 +1663,49 @@ def llm_write_sections(spec, hyp, exp, refs, analysis, best_method, best_value, 
 
 
 # ── 降级骨架（LLM 不可用时使用，避免废话但仍远好于旧版） ─────────────
+def _one_line(text) -> str:
+    """把多行、多空格、带问号的原始研究问题压成可读的一句。
+
+    早期模板把 spec 里的 research_question 原样塞进「围绕「…」展开实证研究」，
+    遇到换行和问号就断句；direction 为空时还会写出「 的方法选型长期依赖经验」
+    这种没有主语的句子。这里统一收口。
+    """
+    t = " ".join(str(text or "").split())
+    t = t.replace("？", "。").replace("?", ".")
+    return re.sub(r"。\s+", "。", t).strip()
+
+
+def _dataset_phrase(ds) -> str:
+    """避免「UCI 心脏病数据集 数据集」这类重复。"""
+    d = str(ds or "").strip()
+    return d if d.endswith("数据集") else (d + " 数据集" if d else "给定数据集")
+
+
 def _fallback_sections(spec, exp, refs, best_method, best_value, main_metric):
     ds = _dataset_label(spec)
+    ds_phrase = _dataset_phrase(ds)
+    methods = _join_methods(spec.get("candidate_methods", []))
+    q = _one_line(spec.get("research_question", "")).rstrip("。") or "不同方法在同一任务上的表现差异"
+    direction = _one_line(spec.get("direction", "")) or "机器学习方法"
     claim = "具体假设是否成立，应以对应指标与证据字段为准。"
+    kw = []
+    for cand in ([str(spec.get("topic", "") or "").strip()[:20], str(ds).strip(),
+                  str(main_metric).strip()] + methods.split("、")[:3]):
+        c = str(cand).strip()
+        if c and 0 < len(c) <= 20 and not c.startswith("{") and c not in kw:
+            kw.append(c)
     return {
         "abstract": (
-            f"本文在 {ds} 数据集上围绕「{spec.get('research_question','')}」展开实证研究，"
-            f"系统比较了 {_join_methods(spec.get('candidate_methods',[]))} 等方法的表现。"
+            f"本文以 {ds_phrase} 为研究对象，研究问题为：{q}。"
+            f"在统一预处理与评估协议下，系统比较了 {methods} 等方法的表现。"
             f"确定性分析引擎依据任务规格执行实验，主指标 {main_metric} 的最优结果为 "
             f"{best_method} 的 {_fmt(best_value)}。{claim}"
         ),
-        "keywords": (lambda cs: "；".join(cs[:4]) if cs else (spec.get("topic", "") or "机器学习"))(
-            [k.strip() for k in [spec.get("topic", ""), ds, main_metric]
-             + _join_methods(spec.get("candidate_methods", [])).split("、")[:2] if k and len(k) <= 6]
-        ),
+        "keywords": "；".join(kw[:5]) or "机器学习",
         "intro": (
-            f"{spec.get('direction','')} 的方法选型长期依赖经验而非受控对比。"
-            f"本文聚焦的具体机理问题是：{spec.get('research_question','')}。"
-            f"为此在 {ds} 上统一预处理与评估协议，比较 {_join_methods(spec.get('candidate_methods',[]))}，"
+            f"{direction}的选型长期依赖经验而非受控对比。"
+            f"本文聚焦的具体机理问题是：{q}。"
+            f"为此在 {ds_phrase} 上统一预处理与评估协议，比较 {methods}，"
             f"并以 {main_metric} 为主指标给出可复现结论。"
         ),
         "related": "；".join(
@@ -1703,10 +1728,11 @@ def _fallback_sections(spec, exp, refs, best_method, best_value, main_metric):
             if spec.get("task_type") == "association" else
             f"本文在 {ds} 上得到主指标 {main_metric} 最优结果 {best_method}（{_fmt(best_value)}）；该结果本身不等同于主假设已获验证。"),
         "abstract_en": (
-            f"This paper conducts an empirical study on the "
-            f"{spec.get('direction') or 'machine learning'} task using the {ds} dataset, "
-            f"systematically comparing {_join_methods(spec.get('candidate_methods', []))}. "
-            f"The best-performing method is {best_method} with {main_metric} = {_fmt(best_value)}."
+            "This paper conducts a controlled empirical comparison of candidate machine-learning "
+            "methods under a unified preprocessing and evaluation protocol. "
+            f"The primary metric is {main_metric}, and the best observed value is {_fmt(best_value)}. "
+            "All reported figures are produced by the deterministic analysis engine rather than "
+            "a language model."
         ),
         "keywords_en": "",
         "limitations_extra": "",
@@ -2158,10 +2184,11 @@ def main() -> int:
     parts.append(chapter_heading("method") + "\n")
     parts.append(written.get("method_narrative", "").strip() + "\n")
     parts.append(f"### 3.1 问题设定\n")
+    _q = _one_line(spec.get("research_question", "")).rstrip("。") or "候选方法在同一任务上的表现差异"
     if is_multi:
-        parts.append(f"本文在多个数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
+        parts.append(f"本文在多个数据集上研究{_one_line(direction) or '机器学习方法'}。研究问题为：{_q}。\n")
     else:
-        parts.append(f"本文在 {dataset} 数据集上研究{direction}。研究问题为：{spec.get('research_question','')}\n")
+        parts.append(f"本文在 {_dataset_phrase(dataset)}上研究{_one_line(direction) or '机器学习方法'}。研究问题为：{_q}。\n")
     _px = spec.get("data") or {}
     if _px.get("proxy"):
         _px_note = (_px.get("proxy_note") or "").strip().rstrip("。；; ")

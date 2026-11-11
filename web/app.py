@@ -213,6 +213,20 @@ def _recent_runs(limit: int = 9) -> list[dict]:
     return rows
 
 
+def _validate_topic(topic: str) -> None:
+    """研究主题只该是一句话；整段 JSON 素材被粘进来不能当成标题写进论文。
+
+    组员的聊天式界面把「题目 + 类型素材 JSON」一起当作 topic 提交，
+    结果整段 JSON 原样印在封面和论文题目上，看起来像乱码。
+    """
+    if len(topic) > 200:
+        raise ValueError("研究主题过长（>200 字）；类型素材请填到「类型素材」框，不要粘进主题")
+    if "{" in topic and re.search(r'"[^"]{1,40}"\s*:', topic):
+        raise ValueError("研究主题里混入了 JSON 素材；主题只填一句话，JSON 请填到「类型素材」框")
+    if topic.lstrip().startswith("{"):
+        raise ValueError("研究主题不能以 JSON 开头；请只填论文题目或研究方向")
+
+
 def _provider_config(data: dict) -> tuple[str | None, str | None, str | None, str]:
     """校验网页传来的接口配置，返回可注入子进程的四元组。
 
@@ -515,6 +529,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if not topic:
             self._json({"error": "主题不能为空"}, 400)
+            return
+        try:
+            _validate_topic(topic)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
             return
 
         # 处理上传文件（base64 解码落盘）
