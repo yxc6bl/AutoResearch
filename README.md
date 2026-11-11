@@ -81,6 +81,40 @@ curl -i https://apiai.sztu.edu.cn/v1/models
 `chat_template_kwargs.thinking`，备用通道的 `LLM_EXTRA_BODY_2` 留 `{}`；模型要能稳定输出
 万字中文和 JSON（评审 Agent 走 `chat_json`），小模型会让评审链路退化。
 
+## 接任意 AI 接口（GPT / Kimi / Gemini …）
+
+系统**不绑定任何厂商**。底层走标准 OpenAI SDK，只要求对方提供 `/v1/chat/completions`
+兼容协议；预设列表只是帮你把地址填好，地址和模型名随时能改。
+
+**网页端**：左栏「模型接口」选预设（OpenAI / DeepSeek / Kimi / Gemini / 通义 / 智谱 /
+硅基流动 / 本地 Ollama / 自定义），地址、模型名、额外请求体会自动填好，三项都可手改；
+再填**对应厂商**的 Key 就能跑。配置只注入本次子进程的环境变量，不落盘、不写日志；
+浏览器只记住地址、模型和预设，不记 Key。高级参数里还能指定命名风格。
+
+**命令行 / `.env`**：改三行即可，完整地址表见 `.env.example`：
+
+```bash
+OPENAI_BASE_URL=https://api.moonshot.cn/v1
+OPENAI_API_KEY=你的_Kimi_Key
+OPENAI_MODEL=moonshot-v1-8k
+LLM_EXTRA_BODY={}
+```
+
+三个容易踩的坑，系统已经替你处理：
+
+- **地址和 Key 必须配套**。早期版本网页只开放 Key、服务端把地址写死成学校网关，
+  换任何厂商都会失败；现在配置按你填的值注入，`.env` 只在留空时兜底。
+- **额外请求体**。学校网关这类 vLLM 系才需要 `chat_template_kwargs.thinking=false`；
+  换到别家留 `{}`。网页选预设会自动填；就算忘了改，端点报「不认识的参数」时
+  兼容层也会自动丢掉它重试。
+- **推理模型参数名**。o1 / o3 / GPT-5 不收 `temperature`，要用
+  `max_completion_tokens`；`LLM_PARAM_STYLE=auto` 会按模型名自动判断，
+  判断错了还能根据 400 报错自动降级。规划、写作、评审三处调用共用这一套适配。
+
+**边界**：覆盖所有 OpenAI 兼容端点（含 Gemini 的 `/v1beta/openai/` 兼容层、各类中转站、
+本地 Ollama）。如果某家只给私有协议（例如 Anthropic 原生 `/messages`），需要另写一层
+适配器；把它的接口文档给我，我按同一套通道机制接进来，不影响现有链路。
+
 ## 论文类型（`--paper-type`）
 
 系统支持**六种**可插拔论文类型，`plan` / `run` / `from_title` 都接受 `--paper-type`

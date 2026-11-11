@@ -52,11 +52,15 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
                  out_dir: Path, api_key: str | None = None,
                  data_path: str | None = None, data_url: str | None = None,
                  target: str = "", sep: str = "", paper_type: str = "method_comparison",
-                 type_material: dict | None = None):
+                 type_material: dict | None = None,
+                 base_url: str | None = None, model: str | None = None,
+                 extra_body: str | None = None, param_style: str | None = None):
     """在子线程里跑流水线，把 stdout/stderr 累积到 TASKS[task_id]['log']。
 
-    api_key：用户在网页填入的 Key，仅注入本次子进程环境变量，不落盘、不写日志。
-    优先级高于服务端 .env；留空则回退到服务端 .env 配置。
+    api_key：网页填入的 Key，仅注入本次子进程环境变量，不落盘、不写日志。
+    base_url / model / extra_body / param_style：网页选的供应商配置，同样只作用于
+    本次子进程；留空则回退到服务端 .env。**不再**把地址和模型硬塞成学校网关，
+    否则填了 GPT / Kimi / Gemini 的 Key 也会被发到旧端点上。
     data_path / data_url：用户自带 CSV 或公开数据集网址（二选一，覆盖内置 dataset）。
     """
     # -u：子进程无缓冲输出。否则 stdout 接管道时是块缓冲，网页上的「实时日志」
@@ -109,12 +113,23 @@ def run_pipeline(task_id: str, mode: str, topic: str, dataset: str, rounds: int,
         else:
             cmd += ["--dataset", dataset]
 
-    # 仅注入本次运行所需环境变量；auto_research 的 load_dotenv 不会覆盖已存在的 Key
+    # 仅注入本次运行所需环境变量；各模块的 .env 加载一律用 setdefault，
+    # 因此这里给的值优先于 .env，能干净地切到任意 OpenAI 兼容端点。
     env = os.environ.copy()
     if api_key:
         env["OPENAI_API_KEY"] = api_key
-        env["OPENAI_BASE_URL"] = env.get("OPENAI_BASE_URL", "https://apiai.sztu.edu.cn/v1")
-        env["OPENAI_MODEL"] = env.get("OPENAI_MODEL", "deepseek-v4-pro")
+        if base_url:
+            env["OPENAI_BASE_URL"] = base_url
+        if model:
+            env["OPENAI_MODEL"] = model
+        if extra_body is not None:
+            # 显式传 {} 也要覆盖 .env 里 DeepSeek 专属的 chat_template_kwargs，
+            # 否则换到别家会因为「不认识的额外参数」被 400 拒绝。
+            env["LLM_EXTRA_BODY"] = extra_body
+        if param_style and param_style != "auto":
+            env["LLM_PARAM_STYLE"] = param_style
+        else:
+            env.pop("LLM_PARAM_STYLE", None)
 
     try:
         proc = subprocess.Popen(
@@ -196,6 +211,36 @@ def _recent_runs(limit: int = 9) -> list[dict]:
             "mtime": mtime,
         })
     return rows
+
+
+def _provider_config(data: dict) -> tuple[str | None, str | None, str | None, str]:
+    """校验网页传来的接口配置，返回可注入子进程的四元组。
+
+    只校验格式，不设供应商白名单：GPT / Kimi / Gemini / 通义 / 智谱 /
+    本地 Ollama / 任意中转，只要是 OpenAI 兼容端点都能填。
+    """
+    base = str(data.get("base_url") or "").strip()
+    model = str(data.get("model") or "").strip()
+    style = str(data.get("param_style") or "auto").strip().lower()
+    if base and (len(base) > 300 or not re.match(r"^https?://[^\s]+$", base, re.I)):
+        raise ValueError("接口地址不合法（需 http:// 或 https:// 开头，且不含空格）")
+    if len(model) > 120 or any(ch in model for ch in "\r\n\t"):
+        raise ValueError("模型名不合法")
+    raw = data.get("extra_body")
+    extra = None
+    if raw not in (None, ""):
+        if isinstance(raw, str) and len(raw) > 4000:
+            raise ValueError("额外请求体过长")
+        try:
+            obj = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:  # noqa: BLE001
+            raise ValueError("「额外请求体」不是合法 JSON") from None
+        if not isinstance(obj, dict):
+            raise ValueError("「额外请求体」必须是 JSON 对象")
+        extra = json.dumps(obj, ensure_ascii=False)
+    if style not in ("auto", "standard", "legacy", "completion_tokens", "reasoning"):
+        style = "auto"
+    return (base or None), (model or None), extra, style
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -445,6 +490,11 @@ class Handler(BaseHTTPRequestHandler):
             type_material = None
         rounds = int(data.get("rounds", 3))
         api_key = (data.get("api_key") or "").strip() or None
+        try:
+            base_url, model, extra_body, param_style = _provider_config(data)
+        except ValueError as e:
+            self._json({"error": str(e)}, 400)
+            return
         target = (data.get("target") or "").strip()
         sep = (data.get("sep") or "").strip()
         data_url = (data.get("data_url") or "").strip() or None
@@ -490,6 +540,9 @@ class Handler(BaseHTTPRequestHandler):
         out_dir = ROOT / "out_web" / tid
         out_dir.mkdir(parents=True, exist_ok=True)
         log_head = f"[server] 启动流水线：mode={mode} topic={topic} paper_type={paper_type}"
+        if base_url:
+            # 只记域名和模型名，绝不把 Key 或带密钥的完整 URL 写进日志
+            log_head += f" | 接口={urllib.parse.urlparse(base_url).netloc} 模型={model or '自动'}"
         if type_material:
             log_head += f" | 类型素材字段={len(type_material)}"
         if data_url:
@@ -509,7 +562,8 @@ class Handler(BaseHTTPRequestHandler):
         threading.Thread(
             target=run_pipeline,
             args=(tid, mode, topic, dataset, rounds, out_dir, api_key, data_path, data_url,
-                  target, sep, paper_type, type_material),
+                  target, sep, paper_type, type_material,
+                  base_url, model, extra_body, param_style),
             daemon=True,
         ).start()
         self._json({"task_id": tid})

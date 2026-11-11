@@ -857,28 +857,21 @@ def _real_api_key(key: str) -> bool:
 
 
 def _llm_client():
-    base = os.environ.get("OPENAI_BASE_URL")
-    key = os.environ.get("OPENAI_API_KEY")
-    if not base or not _real_api_key(key):
-        return None, None, None
+    """配置与参数适配统一交给 engine.llm_client，支持任意 OpenAI 兼容端点。"""
     try:
-        import openai
-    except ImportError:
+        from engine.llm_client import _client_or_none
+        return _client_or_none() or (None, None, None)
+    except Exception:  # noqa: BLE001
         return None, None, None
-    model = os.environ.get("OPENAI_MODEL", "deepseek-v4-pro")
-    try:
-        extra = json.loads(os.environ.get("LLM_EXTRA_BODY", "{}"))
-    except Exception:
-        extra = {}
-    return openai.OpenAI(base_url=base, api_key=key), model, extra
 
 
 def _llm_json(client, model, extra, prompt, temperature=0.3):
-    r = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "system", "content": WRITER_SYSTEM},
-                  {"role": "user", "content": prompt}],
-        extra_body=extra, temperature=temperature, max_tokens=4096)
+    """调用 LLM 并尽量解析出 JSON（参数适配交给统一兼容层）。"""
+    from engine.llm_client import create_chat
+    r = create_chat(client, model, extra,
+                    [{"role": "system", "content": WRITER_SYSTEM},
+                     {"role": "user", "content": prompt}],
+                    temperature=temperature, max_tokens=4096, timeout=120)
     text = r.choices[0].message.content or ""
     m = re.search(r"```json\s*(.*?)```", text, re.S)
     blob = m.group(1) if m else text

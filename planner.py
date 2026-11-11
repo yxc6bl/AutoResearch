@@ -3,7 +3,7 @@
 职责：把一句自然语言的研究主题，变成一份**合法、引擎可直接跑**的任务 spec。
 这是把系统从「人写 spec」升级为「agent 写 spec、引擎跑」的闭环起点。
 
-- 有 API Key 时：调 DeepSeek 产出数据集 / 候选方法 / 研究问题 / 子假设 / 指标，
+- 有 API Key 时：调 LLM（任意兼容端点）产出数据集 / 候选方法 / 研究问题 / 子假设 / 指标，
   并落到一个可被 analysis_engine.run_analysis 直接消费的 JSON。
 - 无 Key 时：降级为基于经典数据集的「模板 spec」，保证流水线永不卡死。
 
@@ -54,6 +54,11 @@ METHOD_ALIAS = {
 
 
 def _load_dotenv() -> dict:
+    """进程环境变量优先，.env 只补缺项。
+
+    早期版本用 .env 覆盖 os.environ，导致网页/命令行注入的第三方 API 配置
+    在 Planner 这一步被拽回学校网关——换 GPT / Kimi / Gemini 都会「不生效」。
+    """
     env = dict(os.environ)
     p = ROOT / ".env"
     if p.exists():
@@ -62,42 +67,29 @@ def _load_dotenv() -> dict:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            env[k.strip()] = v.strip().strip('"').strip("'")
+            env.setdefault(k.strip(), v.strip().strip('"').strip("'"))
     return env
 
 
 def llm_client():
-    """返回 (client, model, extra)；无 Key 时返回 (None, None, None)。"""
-    env = _load_dotenv()
-    key = env.get("OPENAI_API_KEY")
-    if not key or key.startswith("在此"):
-        return None, None, None
+    """返回 (client, model, extra)；无可用通道时返回 (None, None, None)。
+
+    配置统一由 engine.llm_client 提供：进程环境变量优先、支持任意兼容端点
+    与备用通道，不再各自解析 .env——否则换供应商时 Planner 会偷偷用回旧网关。
+    """
     try:
-        import openai
-    except ImportError:
+        from engine.llm_client import _client_or_none
+        return _client_or_none() or (None, None, None)
+    except Exception:  # noqa: BLE001
         return None, None, None
-    base = env.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    model = env.get("OPENAI_MODEL", "deepseek-v4-pro")
-    try:
-        extra = json.loads(env.get("LLM_EXTRA_BODY", "{}") or "{}")
-    except Exception:
-        extra = {}
-    try:
-        client = openai.OpenAI(api_key=key, base_url=base, timeout=60, max_retries=0)
-    except Exception:
-        return None, None, None
-    return client, model, extra
 
 
 def _llm_json(client, model, extra, prompt, temperature=0.2):
-    """调用 LLM 并尽量解析出 JSON。"""
-    r = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        extra_body=extra or None,
-        timeout=60,
-    )
+    """调用 LLM 并尽量解析出 JSON（参数适配交给统一兼容层）。"""
+    from engine.llm_client import create_chat
+    r = create_chat(client, model, extra,
+                    [{"role": "user", "content": prompt}],
+                    temperature=temperature, max_tokens=4096, timeout=60)
     text = r.choices[0].message.content or ""
     return _extract_json(text)
 

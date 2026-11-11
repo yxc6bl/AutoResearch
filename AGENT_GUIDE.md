@@ -53,7 +53,7 @@ python auto_research.py run --spec engine/tasks/proof/wine_sklearn_spec.json --o
 ```
 python auto_research.py plan --topic "比较随机森林与梯度提升在结构化数据上的表现" --out ./out_plan
 ```
-Planner（DeepSeek 等兼容端点）把主题扩写成合法 spec；若无 Key 则降级为模板 spec。文献检索走 arXiv 免费接口，不依赖 Key。
+Planner（任意 OpenAI 兼容端点）把主题扩写成合法 spec；若无 Key 则降级为模板 spec。文献检索走 arXiv 免费接口，不依赖 Key。
 
 **3）iterate —— 让引擎自己迭代深化**
 ```

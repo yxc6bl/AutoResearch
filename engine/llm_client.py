@@ -54,13 +54,18 @@ def _load_dotenv() -> None:
 
 
 def _real_key(key: str) -> bool:
-    if not key or len(key) < 20:
+    """只挡空值和占位符，不猜 Key 长什么样。
+
+    OpenAI / Kimi / Gemini 的 Key 长度格式各不相同，本地 Ollama 之类的端点
+    甚至可以随便填一个短串。早期 `len < 20` 会直接把整条通道判成没配。
+    """
+    if not key or len(key.strip()) < 4:
         return False
     if any(ord(c) > 127 for c in key):
         return False
     if key.startswith("在此"):
         return False
-    if re.match(r"^(your[_ -]?api[_ -]?key|replace[_ -]?me|<[^>]+>)$", key, re.I):
+    if re.match(r"^(your[_ -]?api[_ -]?key|replace[_ -]?me|<[^>]+>|sk-xxx.*|changeme)$", key, re.I):
         return False
     return True
 
@@ -72,7 +77,9 @@ _FAILOVER_AFTER = int(os.environ.get("LLM_FAILOVER_AFTER", "3") or 3)
 def channels() -> list[dict]:
     """列出已配置的通道：主通道 + 可选 _2 / _3 备用。不返回密钥明文供打印。"""
     _load_dotenv()
-    default_model = os.environ.get("OPENAI_MODEL", "deepseek-v4-pro")
+    # 模型名完全由配置决定；这个兜底只在「配了地址 + Key 却漏填模型」时生效，
+    # 取一个各家兼容层都认识的通用名，不再绑定任何供应商的私有型号。
+    default_model = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
     out = []
     for suffix in ("", "_2", "_3"):
         base = os.environ.get("OPENAI_BASE_URL" + suffix)
@@ -279,6 +286,77 @@ def _throttle() -> None:
         _RL_CALLS[0] += 1
 
 
+# ── 供应商无关的参数适配 ──────────────────────────────────────────────
+# 各家「OpenAI 兼容」端点只是大体兼容，细节脾气不同：
+#   · 标准端点（DeepSeek / Kimi / 通义 / 智谱 / Gemini 兼容层 / vLLM）收 temperature + max_tokens
+#   · 推理模型（o1/o3/gpt-5 等）不收 temperature，且要 max_completion_tokens
+#   · 严格端点不认任何 extra_body；学校网关的 chat_template_kwargs.thinking 尤其容易踩雷
+# 统一在这里挑参数，全系统只走这一条路，不要求用户知道这些差异。
+
+_REASONING_RE = re.compile(
+    r"(^|[-_/])(o1|o3|o4|gpt[-_]?5|deepseek[-_]?r1|qwq|kimi[-_]?k2|claude[-_]?opus[-_]?4)"
+    r"|thinking|reasoner", re.I)
+_PARAM_ERR_HINTS = (
+    "unrecognized request argument", "unsupported parameter", "unknown parameter",
+    "unsupported value", "extra inputs are not permitted", "not supported",
+    "invalid parameter", "unexpected keyword", "max_tokens", "max_completion_tokens",
+    "temperature", "extra_body", "chat_template_kwargs",
+)
+
+
+def param_style(model: str) -> str:
+    """该模型该用哪套参数名。可用 LLM_PARAM_STYLE 手动指定。"""
+    forced = (os.environ.get("LLM_PARAM_STYLE") or "auto").strip().lower()
+    if forced in ("standard", "legacy"):
+        return "standard"
+    if forced in ("completion_tokens", "reasoning"):
+        return "completion_tokens"
+    return "completion_tokens" if _REASONING_RE.search(model or "") else "standard"
+
+
+def _is_param_error(exc) -> bool:
+    sc = getattr(exc, "status_code", None)
+    s = str(exc).lower()
+    return sc in (400, 422) and any(h in s for h in _PARAM_ERR_HINTS)
+
+
+def create_chat(client, model, extra, messages, *, temperature=0.3,
+                max_tokens=1500, timeout=60):
+    """一次兼容调用。参数类 400 会自动降级重试，其余错误原样抛给上层。
+
+    降级顺序：先丢掉不认的 extra_body，再切换参数命名风格；最多两步，
+    不会因为一个端点挑剔就空耗重试预算。
+    """
+    style = param_style(model)
+    use_extra = dict(extra or {})
+    step = 0
+    last = None
+    while True:
+        kwargs = {"model": model, "messages": messages, "timeout": timeout}
+        if use_extra:
+            kwargs["extra_body"] = use_extra
+        if style == "completion_tokens":
+            kwargs["max_completion_tokens"] = max_tokens
+        else:
+            kwargs["temperature"] = temperature
+            kwargs["max_tokens"] = max_tokens
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if not _is_param_error(e) or step >= 2:
+                raise
+            if step == 0 and use_extra:
+                use_extra = {}          # 第一步：先扔掉供应商专属的额外请求体
+                action = "去掉 extra_body"
+            else:
+                style = "completion_tokens" if style == "standard" else "standard"
+                action = "切换参数风格"
+            step += 1
+            print(f"[LLM] 参数不被端点接受，自动降级（第 {step} 步）：{action}")
+    raise last  # pragma: no cover
+
+
 def _raw_chat(client, model, extra, messages, *, max_tokens, timeout,
               temperature=0.3, max_attempts=4, backoff_base=3.0, cap=25.0):
     """底层调用 + 限流感知指数退避 + 熔断器。429/5xx/超时/连接错误会重试；鉴权错误立即抛。
@@ -291,10 +369,9 @@ def _raw_chat(client, model, extra, messages, *, max_tokens, timeout,
     for attempt in range(max_attempts):
         _throttle()  # 全局节流（含最小间隔、计数上限、熔断开路检查）
         try:
-            r = client.chat.completions.create(
-                model=model, messages=messages, extra_body=extra,
-                temperature=temperature, max_tokens=max_tokens, timeout=timeout,
-            )
+            r = create_chat(client, model, extra, messages,
+                            temperature=temperature, max_tokens=max_tokens,
+                            timeout=timeout)
             _cb_trip_or_reset(False)  # 成功 → 复位熔断
             return r
         except Exception as e:  # noqa: BLE001

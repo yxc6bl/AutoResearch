@@ -471,11 +471,58 @@ details.fold .fold-body{padding:0 11px 12px}
       </div>
 
       <div class="field">
+        <label class="lbl" for="provider">模型接口 <em>任意 OpenAI 兼容端点</em></label>
+        <select id="provider">
+          <option value="sztu">学校网关 · DeepSeek-V4-Pro（默认）</option>
+          <option value="openai">OpenAI · GPT</option>
+          <option value="deepseek">DeepSeek 官方</option>
+          <option value="kimi">Kimi · Moonshot</option>
+          <option value="gemini">Google Gemini（兼容层）</option>
+          <option value="qwen">通义千问</option>
+          <option value="zhipu">智谱 GLM</option>
+          <option value="siliconflow">硅基流动</option>
+          <option value="ollama">本地 Ollama / 自建服务</option>
+          <option value="custom">自定义…</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label class="lbl" for="baseUrl">接口地址 <em>按你账号实际地址填</em></label>
+        <input id="baseUrl" type="text" spellcheck="false" placeholder="https://api.openai.com/v1">
+      </div>
+
+      <div class="field">
+        <label class="lbl" for="modelName">模型名 <em>按账号可用型号填</em></label>
+        <input id="modelName" type="text" spellcheck="false" placeholder="gpt-4o-mini">
+      </div>
+
+      <details class="fold" id="advFold">
+        <summary>高级接口参数</summary>
+        <div class="fold-body">
+          <div class="field">
+            <label class="lbl" for="extraBody">额外请求体 JSON</label>
+            <textarea id="extraBody" spellcheck="false" style="min-height:54px;font-family:var(--mono);font-size:11.5px">{}</textarea>
+            <div class="hint">换到别家时留 <code>{}</code>；只有学校网关这类 vLLM 系才需要 <code>chat_template_kwargs.thinking=false</code>。</div>
+          </div>
+          <div class="field">
+            <label class="lbl" for="paramStyle">参数命名风格</label>
+            <select id="paramStyle">
+              <option value="auto">自动识别（推荐）</option>
+              <option value="standard">标准 temperature + max_tokens</option>
+              <option value="completion_tokens">推理模型 max_completion_tokens</option>
+            </select>
+            <div class="hint">o1 / o3 / GPT-5 之类不收 temperature；选自动即可，端点报参数错时系统还会自己降级重试。</div>
+          </div>
+        </div>
+      </details>
+
+      <div class="field">
         <label class="lbl" for="apikey">API Key <em>仅本次运行，不保存</em></label>
         <div class="pw-wrap">
           <input id="apikey" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false">
           <button class="pw-toggle" id="pwToggle" type="button">显示</button>
         </div>
+        <div class="hint">选了哪家就填哪家的 Key；地址和 Key 要配套，否则会被对方拒绝。</div>
       </div>
 
       <div class="field" id="datasetField">
@@ -733,21 +780,60 @@ $('#pwToggle').onclick = () => {
   $('#pwToggle').textContent = i.type === 'password' ? '显示' : '隐藏';
 };
 
+/* ── 模型接口：供应商预设只是快捷填表，地址和模型都能随便改 ── */
+const PROVIDERS = {
+  sztu:         {base:'https://apiai.sztu.edu.cn/v1', model:'deepseek-v4-pro', extra:'{"chat_template_kwargs":{"thinking":false}}'},
+  openai:       {base:'https://api.openai.com/v1', model:'gpt-4o-mini', extra:'{}'},
+  deepseek:     {base:'https://api.deepseek.com/v1', model:'deepseek-chat', extra:'{}'},
+  kimi:         {base:'https://api.moonshot.cn/v1', model:'moonshot-v1-8k', extra:'{}'},
+  gemini:       {base:'https://generativelanguage.googleapis.com/v1beta/openai/', model:'gemini-2.5-flash', extra:'{}'},
+  qwen:         {base:'https://dashscope.aliyuncs.com/compatible-mode/v1', model:'qwen-plus', extra:'{}'},
+  zhipu:        {base:'https://open.bigmodel.cn/api/paas/v4', model:'glm-4-flash', extra:'{}'},
+  siliconflow:  {base:'https://api.siliconflow.cn/v1', model:'Qwen/Qwen2.5-7B-Instruct', extra:'{}'},
+  ollama:       {base:'http://127.0.0.1:11434/v1', model:'qwen2.5', extra:'{}'},
+  custom:       {base:'', model:'', extra:'{}'}
+};
+
+function applyProvider(key){
+  const p = PROVIDERS[key] || PROVIDERS.custom;
+  $('#baseUrl').value = p.base;
+  $('#modelName').value = p.model;
+  $('#extraBody').value = p.extra;
+  remember();
+}
+
 function remember(){
-  const keep = {topic:$('#topic').value, type:$('#paperType').value, mode:mode()};
-  localStorage.setItem('ar.form', JSON.stringify(keep));
+  const keep = {
+    topic: $('#topic').value, type: $('#paperType').value, mode: mode(),
+    provider: $('#provider').value, base: $('#baseUrl').value,
+    model: $('#modelName').value, extra: $('#extraBody').value,
+    style: $('#paramStyle').value
+    // 注意：API Key 永远不写进 localStorage
+  };
+  try { localStorage.setItem('ar.form', JSON.stringify(keep)); } catch(e){}
 }
 function restore(){
-  try{
-    const f = JSON.parse(localStorage.getItem('ar.form') || '{}');
-    if (f.topic) $('#topic').value = f.topic;
-    if (f.type && PT_HINTS[f.type]) $('#paperType').value = f.type;
-    if (f.mode && f.mode !== 'plan'){
-      $$('#modeSeg button').forEach(x => x.classList.toggle('on', x.dataset.v === f.mode));
-    }
-  }catch(e){}
+  let f = {};
+  try { f = JSON.parse(localStorage.getItem('ar.form') || '{}'); } catch(e){}
+  if (f.topic) $('#topic').value = f.topic;
+  if (f.type && PT_HINTS[f.type]) $('#paperType').value = f.type;
+  if (f.mode && f.mode !== 'plan'){
+    $$('#modeSeg button').forEach(x => x.classList.toggle('on', x.dataset.v === f.mode));
+  }
+  const pv = (f.provider && PROVIDERS[f.provider]) ? f.provider : 'sztu';
+  $('#provider').value = pv;
+  const p = PROVIDERS[pv];
+  $('#baseUrl').value   = (f.base   !== undefined) ? f.base   : p.base;
+  $('#modelName').value = (f.model  !== undefined) ? f.model  : p.model;
+  $('#extraBody').value = (f.extra  !== undefined) ? f.extra  : p.extra;
+  $('#paramStyle').value = f.style || 'auto';
 }
 $('#topic').addEventListener('input', remember);
+$('#provider').addEventListener('change', () => applyProvider($('#provider').value));
+['#baseUrl','#modelName','#extraBody','#paramStyle'].forEach(s => {
+  $(s).addEventListener('input', remember);
+  $(s).addEventListener('change', remember);
+});
 restore(); syncType();
 
 /* 数据集列表 */
@@ -812,6 +898,20 @@ async function startRun(){
   const topic = $('#topic').value.trim();
   if (!topic) { toast('先填研究主题', 'warn'); $('#topic').focus(); return; }
   if (!$('#apikey').value.trim()) { toast('需要填 API Key（只用于本次运行）', 'warn'); $('#apikey').focus(); return; }
+
+  // 供应商配置：地址和模型完全由用户决定，服务端不会替换成任何默认值
+  const baseUrl = $('#baseUrl').value.trim();
+  const modelName = $('#modelName').value.trim();
+  const paramStyle = $('#paramStyle').value;
+  if (baseUrl && !/^https?:\/\/\S+$/i.test(baseUrl)) {
+    toast('接口地址要以 http:// 或 https:// 开头', 'warn'); $('#baseUrl').focus(); return;
+  }
+  let extraObj;
+  try {
+    extraObj = JSON.parse($('#extraBody').value.trim() || '{}');
+    if (!extraObj || typeof extraObj !== 'object' || Array.isArray(extraObj)) throw new Error('必须是一个 JSON 对象');
+  } catch (e) { toast('「额外请求体」不是合法 JSON 对象：' + e.message, 'bad'); $('#advFold').open = true; return; }
+
   const pt = $('#paperType').value;
   let mat = null;
   if (pt !== 'method_comparison'){
@@ -826,6 +926,8 @@ async function startRun(){
     const body = {
       mode: mode(), topic, paper_type: pt, dataset: $('#dataset').value,
       rounds: parseInt($('#rounds').value || '3', 10), api_key: $('#apikey').value.trim(),
+      base_url: baseUrl, model: modelName, extra_body: JSON.stringify(extraObj),
+      param_style: paramStyle,
       data_url: $('#dataUrl').value.trim(), target: $('#target').value.trim(), sep: $('#sep').value.trim(),
       data_b64: b64 || '', data_filename: fname || 'upload.csv', type_material: mat
     };

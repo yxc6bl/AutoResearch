@@ -992,5 +992,152 @@ class TestLLMChannelFailover(unittest.TestCase):
         self.assertEqual(LLM._ACTIVE_IDX[0], 0)
 
 
+class TestProviderAgnostic(unittest.TestCase):
+    """任意 OpenAI 兼容端点都能接：配置校验 → 环境注入 → 请求参数适配，三层都要过。
+
+    回归背景：网页只开放 Key，服务端把地址/模型写死成学校网关，还带着
+    DeepSeek 专属 extra_body，导致组员换 GPT / Kimi / Gemini 一律失败。
+    """
+
+    VENDORS = [
+        ("OpenAI",     "https://api.openai.com/v1",                                  "gpt-4o-mini"),
+        ("DeepSeek",   "https://api.deepseek.com/v1",                              "deepseek-chat"),
+        ("Kimi",       "https://api.moonshot.cn/v1",                              "moonshot-v1-8k"),
+        ("Gemini",     "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.5-flash"),
+        ("通义",       "https://dashscope.aliyuncs.com/compatible-mode/v1",        "qwen-plus"),
+        ("智谱",       "https://open.bigmodel.cn/api/paas/v4",                     "glm-4-flash"),
+        ("本地Ollama", "http://127.0.0.1:11434/v1",                                "qwen2.5"),
+    ]
+
+    def test_config_accepts_every_vendor(self):
+        from web.app import _provider_config
+        for label, base, model in self.VENDORS:
+            b, m, e, style = _provider_config(
+                {"base_url": base, "model": model, "extra_body": "{}"})
+            self.assertEqual((b, m, e, style), (base, model, "{}", "auto"), label)
+
+    def test_config_rejects_bad_input(self):
+        from web.app import _provider_config
+        for bad in ({"base_url": "ftp://x/v1"}, {"base_url": "https://a b/v1"},
+                    {"extra_body": "not json"}, {"extra_body": "[1,2]"},
+                    {"model": "x" * 200}):
+            with self.assertRaises(ValueError):
+                _provider_config(bad)
+
+    def test_web_has_no_hardcoded_vendor(self):
+        src = (ROOT / "web" / "app.py").read_text(encoding="utf-8")
+        self.assertNotIn("apiai.sztu.edu.cn", src, "服务端不得把学校网关写死")
+        self.assertNotIn("deepseek-v4-pro", src, "服务端不得把模型名写死")
+
+    def test_run_pipeline_injects_provider_env(self):
+        """网页填的 GPT 配置要真的进子进程，且压过 .env 里的 DeepSeek 参数。"""
+        from unittest.mock import patch
+        import web.app as A
+        seen = []
+
+        class FakeProc:
+            returncode = 0
+            def __init__(self, cmd, **kw):
+                seen.append(kw["env"])
+                self.stdout = iter([])
+            def wait(self): return 0
+
+        tid = "test_provider_inject"
+        A.TASKS[tid] = {"status": "running", "log": [], "out_dir": "x", "proc": None}
+        try:
+            with patch.object(A.subprocess, "Popen", FakeProc):
+                A.run_pipeline(tid, mode="plan", topic="t", dataset="", rounds=3,
+                               out_dir=Path(tempfile.gettempdir()) / "ar_probe",
+                               api_key="sk-gpt-test-key-123456",
+                               base_url="https://api.openai.com/v1",
+                               model="gpt-4o-mini", extra_body="{}",
+                               param_style="auto")
+        finally:
+            A.TASKS.pop(tid, None)
+        env = seen[0]
+        self.assertEqual(env["OPENAI_BASE_URL"], "https://api.openai.com/v1")
+        self.assertEqual(env["OPENAI_MODEL"], "gpt-4o-mini")
+        self.assertEqual(env["LLM_EXTRA_BODY"], "{}")
+        self.assertNotIn("LLM_PARAM_STYLE", env)
+
+    def test_planner_env_priority(self):
+        """进程环境变量优先于 .env，否则换供应商时 Planner 会偷偷用回旧网关。"""
+        from unittest.mock import patch
+        import planner
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / ".env").write_text(
+                "OPENAI_BASE_URL=https://from-dotenv/v1\nOPENAI_MODEL=dotenv-model\n",
+                encoding="utf-8")
+            with patch.object(planner, "ROOT", Path(td)), \
+                    patch.dict(os.environ, {"OPENAI_BASE_URL": "https://from-process/v1"},
+                               clear=True):
+                env = planner._load_dotenv()
+        self.assertEqual(env["OPENAI_BASE_URL"], "https://from-process/v1")
+        self.assertEqual(env["OPENAI_MODEL"], "dotenv-model")
+
+    def test_param_style_for_reasoning_models(self):
+        from unittest.mock import patch
+        self.assertEqual(LLM.param_style("gpt-4o-mini"), "standard")
+        self.assertEqual(LLM.param_style("moonshot-v1-8k"), "standard")
+        self.assertEqual(LLM.param_style("gemini-2.5-flash"), "standard")
+        for m in ("o1", "o3-mini", "gpt-5", "deepseek-r1", "qwen-qwq-32b"):
+            self.assertEqual(LLM.param_style(m), "completion_tokens", m)
+        with patch.dict(os.environ, {"LLM_PARAM_STYLE": "standard"}):
+            self.assertEqual(LLM.param_style("o3-mini"), "standard")
+
+    def test_create_chat_degrades_on_param_error(self):
+        """严格端点不认 extra_body / 参数名时自动降级，非参数错误不瞎重试。"""
+        from types import SimpleNamespace
+
+        class Bad400(Exception):
+            status_code = 400
+        class Bad500(Exception):
+            status_code = 500
+
+        def make(behavior):
+            calls = []
+            class Comp:
+                def create(self, **kw):
+                    calls.append(kw)
+                    if behavior == "strict" and kw.get("extra_body"):
+                        raise Bad400("Unrecognized request argument: chat_template_kwargs")
+                    if behavior == "reasoning" and ("temperature" in kw or "max_tokens" in kw):
+                        raise Bad400("Unsupported parameter: 'max_tokens' is not supported")
+                    if behavior == "down":
+                        raise Bad500("server down")
+                    return SimpleNamespace(choices=[SimpleNamespace(
+                        message=SimpleNamespace(content="{}"))])
+            return SimpleNamespace(chat=SimpleNamespace(completions=Comp())), calls
+
+        msg = [{"role": "user", "content": "x"}]
+        c, calls = make("standard")
+        LLM.create_chat(c, "gpt-4o-mini", {}, msg)
+        self.assertIn("max_tokens", calls[-1])
+        self.assertNotIn("extra_body", calls[-1])
+
+        c, calls = make("standard")
+        LLM.create_chat(c, "o3-mini", {}, msg)
+        self.assertIn("max_completion_tokens", calls[-1])
+        self.assertNotIn("temperature", calls[-1])
+
+        c, calls = make("strict")
+        LLM.create_chat(c, "gpt-4o-mini", {"chat_template_kwargs": {"thinking": False}}, msg)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("extra_body", calls[-1])
+
+        c, calls = make("down")
+        with self.assertRaises(Bad500):
+            LLM.create_chat(c, "gpt-4o-mini", {}, msg)
+        self.assertEqual(len(calls), 1, "非参数错误不该白耗重试预算")
+
+    def test_short_key_is_allowed(self):
+        """本地/自建端点的短 Key 也要能配，别把整条通道判成没配。"""
+        self.assertTrue(LLM._real_key("sk-local"))
+        self.assertTrue(LLM._real_key("ollama"))
+        self.assertFalse(LLM._real_key("在此填入你的API_Key"))
+        self.assertFalse(LLM._real_key("your-api-key"))
+        self.assertFalse(LLM._real_key(""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
