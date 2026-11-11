@@ -86,14 +86,109 @@ def extract_fingerprint(text: str) -> dict:
 
 
 def _corpus_files(corpus_dir: str):
+    """只收能读的中文范文。PDF 提取失败的 txt（cid 乱码/纯英文扫描噪声）
+    汉字占比极低，混进参照库会把标尺拉歪，必须挡在外面。"""
     files = []
     for p in sorted(glob.glob(str(Path(corpus_dir) / "*.txt"))):
-        # 跳过 corpus 下的 _memory / schema 等说明性 txt（若存在）
         name = Path(p).name.lower()
         if name.startswith("readme") or "schema" in name:
             continue
+        text = Path(p).read_text(encoding="utf-8", errors="ignore")
+        han = sum(1 for c in text if "一" <= c <= "鿿")
+        if han < 1000 or (text and han / max(1, len(text)) < 0.05):
+            continue
         files.append(p)
     return files
+
+
+def reference_profile(corpus_dir: str = "corpus") -> dict:
+    """从高质量范文里抽出「专家评阅标尺」，供评审 Agent 当作参照注入。
+
+    这里不是训练模型，而是把清北范文的可观测质量特征整理成可核对的标尺：
+    篇幅、章节、文献、原创性、验证强度、论证密度。评阅时用它判断
+    「这篇论文写得像不像一篇好论文」，而不是只检查模板字段齐不齐。
+    """
+    docs = []
+    for cf in _corpus_files(corpus_dir):
+        t = Path(cf).read_text(encoding="utf-8", errors="ignore")
+        fp = extract_fingerprint(t)
+        cjk = max(1, fp.get("cjk_chars") or 1)
+        # 论证密度：因果/转折/证据类连接词每千字出现次数
+        causal = len(re.findall(r"因此|由于|从而|进而|由此|然而|相比之下|实验表明|结果表明|说明|证明", t))
+        fp["argument_markers_per_1k"] = round(causal * 1000 / cjk, 2)
+        fp["figure_table_refs"] = len(re.findall(r"图\s*\d|表\s*\d|式\s*\(|公式\s*\d", t))
+        docs.append({"file": Path(cf).name, "fingerprint": fp})
+
+    def _agg(key, agg=max):
+        vals = [d["fingerprint"].get(key) for d in docs if d["fingerprint"].get(key) is not None]
+        return agg(vals) if vals else None
+
+    typical = {
+        "cjk_chars": _agg("cjk_chars"),
+        "chapter_count": _agg("chapter_count"),
+        "ref_count": _agg("ref_count"),
+        "novelty_mentions": _agg("novelty_mentions"),
+        "formula_signals": _agg("formula_signals"),
+        "figure_table_refs": _agg("figure_table_refs"),
+        "argument_markers_per_1k": _agg("argument_markers_per_1k", lambda v: round(sum(v) / len(v), 2)),
+        "proposes_method": any(d["fingerprint"]["proposes_method"] for d in docs),
+        "has_innovation_section": any(d["fingerprint"]["has_innovation_section"] for d in docs),
+        "ablation_tuning": any(d["fingerprint"]["ablation_tuning"] for d in docs),
+        "multi_dataset": any(d["fingerprint"]["multi_dataset"] for d in docs),
+        "has_significance": any(d["fingerprint"]["has_significance"] for d in docs),
+        "has_multiseed": any(d["fingerprint"]["has_multiseed"] for d in docs),
+    }
+    names = {d["file"]: d["fingerprint"]["cjk_chars"] for d in docs}
+    rubric = (
+        "【高质量本科论文参照标尺（来自本地范文库，评阅时据此判断产出质量）】\n"
+        f"参照样本：{'、'.join(f'{k}（{v} 汉字）' for k, v in names.items()) or '暂无范文'}。\n"
+        f"范文典型水平：正文约 {typical['cjk_chars'] or 0} 汉字、"
+        f"{typical['chapter_count'] or 0} 个章节、{typical['ref_count'] or 0} 篇参考文献、"
+        f"{typical['formula_signals'] or 0} 处公式信号、{typical['figure_table_refs'] or 0} 处图表引用、"
+        f"每千字约 {typical['argument_markers_per_1k'] or 0} 处因果/证据连接词；"
+        + ("明确提出新方法、" if typical["proposes_method"] else "")
+        + ("设独立创新点小节、" if typical["has_innovation_section"] else "")
+        + ("做消融或超参寻优、" if typical["ablation_tuning"] else "")
+        + ("跨数据集验证、" if typical["multi_dataset"] else "")
+        + ("报告显著性检验。" if typical["has_significance"] else "")
+        + "\n评阅要求：把上述特征当作「好论文长什么样」的参照，重点判断论证是否成立、"
+          "证据是否支撑结论、章节是否真的承担了论证任务；不要因为模板字段齐全就判为高质量。"
+    )
+    all_txt = list(Path(corpus_dir).glob("*.txt"))
+    skipped = [q.name for q in all_txt if str(q) not in {d["file"] for d in docs}
+               and q.name not in {d["file"] for d in docs}
+               and str(q) not in {str(Path(corpus_dir) / d["file"]) for d in docs}]
+    if skipped:
+        rubric += "（范文库另有不可读样本已剔除：" + "、".join(skipped) + "；可往 corpus/ 放入更多高质量中文论文 txt 扩展标尺）"
+    return {"schema": "reference-profile/v1", "sources": docs,
+            "typical": typical, "rubric_text": rubric,
+            "readable_count": len(docs)}
+
+
+def quality_gap(md: str, corpus_dir: str = "corpus") -> str:
+    """网关不可用时的确定性质量差距：只写能从文本数出来的事实，不假装通读过。"""
+    fp = extract_fingerprint(md)
+    ref = reference_profile(corpus_dir)
+    t = ref["typical"]
+    lines = ["【范文对标（确定性信号，未做语义通读）】"]
+    checks = [
+        ("正文篇幅", fp["cjk_chars"], t.get("cjk_chars"), "汉字"),
+        ("章节数", fp["chapter_count"], t.get("chapter_count"), "章"),
+        ("参考文献", fp["ref_count"], t.get("ref_count"), "篇"),
+        ("公式信号", fp["formula_signals"], t.get("formula_signals"), "处"),
+        ("图表引用", len(re.findall(r"图\s*\d|表\s*\d|式\s*\(|公式\s*\d", md)), t.get("figure_table_refs"), "处"),
+    ]
+    for name, cur, refv, unit in checks:
+        if refv:
+            lines.append(f"- {name}：本文 {cur} {unit}，范文典型 {refv} {unit}"
+                         + ("（明显偏少）" if cur < refv * 0.6 else ""))
+    for label, key in [("方法原创性", "proposes_method"), ("独立创新点小节", "has_innovation_section"),
+                       ("消融/超参寻优", "ablation_tuning"), ("跨数据集验证", "multi_dataset"),
+                       ("显著性检验", "has_significance")]:
+        if t.get(key) and not fp.get(key):
+            lines.append(f"- 缺少范文具备的「{label}」信号")
+    lines.append("以上只为可核对的量与信号；论证是否成立、文字是否通顺，需模型通读后判断。")
+    return "\n".join(lines)
 
 
 def benchmark(paper_md_path: str, corpus_dir: str = "corpus") -> dict:

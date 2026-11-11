@@ -30,13 +30,20 @@ if str(ROOT) not in sys.path:
 
 from engine import llm_client as LLM  # noqa: E402
 
-PROMPT = """你是本科毕业论文的指导教师。请通读下面这篇论文，做**文本诊断**，不要打分、不要给等级。
+PROMPT = """你是本科毕业论文的评阅专家，手上有清北等高校高质量本科论文的参照标尺（见后）。
+请通读下面这篇论文，做**产出质量诊断**，不要打分、不要给等级。
+
+你的立场（重要）：规则系统已经查过引用编号、章节齐全、篇幅、零编造这些「有没有」，
+那不是你的工作。你只判断「写得好不好」——论证是否成立、证据是否支撑结论、
+文献是否真的被用起来、有没有独立见解、章节是否真的承担了论证任务、文字是否可读。
+不要因为模板字段齐全就判为高质量，也不要拿规则分数当依据。
 
 写成一份能让学生照着改的诊断意见，输出严格 JSON：
 
 {
   "verdict": "可直接提交 / 修改后可提交 / 需要较大修改 / 不建议提交 四选一",
   "overall": "300 字以内：这篇论文整体是什么水平、最影响质量的 2-3 件事是什么、能不能交。要具体，不要套话。",
+  "quality_vs_reference": "200 字以内：与参照范文相比，本篇在论证深度、证据链、原创性、文献运用上最实质的 2-3 个差距；讲内容，不要罗列数字或模板字段",
   "strengths": ["确实做得好的地方（2-4 条）"],
   "chapters": [
     {"chapter": "第N章 章名",
@@ -63,8 +70,29 @@ PROMPT = """你是本科毕业论文的指导教师。请通读下面这篇论�
 5. top_actions 最多 8 条，按对论文质量的影响从大到小排，优先写能立刻动手的；
 6. suggested_queries 必须是简短的英文检索短语（不要中文长句、不要整段解释），
    它们会被存进记忆，下一轮抓文献时并入检索计划；
-7. 只输出 JSON，不要解释、不要 markdown 代码块。
+7. 只输出 JSON，不要解释、不要 markdown 代码块；
+8. quality_vs_reference 必须结合后面给出的范文标尺来写，不许写「建议对标优秀论文」这类空话；
+9. 若正文是模板拼接稿（句子缺主语、中英混杂、研究问题被原样塞进摘要、文献流水账），
+   必须在 overall 里直接点名，这是最影响产出质量的问题，优先级高于任何结构建议。
 """
+
+
+def _reference_context(md: str) -> str:
+    """把本地范文的参照标尺 + 本篇确定性差距拼进评审上下文。
+
+    这是「学习高质量论文」的落点：不训练模型，而是把清北范文的可观测质量
+    特征整理成专家评阅的参照系，让模型按同一把尺子判断产出质量。
+    """
+    try:
+        import benchmark_corpus as BC
+        corpus = str(ROOT / "corpus")
+        ref = BC.reference_profile(corpus)
+        gap = BC.quality_gap(md, corpus)
+        return ("\n\n" + ref["rubric_text"] + "\n\n" + gap
+                + "\n\n【提醒】标尺里的量只是参照，最终判断要落到论证与文字本身。\n")
+    except Exception as e:  # noqa: BLE001
+        return f"\n\n（范文参照库不可用：{e}；请仅依据正文做质量判断）\n"
+
 
 
 def _fallback(md: str) -> dict:
@@ -93,6 +121,11 @@ def _fallback(md: str) -> dict:
         problems.append({"id": f"P{i:02d}", "quote": "", "why": t,
                          "how": "按该章应承担的论证任务补足实质内容，而不是加套话",
                          "severity": "中"})
+    try:
+        import benchmark_corpus as BC
+        _gap = BC.quality_gap(md, str(ROOT / "corpus"))
+    except Exception:
+        _gap = "（范文对标不可用）"
     return {
         "verdict": "未完成文本诊断（网关不可用）",
         "overall": "本次网关不可用，模型没有通读全文，因此不给出整体质量判断。"
@@ -104,6 +137,7 @@ def _fallback(md: str) -> dict:
                          "where": "", "why": p["why"]}
                         for i, p in enumerate(problems, 1)],
         "problems": problems,
+        "quality_gap": _gap,
         "provenance": "rule", "llm_available": False,
     }
 
@@ -124,9 +158,10 @@ def run(paper_path, out_dir=None, verdict: dict | None = None) -> dict:
             hints = "\n\n【系统已自动查出的线索（仍请自己通读核对）】\n" + "\n".join(
                 f"- {str(x)[:160]}" for x in bits)
 
+    reference = _reference_context(md)
     review = None
     if LLM.available():
-        full = PROMPT + hints + "\n\n【论文全文】\n" + md
+        full = PROMPT + reference + hints + "\n\n【论文全文】\n" + md
         tight = ("\n\n⚠️ 上一次输出不是合法 JSON。请只输出一个 JSON 对象，不要解释、"
                  "不要 markdown 代码块；每章最多 2 条 problems，top_actions 最多 6 条，"
                  "每条文字不超过 100 字。")
@@ -191,6 +226,19 @@ def run(paper_path, out_dir=None, verdict: dict | None = None) -> dict:
         review["feedback_queries_saved"] = 0
         review["applied_feedback"] = []
 
+    # 专家意见回流：写入反馈台账，并挂到 04_review.json 供下一轮写作读取。
+    # 规则兜底只记确定性差距，不冒充模型通读的结论。
+    try:
+        from engine import feedback as FB
+        _run_dir = str(out.parent)
+        review["feedback_records_saved"] = FB.record_expert_review(
+            review, run_dir=_run_dir,
+            topic=(verdict or {}).get("topic") or "",
+            review_brief=str(Path(_run_dir) / "04_review.json"))
+    except Exception:
+        review["feedback_records_saved"] = 0
+    review["reference_profile_used"] = True
+
     review["human_feedback_hint"] = (
         "对某条意见表态：python auto_research.py lit-pref --review-mark "
         "<产物目录> P01 accepted --note \"…\"；采纳/驳回会存进记忆并影响下一轮写作。")
@@ -209,6 +257,10 @@ def _render(r: dict) -> str:
          f"- 诊断方式：{'模型通读全文' if r.get('llm_available') else '规则兜底（未经模型通读）'}",
          f"- 无法核实的定位句：{r.get('dropped_unverifiable_quotes', 0)} 条（已删除）", "",
          "## 整体判断", "", r.get("overall") or "（无）", ""]
+    if r.get("quality_vs_reference"):
+        L += ["## 与高质量范文的实质差距", "", r["quality_vs_reference"], ""]
+    if r.get("quality_gap"):
+        L += ["## 范文对标（确定性信号）", "", r["quality_gap"], ""]
     if r.get("strengths"):
         L += ["## 做得好的地方", ""] + [f"- {x}" for x in r["strengths"]] + [""]
     L += ["## 逐章诊断", ""]

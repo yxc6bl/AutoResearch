@@ -30,6 +30,7 @@ CASES = ROOT / "memory" / "regression_cases.json"
 
 # 固定类型：新增类型要慎重，否则统计会碎掉
 TYPES = {
+    "专家评审": "通读全文后按影响排序的产出质量改进意见",
     "数据错配": "数据集与题目语义不符",
     "方法缺失": "题目点名的方法未执行或被跳过",
     "结构缺陷": "章节/字数/表格/图表缺失或比例失衡",
@@ -74,6 +75,45 @@ def add(detail: str, type: str = "其他", severity: str = "P2",
     with open(LEDGER, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return rec
+
+
+def record_expert_review(review: dict, run_dir: str = "", topic: str = "",
+                         review_brief: str | None = None) -> int:
+    """把专家式论文诊断的改进意见写进反馈台账，并挂到 04_review.json 供下一轮写作读取。
+
+    这是「评审 → 记忆 → 下一轮」的回流点：意见按影响排序，带证据（为什么）
+    和落点（改哪一章），不是一句「建议加强」。
+    """
+    actions = [a for a in (review.get("top_actions") or []) if isinstance(a, dict)][:8]
+    prov = "model" if review.get("llm_available") else "rule"
+    n = 0
+    for a in actions:
+        detail = str(a.get("action") or "").strip()
+        if not detail:
+            continue
+        sev = "P1" if int(a.get("priority") or 9) <= 2 else "P2"
+        add(detail=detail, type="专家评审", severity=sev, stage="paper_review",
+            run_dir=run_dir, topic=topic,
+            evidence=str(a.get("why") or "")[:200],
+            action=str(a.get("where") or "")[:200],
+            source="paper_review", provenance=prov,
+            confidence="high" if prov == "model" else "low")
+        n += 1
+    # 回流到写作端：AR_EXPERT_REVISE=1 时 _review_block 会把这些动作并入重写提示
+    if review_brief:
+        rp = Path(review_brief)
+        if rp.exists():
+            try:
+                d = json.loads(rp.read_text(encoding="utf-8"))
+                d["expert_actions"] = [
+                    {"id": a.get("id") or f"A{i:02d}", "action": str(a.get("action") or ""),
+                     "where": str(a.get("where") or ""), "why": str(a.get("why") or "")}
+                    for i, a in enumerate(actions, 1)]
+                d["expert_review_provenance"] = prov
+                rp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+    return n
 
 
 def load() -> list[dict]:

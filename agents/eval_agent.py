@@ -1495,6 +1495,16 @@ def run(paper_path, lit_candidates=None, store=None, out_path=None, mode: str = 
     overall = round(sum(WEIGHTS[k] * verdict["scores"][k] for k in WEIGHTS), 1)
     verdict["overall"] = overall
     verdict["scores"]["overall"] = overall
+    # 语义澄清：这个数只衡量「零编造/篇幅/结构/引用/格式」等可规则核验的合规度，
+    # 不是论文写得好不好。过去模板骨架也能拿 93 分，正是把两者混为一谈。
+    verdict["score_kind"] = "rule_compliance"
+    _lj = verdict.get("llm_judge") or {}
+    verdict["quality_assessment"] = {
+        "status": ("expert_done" if _lj.get("available") else "not_assessed"),
+        "rule_compliance_score": overall,
+        "expert_score": _lj.get("overall"),
+        "note": "规则分不代表产出质量；质量判断见 06_paper/08_paper_review.md 的专家诊断与范文对标。",
+    }
     grade = "不及格"
     for name, thr in GRADE_BANDS:
         if overall >= thr:

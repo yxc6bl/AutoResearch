@@ -504,8 +504,11 @@ class TestSpecCheck(unittest.TestCase):
                                       if i["status"] == "missing"])
 
     def test_complete_spec_is_100(self):
-        sc = check_spec("technical_report", json.loads(
-            (ROOT / "out_verify_technical_report" / "task_spec.json").read_text(encoding="utf-8")))
+        # 优先用历史产物；干净工程包里则读自带 fixture，保证解压即可跑全套测试
+        src = ROOT / "out_verify_technical_report" / "task_spec.json"
+        if not src.exists():
+            src = ROOT / "tests" / "fixtures" / "technical_report_spec.json"
+        sc = check_spec("technical_report", json.loads(src.read_text(encoding="utf-8")))
         self.assertTrue(sc["ok"])
         self.assertEqual(sc["score"], 100)
 
@@ -1177,6 +1180,71 @@ class TestPaperQualityGuards(unittest.TestCase):
                         "英文摘要不能混进中文方法名或中文数据集名")
         self.assertGreaterEqual(len(r["keywords"].split("；")), 3)
         self.assertEqual(_one_line("甲？\n乙？"), "甲。乙。")
+
+
+class TestExpertQualityReview(unittest.TestCase):
+    """评审 Agent 要按高质量范文判断产出质量，并把意见回流，不能只报规则分。"""
+
+    def test_reference_profile_skips_unreadable_corpus(self):
+        import benchmark_corpus as BC
+        r = BC.reference_profile("corpus")
+        self.assertGreaterEqual(r["readable_count"], 1)
+        names = [d["file"] for d in r["sources"]]
+        self.assertIn("pku_2024_thesis.txt", names)
+        self.assertNotIn("thu_2008_thesis.txt", names,
+                         "PDF 提取失败的乱码样本不能污染参照标尺")
+        self.assertIn("不要因为模板字段齐全就判为高质量", r["rubric_text"])
+
+    def test_quality_gap_reports_deterministic_facts(self):
+        import benchmark_corpus as BC
+        gap = BC.quality_gap("## 第1章 绪论\n\n很短的一段正文。", "corpus")
+        self.assertIn("明显偏少", gap)
+        self.assertIn("未做语义通读", gap)
+
+    def test_expert_prompt_and_fallback_are_quality_oriented(self):
+        from agents import paper_review_agent as PRA
+        self.assertIn("产出质量诊断", PRA.PROMPT)
+        self.assertIn("quality_vs_reference", PRA.PROMPT)
+        self.assertIn("模板拼接稿", PRA.PROMPT)
+        fb = PRA._fallback("## 第1章 绪论\n\n" + "正文。" * 30)
+        self.assertIn("范文对标", fb["quality_gap"])
+        self.assertFalse(fb["llm_available"])
+
+    def test_expert_feedback_feeds_back(self):
+        from unittest.mock import patch
+        from engine import feedback as FB
+        with tempfile.TemporaryDirectory() as td:
+            ledger = Path(td) / "feedback.jsonl"
+            brief = Path(td) / "04_review.json"
+            brief.write_text('{"hallucinations": []}', encoding="utf-8")
+            review = {"llm_available": True, "top_actions": [
+                {"id": "A01", "priority": 1, "action": "补一组跨数据集验证",
+                 "where": "第5章", "why": "结论只在单数据集上成立"}]}
+            with patch.object(FB, "LEDGER", ledger):
+                n = FB.record_expert_review(review, run_dir=td, topic="测试",
+                                            review_brief=str(brief))
+            self.assertEqual(n, 1)
+            rows = [json.loads(x) for x in ledger.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(rows[0]["type"], "专家评审")
+            self.assertEqual(rows[0]["provenance"], "model")
+            d = json.loads(brief.read_text(encoding="utf-8"))
+            self.assertEqual(d["expert_actions"][0]["action"], "补一组跨数据集验证")
+
+    def test_expert_actions_reach_rewrite_prompt_when_enabled(self):
+        from unittest.mock import patch
+        from paper.generate_paper import _review_digest
+        review = {"suggestions": [], "expert_actions": [
+            {"action": "把流水账文献改成按主题归类", "where": "第2章"}]}
+        self.assertEqual(_review_digest(review)["suggestions"], [],
+                         "默认不触发，避免只有风格建议时重写反而退步")
+        with patch.dict(os.environ, {"AR_EXPERT_REVISE": "1"}):
+            out = _review_digest(review)["suggestions"]
+        self.assertTrue(any("专家评阅" in x for x in out))
+
+    def test_verdict_marks_rule_score_as_not_quality(self):
+        src = (ROOT / "agents" / "eval_agent.py").read_text(encoding="utf-8")
+        self.assertIn('verdict["score_kind"] = "rule_compliance"', src)
+        self.assertIn('"quality_assessment"', src)
 
 
 if __name__ == "__main__":

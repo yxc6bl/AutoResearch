@@ -1099,7 +1099,7 @@ function renderHead(d){
       <div class="metric"><b>${num(s.chars)}</b><span>汉字</span></div>
       <div class="metric"><b>${num(s.distinct_refs || (d.literature || []).length)}</b><span>篇文献</span></div>
       <div class="metric"><b>${num(s.citations)}</b><span>处引用</span></div>
-      <div class="metric"><b>${score == null ? '—' : score}</b><span>综合评分</span></div>
+      <div class="metric"><b>${score == null ? '—' : score}</b><span>规则合规分</span></div>
     </div>
     <div class="head-actions">${actions.join('')}</div>`;
   $('#printBtn').onclick = () => { showTab('paper'); setTimeout(() => window.print(), 120); };
@@ -1183,7 +1183,7 @@ function ringSvg(pct){
         stroke-dasharray="${C.toFixed(1)}" data-off="${off.toFixed(1)}"
         style="stroke-dashoffset:${C.toFixed(1)}"></circle>
     </svg>
-    <div class="ring-num"><b>${pct}</b><span>综合评分</span></div>
+    <div class="ring-num"><b>${pct}</b><span>规则合规分</span></div>
   </div>`;
 }
 
@@ -1233,7 +1233,10 @@ function renderScore(d){
       </tbody></table></div>`;
   }
 
+  const qa = v.quality_assessment || {};
+  const qnote = `<div class="banner info"><b>规则分≠论文质量</b><span>这个分数只核验零编造、篇幅、结构、引用与格式等可规则检查的项；写得通不通、论证成不成立，看「文本诊断」栏的专家评阅与范文对标。${qa.status === 'expert_done' ? '本次模型评审已完成。' : '本次模型评审未完成，质量判断尚缺，不能据此判定论文好坏。'}</span></div>`;
   return `<div class="panel">
+    ${qnote}
     <div class="score-hero">
       ${ringSvg(pct)}
       <div class="score-meta">

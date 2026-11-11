@@ -1,0 +1,43 @@
+{
+  "title": "某高校教务数据中台建设项目实践报告",
+  "topic": "高校教务数据中台建设",
+  "literature_query": "university academic affairs data platform master data governance",
+  "institution_mode": "general",
+  "project_spec": {
+    "background": "学校教务、学工、图书等系统各自建库，数据口径不一致，报表需人工汇总。",
+    "objectives": [
+      "建立统一的教务主题数据模型",
+      "打通 4 个业务系统的主数据",
+      "提供自助报表与接口服务"
+    ],
+    "scope": "本期只覆盖教务与学工两个主题域，不含科研与财务。",
+    "tech_stack": [
+      "Python",
+      "Airflow",
+      "Doris",
+      "Kafka",
+      "Vue"
+    ],
+    "work_items": [
+      "阶段一：数据源梳理与口径对齐",
+      "阶段二：主题模型与 ETL 开发",
+      "阶段三：指标服务与报表开发",
+      "阶段四：联调、迁移与验收"
+    ],
+    "deliverables": [
+      "数据中台一套（含 ETL 作业与指标服务）",
+      "口径说明文档",
+      "运维手册"
+    ],
+    "acceptance": [
+      "核心报表与人工汇总结果逐项对齐",
+      "日报生成时间由人工 1 天缩短为自动出数",
+      "4 个源系统主数据一致率达标"
+    ],
+    "issues": [
+      "学号在历史库中存在一码多源，采用以教务库为主的仲裁规则",
+      "部分业务表缺时间戳，改用归档表补齐"
+    ]
+  },
+  "paper_type": "technical_report"
+}

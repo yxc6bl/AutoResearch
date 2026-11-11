@@ -2861,6 +2861,15 @@ def _review_digest(review: dict | None) -> dict:
               ((review.get("hallucinations") or []) + (review.get("unsupported_claims") or []))
               if str(x).strip()]
     suggestions = [str(x).strip() for x in (review.get("suggestions") or []) if str(x).strip()]
+    # 专家评阅的改进动作回流（默认关：实测「只有风格建议」直接重写容易退步，
+    # 所以由 AR_EXPERT_REVISE=1 显式开启，意见仍会无条件进反馈台账）。
+    if os.environ.get("AR_EXPERT_REVISE") == "1":
+        for a in (review.get("expert_actions") or []):
+            if not isinstance(a, dict):
+                continue
+            act = str(a.get("action") or "").strip()
+            if act:
+                suggestions.append(f"专家评阅（{str(a.get('where') or '全文')}）：{act}")
     # 同一条被两类清单重复收录时不重复列，避免提示词里同一句话出现两遍
     seen, uniq = set(), []
     for c in claims:
