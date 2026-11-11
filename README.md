@@ -55,6 +55,32 @@ WEB_HOST=127.0.0.1 WEB_PORT=5077 python web/app.py    # 本机换端口
   中途失败会停在出错阶段并把原因留在日志里。
 - 服务端只读工程根内的产物目录（`_safe_dir`），`/api/file` 也做了路径越权拦截。
 
+## 模型网关挂了怎么办
+
+`doctor` 报「模型不可用」、写作退回模板骨架、闸门 G03 判不可交付，都属于**同一个外部故障**：
+网关上游没响应。先确认是谁的锅（不要猜）：
+
+```bash
+python auto_research.py doctor
+curl -i https://apiai.sztu.edu.cn/v1/models
+```
+
+响应里出现 `Server: APISIX/...`、`X-APISIX-Upstream-Status: 502`，就是网关自己的上游挂了；
+同时访问 `https://api.github.com` 若正常，说明本机网络、证书、Key 都没问题。这种情况下
+换一个可用的 OpenAI 兼容端点就能恢复，代码不用改。文献源是另一套服务，不受影响。
+
+**方式一：直接换主通道**——改 `.env` 的三行 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`。
+新进程第一次握手就走新端点。
+
+**方式二：加一条备用通道**——在 `.env` 里按 `.env.example` 补 `_2` 后缀的四行，保留原网关。
+主通道连续失败 3 次会自动切过去；`available()` 探测也会逐条试完所有通道，不会只探主通道
+就判定「不可用」而把写作端按死在模板兜底。两条都挂才走确定性降级。
+
+换完执行 `python auto_research.py doctor` 确认「模型可用」，再重跑一次流水线拿可交付成稿。
+三个注意点：端点必须兼容 `/v1/chat/completions`；多数商用端点不认
+`chat_template_kwargs.thinking`，备用通道的 `LLM_EXTRA_BODY_2` 留 `{}`；模型要能稳定输出
+万字中文和 JSON（评审 Agent 走 `chat_json`），小模型会让评审链路退化。
+
 ## 论文类型（`--paper-type`）
 
 系统支持**六种**可插拔论文类型，`plan` / `run` / `from_title` 都接受 `--paper-type`

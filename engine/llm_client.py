@@ -194,6 +194,9 @@ def available() -> bool:
     """网关是否可用。带缓存：可用结果永久缓存，不可用只缓存 30 秒。
 
     负缓存必须过期，否则一次探测超时会毒化整个进程（见 _NEG_TTL 的注释）。
+    探测失败时要把已配置的通道逐条试完：只探主通道就判死，会让「备用通道」
+    形同虚设——写作端看到 False 直接走模板骨架，压根没机会触发 chat_text
+    里的自动故障转移，等于换个 API 也救不回来。
     """
     global _CACHE_AVAIL, _CACHE_AT
     now = time.time()
@@ -201,23 +204,28 @@ def available() -> bool:
         return True
     if _CACHE_AVAIL is False and (now - _CACHE_AT) < _NEG_TTL:
         return False
-    try:
-        c = _client_or_none()
-        if c is None:
-            _CACHE_AVAIL = False
+
+    n = len(channels())
+    for i in range(max(1, n)):
+        try:
+            c = _client_or_none()
+            if c is None:
+                break
+            client, model, extra = c
+            # 轻握手：极小 prompt 验证连通性与鉴权（带限流感知重试）
+            # 快速失败：探测只是决定「走 LM 还是走确定性兜底」，不值得长时间等待
+            _raw_chat(client, model, extra,
+                      [{"role": "user", "content": "ping"}], max_tokens=2,
+                      timeout=6, max_attempts=1)
+            _CACHE_AVAIL = True
             _CACHE_AT = now
-            return False
-        client, model, extra = c
-        # 轻握手：极小 prompt 验证连通性与鉴权（带限流感知重试）
-        # 快速失败：探测只是决定「走 LM 还是走确定性兜底」，不值得长时间等待
-        _raw_chat(client, model, extra,
-                  [{"role": "user", "content": "ping"}], max_tokens=2,
-                  timeout=6, max_attempts=1)
-        _CACHE_AVAIL = True
-    except Exception:
-        _CACHE_AVAIL = False
+            return True
+        except Exception:
+            if i + 1 < n and switch_channel():
+                continue
+    _CACHE_AVAIL = False
     _CACHE_AT = now
-    return _CACHE_AVAIL
+    return False
 
 
 def reset_cache() -> None:

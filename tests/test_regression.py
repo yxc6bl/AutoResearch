@@ -598,8 +598,6 @@ class TestLLMAvailabilityCache(unittest.TestCase):
             LLM._CACHE_AVAIL, LLM._CACHE_AT = orig_av, orig_at
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestSelectionLedger(unittest.TestCase):
@@ -916,3 +914,83 @@ class TestWebServerSafety(unittest.TestCase):
             self.assertIn("dir", r)
             self.assertIn("chars", r)
             self.assertTrue(r["chars"] > 0)
+
+
+class TestLLMChannelFailover(unittest.TestCase):
+    """换 API / 备用通道：总开关 available() 自己就得完成切换。
+
+    回归背景：只探主通道就判「不可用」时，写作端会直接走模板骨架，
+    chat_text 里的自动故障转移根本没机会触发，等于配了备用也白配。
+    """
+
+    def setUp(self):
+        from unittest.mock import patch
+        self.saved = (LLM._CACHE_AVAIL, LLM._CACHE_AT, LLM._ACTIVE_IDX[0],
+                      LLM._CB_FAILS[0], LLM._CB_OPEN[0])
+        LLM._CACHE_AVAIL, LLM._CACHE_AT = None, 0.0
+        LLM._ACTIVE_IDX[0], LLM._CB_FAILS[0], LLM._CB_OPEN[0] = 0, 0, False
+        self.patch = patch
+        self.chs = [
+            {"base": "http://bad/v1", "key": "k", "model": "main-model",
+             "extra": {}, "label": "主通道"},
+            {"base": "http://good/v1", "key": "k", "model": "backup-model",
+             "extra": {}, "label": "备用通道_2"},
+        ]
+
+    def tearDown(self):
+        (LLM._CACHE_AVAIL, LLM._CACHE_AT, LLM._ACTIVE_IDX[0],
+         LLM._CB_FAILS[0], LLM._CB_OPEN[0]) = self.saved
+
+    def _client(self):
+        model = "main-model" if LLM.current_channel() == 0 else "backup-model"
+        return (object(), model, {})
+
+    def test_available_switches_to_backup(self):
+        """主通道 502、备用正常：available() 必须返回 True 并切到备用。"""
+        calls = []
+
+        def fake_raw(client, model, extra, messages, **kw):
+            calls.append(model)
+            if model == "main-model":
+                raise RuntimeError("502 Bad Gateway")
+            return object()
+
+        with self.patch.object(LLM, "channels", return_value=self.chs), \
+                self.patch.object(LLM, "_client_or_none", side_effect=self._client), \
+                self.patch.object(LLM, "_raw_chat", side_effect=fake_raw), \
+                self.patch("builtins.print"):
+            self.assertTrue(LLM.available())
+        self.assertEqual(calls, ["main-model", "backup-model"])
+        self.assertEqual(LLM._ACTIVE_IDX[0], 1)
+
+    def test_all_channels_down(self):
+        """所有通道都挂：判不可用，且负缓存时间戳刷新。"""
+        calls = []
+
+        def fake_raw(client, model, extra, messages, **kw):
+            calls.append(model)
+            raise RuntimeError("502 Bad Gateway")
+
+        with self.patch.object(LLM, "channels", return_value=self.chs), \
+                self.patch.object(LLM, "_client_or_none", side_effect=self._client), \
+                self.patch.object(LLM, "_raw_chat", side_effect=fake_raw), \
+                self.patch("builtins.print"):
+            self.assertFalse(LLM.available())
+        self.assertEqual(len(calls), 2, "两条通道都要试过才能下结论")
+        self.assertGreaterEqual(LLM._CACHE_AT, time.time() - 2)
+
+    def test_single_channel_unchanged(self):
+        """只有一条通道时行为不变：不切换、不误报可用。"""
+        single = [self.chs[0]]
+        with self.patch.object(LLM, "channels", return_value=single), \
+                self.patch.object(LLM, "_client_or_none", return_value=(object(), "main-model", {})), \
+                self.patch.object(LLM, "_raw_chat", side_effect=RuntimeError("502")), \
+                self.patch.object(LLM, "switch_channel", wraps=LLM.switch_channel) as sw, \
+                self.patch("builtins.print"):
+            self.assertFalse(LLM.available())
+        sw.assert_not_called()
+        self.assertEqual(LLM._ACTIVE_IDX[0], 0)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
